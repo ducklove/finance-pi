@@ -1,0 +1,15 @@
+[Unit]
+Description=finance-pi daily data maintenance
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=pi
+Group=pi
+WorkingDirectory=/opt/finance-pi
+EnvironmentFile=-/opt/finance-pi/.env
+ExecStart=/opt/finance-pi/.venv/bin/python -m finance_pi.cli.app daily --root /opt/finance-pi
+Nice=5
+IOSchedulingClass=best-effort
+IOSchedulingPriority=6

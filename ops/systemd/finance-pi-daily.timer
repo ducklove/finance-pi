@@ -1,0 +1,10 @@
+[Unit]
+Description=Run finance-pi daily after Korean market close
+
+[Timer]
+OnCalendar=Mon..Fri 17:30:00
+Persistent=true
+RandomizedDelaySec=10m
+
+[Install]
+WantedBy=timers.target

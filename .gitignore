@@ -12,6 +12,9 @@ htmlcov/
 .venv/
 venv/
 env/
+.env
+.env.*
+!.env.example
 
 # Local data lake and generated reports
 data/

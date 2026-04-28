@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import importlib.util
+import platform
+import sys
 from datetime import date
 from pathlib import Path
 
@@ -18,6 +21,25 @@ reports_app = typer.Typer(help="Report generation commands")
 app.add_typer(catalog_app, name="catalog")
 app.add_typer(factors_app, name="factors")
 app.add_typer(reports_app, name="reports")
+
+
+@app.command("doctor")
+def doctor(root: Path = typer.Option(Path("."), help="Workspace root")) -> None:
+    """Print a small server readiness report."""
+
+    paths = ProjectPaths(root=root)
+    typer.echo(f"Python: {sys.version.split()[0]}")
+    typer.echo(f"Platform: {platform.platform()}")
+    typer.echo(f"Machine: {platform.machine()}")
+    typer.echo(f"Workspace: {paths.root.resolve()}")
+    typer.echo(f"Data root: {paths.data_root.resolve()}")
+
+    for module in ["polars", "duckdb", "pydantic", "typer", "httpx"]:
+        status = "OK" if importlib.util.find_spec(module) else "MISSING"
+        typer.echo(f"{module}: {status}")
+
+    if platform.machine() in {"armv7l", "armv6l"}:
+        typer.echo("Warning: 32-bit Raspberry Pi OS is not recommended for DuckDB/Polars.")
 
 
 @app.command("init")
@@ -74,6 +96,36 @@ def generate_fraud_report(
     path = paths.data_root / "reports" / "backtest_fraud" / f"{parsed_date.isoformat()}.html"
     empty_fraud_report(parsed_date).write(path)
     typer.echo(path)
+
+
+@app.command("daily")
+def run_daily(
+    root: Path = typer.Option(Path("."), help="Workspace root"),
+    report_date: str | None = typer.Option(None, help="Report date as YYYY-MM-DD"),
+) -> None:
+    """Run the daily local maintenance job.
+
+    Live source ingestion will plug into this command once the KRX/OpenDART/KIS
+    adapters are configured. For now it guarantees the data lake layout,
+    DuckDB catalog, and baseline reports exist.
+    """
+
+    parsed_date = _parse_report_date(report_date)
+    paths = ProjectPaths(root=root)
+    DataLakeLayout(paths.data_root).ensure_base_dirs()
+    created = CatalogBuilder(paths.data_root, paths.catalog_path).build()
+
+    dq_path = paths.data_root / "reports" / "data_quality" / f"{parsed_date.isoformat()}.html"
+    fraud_path = (
+        paths.data_root / "reports" / "backtest_fraud" / f"{parsed_date.isoformat()}.html"
+    )
+    empty_data_quality_report(parsed_date).write(dq_path)
+    empty_fraud_report(parsed_date).write(fraud_path)
+
+    typer.echo(f"Catalog: {paths.catalog_path}")
+    typer.echo(f"Views: {len(created)}")
+    typer.echo(f"Data quality report: {dq_path}")
+    typer.echo(f"Fraud report: {fraud_path}")
 
 
 def _parse_report_date(value: str | None) -> date:

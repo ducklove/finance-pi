@@ -21,6 +21,18 @@ pytest
 
 The local data lake is created under `data/` and is intentionally ignored by Git.
 
+## Raspberry Pi Server
+
+Use a 64-bit Raspberry Pi OS image and put `data/` on an external SSD/NVMe for
+real backfills. See [docs/raspberry-pi.md](docs/raspberry-pi.md) for a complete
+server runbook, including `.env`, smoke tests, and systemd timer setup.
+
+The daily server entrypoint is:
+
+```bash
+python -m finance_pi.cli.app daily --root .
+```
+
 ## Current Scope
 
 This repository is bootstrapped with the core package structure, storage/catalog
