@@ -36,6 +36,9 @@ class RuntimeSettings:
     krx_openapi_key: str | None = None
     krx_base_url: str = "https://data-dbg.krx.co.kr"
     krx_stock_daily_path: str = "/svc/apis/sto/stk_bydd_trd"
+    krx_kospi_daily_path: str = "/svc/apis/sto/stk_bydd_trd"
+    krx_kosdaq_daily_path: str = "/svc/apis/sto/ksq_bydd_trd"
+    krx_markets: tuple[str, ...] = ("KOSPI", "KOSDAQ")
     opendart_api_key: str | None = None
     opendart_base_url: str = "https://opendart.fss.or.kr"
     kis_base_url: str = "https://openapi.koreainvestment.com:9443"
@@ -51,6 +54,13 @@ class RuntimeSettings:
             krx_openapi_key=_env_first("KRX_OPENAPI_KEY", "KRX_AUTH_KEY"),
             krx_base_url=os.getenv("KRX_BASE_URL", cls.krx_base_url),
             krx_stock_daily_path=os.getenv("KRX_STOCK_DAILY_PATH", cls.krx_stock_daily_path),
+            krx_kospi_daily_path=os.getenv("KRX_KOSPI_DAILY_PATH", cls.krx_kospi_daily_path),
+            krx_kosdaq_daily_path=os.getenv("KRX_KOSDAQ_DAILY_PATH", cls.krx_kosdaq_daily_path),
+            krx_markets=tuple(
+                market.strip().upper()
+                for market in os.getenv("KRX_MARKETS", ",".join(cls.krx_markets)).split(",")
+                if market.strip()
+            ),
             opendart_api_key=_env_first("OPENDART_API_KEY", "DART_API_KEY"),
             opendart_base_url=os.getenv("OPENDART_BASE_URL", cls.opendart_base_url),
             kis_base_url=os.getenv("KIS_BASE_URL", cls.kis_base_url),
@@ -99,5 +109,5 @@ def _env_first(*names: str) -> str | None:
     for name in names:
         value = os.getenv(name)
         if value:
-            return value
+            return value.strip()
     return None

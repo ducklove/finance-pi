@@ -36,7 +36,7 @@ class HttpJsonClient:
     ) -> dict[str, Any]:
         with httpx.Client(base_url=self.base_url, timeout=self.timeout) as client:
             response = client.get(path, params=params, headers=self._headers(headers))
-            response.raise_for_status()
+            _raise_for_status(self.source, response)
             data = response.json()
             if not isinstance(data, dict):
                 raise SourceApiError(self.source, "expected JSON object", payload=data)
@@ -57,7 +57,7 @@ class HttpJsonClient:
     ) -> bytes:
         with httpx.Client(base_url=self.base_url, timeout=self.timeout) as client:
             response = client.get(path, params=params, headers=self._headers(headers))
-            response.raise_for_status()
+            _raise_for_status(self.source, response)
             return response.content
 
     @retry(
@@ -75,7 +75,7 @@ class HttpJsonClient:
     ) -> dict[str, Any]:
         with httpx.Client(base_url=self.base_url, timeout=self.timeout) as client:
             response = client.post(path, json=json, headers=self._headers(headers))
-            response.raise_for_status()
+            _raise_for_status(self.source, response)
             data = response.json()
             if not isinstance(data, dict):
                 raise SourceApiError(self.source, "expected JSON object", payload=data)
@@ -85,3 +85,14 @@ class HttpJsonClient:
         merged = dict(self.default_headers or {})
         merged.update(headers or {})
         return merged
+
+
+def _raise_for_status(source: str, response: httpx.Response) -> None:
+    try:
+        response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        body = response.text[:500]
+        raise SourceApiError(
+            source,
+            f"HTTP {response.status_code} {response.reason_phrase} for {response.url}; body={body}",
+        ) from exc

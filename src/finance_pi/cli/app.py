@@ -76,6 +76,36 @@ def doctor(root: Path = typer.Option(Path("."), help="Workspace root")) -> None:
         typer.echo("Warning: 32-bit Raspberry Pi OS is not recommended for DuckDB/Polars.")
 
 
+@app.command("check-krx")
+def check_krx(
+    check_date: str,
+    root: Path = typer.Option(Path("."), help="Workspace root"),
+) -> None:
+    """Call KRX once per configured market and print authorization diagnostics."""
+
+    paths = ProjectPaths(root=root)
+    settings = RuntimeSettings.load(paths.root)
+    if not settings.krx_openapi_key:
+        raise typer.BadParameter("KRX_OPENAPI_KEY is required")
+
+    client = _krx_client(settings)
+    date_value = _parse_report_date(check_date)
+    for market, path in _krx_market_paths(settings).items():
+        try:
+            payload = client.get_json(path, params={"basDd": date_value.strftime("%Y%m%d")})
+            rows = payload.get("OutBlock_1", [])
+            count = len(rows) if isinstance(rows, list) else 0
+            typer.echo(f"{market}: OK rows={count} path={path}")
+        except Exception as exc:  # noqa: BLE001
+            typer.echo(f"{market}: FAIL path={path}")
+            typer.echo(str(exc))
+            typer.echo(
+                "KRX 401 usually means the key is expired, whitespace-corrupted, or this "
+                "specific stock API service was not approved in the KRX Open API portal."
+            )
+            raise typer.Exit(code=1) from exc
+
+
 @app.command("init")
 def init_workspace(root: Path = typer.Option(Path("."), help="Workspace root")) -> None:
     paths = ProjectPaths(root=root)
@@ -123,12 +153,9 @@ def ingest_krx(
     adapter = KrxDailyAdapter(
         layout=layout,
         writer=ParquetDatasetWriter(),
-        client=HttpJsonClient(
-            "krx",
-            settings.krx_base_url,
-            default_headers={"AUTH_KEY": settings.krx_openapi_key},
-        ),
+        client=_krx_client(settings),
         daily_path=settings.krx_stock_daily_path,
+        market_paths=_krx_market_paths(settings),
     )
     _print_results(
         IngestOrchestrator([adapter]).run(_parse_report_date(since), _parse_report_date(until))
@@ -234,6 +261,53 @@ def build_everything(root: Path = typer.Option(Path("."), help="Workspace root")
     _print_summaries(build_all(ProjectPaths(root=root).data_root))
 
 
+@app.command("bootstrap")
+def bootstrap(
+    since: str = typer.Option(..., help="Initial backfill start date as YYYY-MM-DD"),
+    until: str | None = typer.Option(None, help="Initial backfill end date as YYYY-MM-DD"),
+    root: Path = typer.Option(Path("."), help="Workspace root"),
+    skip_krx: bool = typer.Option(False, help="Skip KRX price backfill"),
+    skip_dart_company: bool = typer.Option(False, help="Skip DART corpCode snapshot"),
+    strict: bool = typer.Option(True, help="Fail if a configured live source fails"),
+) -> None:
+    """Run the first real bootstrap: source backfill, transforms, catalog, reports."""
+
+    paths = ProjectPaths(root=root)
+    settings = RuntimeSettings.load(paths.root)
+    start = _parse_report_date(since)
+    end = _parse_report_date(until) if until else _previous_weekday(date.today())
+    DataLakeLayout(paths.data_root).ensure_base_dirs()
+    failures: list[str] = []
+
+    if not skip_krx:
+        if settings.has_krx:
+            try:
+                ingest_krx(start.isoformat(), end.isoformat(), paths.root)
+            except Exception as exc:  # noqa: BLE001
+                failures.append(f"KRX backfill failed: {exc}")
+        else:
+            failures.append("KRX backfill skipped: KRX_OPENAPI_KEY missing")
+
+    if not skip_dart_company:
+        if settings.has_opendart:
+            try:
+                ingest_dart_company(end.isoformat(), paths.root)
+            except Exception as exc:  # noqa: BLE001
+                failures.append(f"OpenDART company ingest failed: {exc}")
+        else:
+            failures.append("OpenDART company ingest skipped: OPENDART_API_KEY missing")
+
+    for message in failures:
+        typer.echo(message)
+    if strict and failures:
+        raise typer.Exit(code=1)
+
+    _print_summaries(build_all(paths.data_root))
+    created = CatalogBuilder(paths.data_root, paths.catalog_path).build()
+    typer.echo(f"Catalog: {paths.catalog_path}")
+    typer.echo(f"Views: {len(created)}")
+
+
 @build_app.command("silver-prices")
 def build_cmd_silver_prices(root: Path = typer.Option(Path("."), help="Workspace root")) -> None:
     _print_summaries(build_silver_prices(ProjectPaths(root=root).data_root))
@@ -332,6 +406,7 @@ def run_daily(
     root: Path = typer.Option(Path("."), help="Workspace root"),
     report_date: str | None = typer.Option(None, help="Report date as YYYY-MM-DD"),
     ingest: bool = typer.Option(True, help="Attempt live source ingest when keys are configured"),
+    strict: bool = typer.Option(True, help="Fail if a configured live source fails"),
 ) -> None:
     """Run the daily local maintenance job.
 
@@ -345,7 +420,11 @@ def run_daily(
     settings = RuntimeSettings.load(paths.root)
     DataLakeLayout(paths.data_root).ensure_base_dirs()
     if ingest:
-        _run_daily_ingest(paths, settings, parsed_date)
+        failures = _run_daily_ingest(paths, settings, parsed_date)
+        for failure in failures:
+            typer.echo(failure)
+        if strict and failures:
+            raise typer.Exit(code=1)
     summaries = build_all(paths.data_root)
     created = CatalogBuilder(paths.data_root, paths.catalog_path).build()
 
@@ -382,13 +461,39 @@ def _opendart_client(settings: RuntimeSettings) -> OpenDartClient:
     )
 
 
-def _run_daily_ingest(paths: ProjectPaths, settings: RuntimeSettings, report_date: date) -> None:
-    start = _previous_weekday(report_date)
+def _krx_client(settings: RuntimeSettings) -> HttpJsonClient:
+    if not settings.krx_openapi_key:
+        raise typer.BadParameter("KRX_OPENAPI_KEY is required")
+    return HttpJsonClient(
+        "krx",
+        settings.krx_base_url,
+        default_headers={
+            "AUTH_KEY": settings.krx_openapi_key.strip(),
+            "Accept": "application/json",
+        },
+    )
+
+
+def _krx_market_paths(settings: RuntimeSettings) -> dict[str, str]:
+    all_paths = {
+        "KOSPI": settings.krx_kospi_daily_path,
+        "KOSDAQ": settings.krx_kosdaq_daily_path,
+    }
+    return {market: all_paths[market] for market in settings.krx_markets if market in all_paths}
+
+
+def _run_daily_ingest(
+    paths: ProjectPaths,
+    settings: RuntimeSettings,
+    report_date: date,
+) -> list[str]:
+    start = _previous_weekday(report_date - timedelta(days=1))
+    failures: list[str] = []
     if settings.has_krx:
         try:
             ingest_krx(start.isoformat(), start.isoformat(), paths.root)
         except Exception as exc:  # noqa: BLE001
-            typer.echo(f"KRX ingest failed: {exc}")
+            failures.append(f"KRX ingest failed: {exc}")
     else:
         typer.echo("KRX ingest skipped: KRX_OPENAPI_KEY missing")
 
@@ -396,9 +501,10 @@ def _run_daily_ingest(paths: ProjectPaths, settings: RuntimeSettings, report_dat
         try:
             ingest_dart_filings(start.isoformat(), report_date.isoformat(), paths.root)
         except Exception as exc:  # noqa: BLE001
-            typer.echo(f"OpenDART filings ingest failed: {exc}")
+            failures.append(f"OpenDART filings ingest failed: {exc}")
     else:
         typer.echo("OpenDART filings ingest skipped: OPENDART_API_KEY missing")
+    return failures
 
 
 def _previous_weekday(value: date) -> date:

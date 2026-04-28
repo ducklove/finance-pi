@@ -25,6 +25,7 @@ The local data lake is created under `data/` and is intentionally ignored by Git
 
 ```bash
 # Source ingest
+python -m finance_pi.cli.app check-krx 2026-04-28
 python -m finance_pi.cli.app ingest krx --since 2026-04-29 --until 2026-04-29
 python -m finance_pi.cli.app ingest dart-company
 python -m finance_pi.cli.app ingest dart-filings --since 2026-04-28 --until 2026-04-29
@@ -41,6 +42,17 @@ python -m finance_pi.cli.app backtest run --factor momentum_12_1 --start 2024-01
 python -m finance_pi.cli.app reports dq --report-date 2026-04-29
 python -m finance_pi.cli.app reports fraud --report-date 2026-04-29
 ```
+
+`daily` is a one-day incremental job. For the first server run, use `bootstrap`
+with a real date range:
+
+```bash
+python -m finance_pi.cli.app bootstrap --since 2024-01-01 --until 2026-04-28 --root .
+```
+
+If KRX returns `401`, run `check-krx` and verify that the key is approved for
+both KRX stock APIs in the portal: `stk_bydd_trd` for KOSPI and `ksq_bydd_trd`
+for KOSDAQ. A key can exist but still lack service-level approval.
 
 ## Raspberry Pi Server
 

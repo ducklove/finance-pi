@@ -88,9 +88,30 @@ After `.env` is configured, run the real daily path:
 python -m finance_pi.cli.app daily --root .
 ```
 
+`daily` is intentionally small: it is the recurring one-day incremental job. It
+will finish quickly unless the source APIs are slow. The first real server run
+should be a backfill:
+
+```bash
+python -m finance_pi.cli.app check-krx 2026-04-28 --root .
+python -m finance_pi.cli.app bootstrap --since 2024-01-01 --until 2026-04-28 --root .
+```
+
+For a larger historical load, widen `--since`. Start with a short range first so
+KRX authorization problems are visible before launching a long job.
+
+If KRX returns `401 Unauthorized`, the usual causes are:
+
+- the API key has expired or was copied with hidden whitespace
+- the KRX Open API portal has not approved the specific stock API service
+- only one of the two stock APIs was approved:
+  - KOSPI: `/svc/apis/sto/stk_bydd_trd`
+  - KOSDAQ: `/svc/apis/sto/ksq_bydd_trd`
+
 Manual source commands are also available:
 
 ```bash
+python -m finance_pi.cli.app check-krx 2026-04-28
 python -m finance_pi.cli.app ingest krx --since 2026-04-29 --until 2026-04-29
 python -m finance_pi.cli.app ingest dart-company
 python -m finance_pi.cli.app ingest dart-filings --since 2026-04-28 --until 2026-04-29

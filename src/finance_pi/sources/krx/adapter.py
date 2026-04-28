@@ -26,6 +26,7 @@ class KrxDailyAdapter:
     writer: ParquetDatasetWriter
     client: HttpJsonClient | None = None
     daily_path: str = "/svc/apis/sto/stk_bydd_trd"
+    market_paths: dict[str, str] | None = None
     name: str = "krx"
 
     def list_pending(self, since: date, until: date) -> Iterable[IngestUnit]:
@@ -34,7 +35,7 @@ class KrxDailyAdapter:
             yield IngestUnit(
                 source=self.name,
                 logical_date=current,
-                endpoint=self.daily_path,
+                endpoint="krx_daily",
                 params={"date": current.isoformat()},
             )
             current += timedelta(days=1)
@@ -42,11 +43,13 @@ class KrxDailyAdapter:
     def fetch(self, unit: IngestUnit) -> RawBatch:
         if self.client is None:
             raise RuntimeError("configure a KRX HTTP client before live ingest")
-        payload = self.client.get_json(
-            self.daily_path,
-            params={"basDd": format_yyyymmdd(unit.logical_date)},
-        )
-        rows = _extract_rows(payload)
+        rows: list[dict[str, Any]] = []
+        for market, path in self._market_paths().items():
+            payload = self.client.get_json(
+                path,
+                params={"basDd": format_yyyymmdd(unit.logical_date)},
+            )
+            rows.extend(_tag_market(row, market) for row in _extract_rows(payload))
         return RawBatch(
             unit=unit,
             rows=[normalize_krx_daily_row(row, unit.logical_date) for row in rows],
@@ -69,30 +72,33 @@ class KrxDailyAdapter:
         )
         return WriteResult(path=path, rows=len(rows))
 
+    def _market_paths(self) -> dict[str, str]:
+        if self.market_paths:
+            return self.market_paths
+        return {"KOSPI": self.daily_path}
+
 
 def normalize_krx_daily_row(row: dict[str, Any], logical_date: date) -> dict[str, Any]:
-    ticker = str(
-        value_for(row, "ISU_SRT_CD", "isu_srt_cd", "ticker", "종목코드", default="")
-    ).zfill(6)
-    name = str(value_for(row, "ISU_ABBRV", "isu_abbrv", "name", "종목명", default=ticker))
+    ticker = str(value_for(row, "ISU_SRT_CD", "isu_srt_cd", "ticker", default="")).zfill(6)
+    name = str(value_for(row, "ISU_ABBRV", "isu_abbrv", "name", default=ticker))
     return {
         "date": logical_date,
         "ticker": ticker,
         "isin": value_for(row, "ISU_CD", "isu_cd", "isin"),
         "name": name,
-        "market": str(value_for(row, "MKT_NM", "mkt_nm", "market", "시장구분", default="KRX")),
-        "open": parse_float(value_for(row, "TDD_OPNPRC", "open", "시가"), default=0.0),
-        "high": parse_float(value_for(row, "TDD_HGPRC", "high", "고가"), default=0.0),
-        "low": parse_float(value_for(row, "TDD_LWPRC", "low", "저가"), default=0.0),
-        "close": parse_float(value_for(row, "TDD_CLSPRC", "close", "종가"), default=0.0),
-        "volume": parse_int(value_for(row, "ACC_TRDVOL", "volume", "거래량"), default=0),
+        "market": str(value_for(row, "MKT_NM", "mkt_nm", "market", "_market", default="KRX")),
+        "open": parse_float(value_for(row, "TDD_OPNPRC", "open"), default=0.0),
+        "high": parse_float(value_for(row, "TDD_HGPRC", "high"), default=0.0),
+        "low": parse_float(value_for(row, "TDD_LWPRC", "low"), default=0.0),
+        "close": parse_float(value_for(row, "TDD_CLSPRC", "close"), default=0.0),
+        "volume": parse_int(value_for(row, "ACC_TRDVOL", "volume"), default=0),
         "trading_value": parse_int(
-            value_for(row, "ACC_TRDVAL", "trading_value", "거래대금"),
+            value_for(row, "ACC_TRDVAL", "trading_value"),
             default=0,
         ),
-        "market_cap": parse_int(value_for(row, "MKTCAP", "market_cap", "시가총액"), default=None),
+        "market_cap": parse_int(value_for(row, "MKTCAP", "market_cap"), default=None),
         "listed_shares": parse_int(
-            value_for(row, "LIST_SHRS", "listed_shares", "상장주식수"),
+            value_for(row, "LIST_SHRS", "listed_shares"),
             default=None,
         ),
     }
@@ -106,3 +112,9 @@ def _extract_rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
     if payload.get("result") and not isinstance(payload["result"], list):
         raise SourceApiError("krx", "unexpected result payload", payload=payload)
     return []
+
+
+def _tag_market(row: dict[str, Any], market: str) -> dict[str, Any]:
+    tagged = dict(row)
+    tagged.setdefault("_market", market)
+    return tagged
