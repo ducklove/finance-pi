@@ -1,0 +1,119 @@
+from __future__ import annotations
+
+from datetime import date
+
+import polars as pl
+
+from finance_pi.reports import build_data_quality_report, build_fraud_report
+from finance_pi.storage import DataLakeLayout, ParquetDatasetWriter
+from finance_pi.transforms import build_all
+
+
+def test_build_all_promotes_bronze_to_gold(tmp_path) -> None:
+    layout = DataLakeLayout(tmp_path)
+    layout.ensure_base_dirs()
+    writer = ParquetDatasetWriter()
+
+    writer.write(
+        pl.DataFrame(
+            [
+                {
+                    "date": date(2024, 1, 2),
+                    "ticker": "005930",
+                    "isin": "KR7005930003",
+                    "name": "삼성전자",
+                    "market": "KOSPI",
+                    "open": 100.0,
+                    "high": 110.0,
+                    "low": 90.0,
+                    "close": 100.0,
+                    "volume": 10,
+                    "trading_value": 1000,
+                    "market_cap": 1_000_000,
+                    "listed_shares": 10_000,
+                }
+            ]
+        ),
+        layout.partition_path("bronze.krx_daily_raw", date(2024, 1, 2)),
+    )
+    writer.write(
+        pl.DataFrame(
+            [
+                {
+                    "date": date(2024, 1, 3),
+                    "ticker": "005930",
+                    "isin": "KR7005930003",
+                    "name": "삼성전자",
+                    "market": "KOSPI",
+                    "open": 100.0,
+                    "high": 120.0,
+                    "low": 95.0,
+                    "close": 110.0,
+                    "volume": 20,
+                    "trading_value": 2200,
+                    "market_cap": 1_100_000,
+                    "listed_shares": 10_000,
+                }
+            ]
+        ),
+        layout.partition_path("bronze.krx_daily_raw", date(2024, 1, 3)),
+    )
+    writer.write(
+        pl.DataFrame(
+            [
+                {
+                    "snapshot_dt": date(2024, 1, 3),
+                    "corp_code": "00126380",
+                    "corp_name": "삼성전자",
+                    "stock_code": "005930",
+                    "modify_date": "20240103",
+                }
+            ]
+        ),
+        layout.partition_path("bronze.dart_company_raw", date(2024, 1, 3)),
+    )
+    writer.write(
+        pl.DataFrame(
+            [
+                {
+                    "security_id": None,
+                    "corp_code": "00126380",
+                    "fiscal_period_end": date(2023, 12, 31),
+                    "event_date": date(2023, 12, 31),
+                    "rcept_dt": date(2024, 1, 2),
+                    "available_date": date(2024, 1, 2),
+                    "report_type": "11011",
+                    "account_id": "ifrs-full_Assets",
+                    "account_name": "Assets",
+                    "amount": 1000.0,
+                    "is_consolidated": True,
+                    "accounting_basis": "K-IFRS",
+                }
+            ]
+        ),
+        layout.partition_path("bronze.dart_financials_raw", date(2024, 1, 2)),
+    )
+
+    summaries = build_all(tmp_path)
+
+    assert {summary.dataset for summary in summaries} >= {
+        "silver.prices",
+        "gold.security_master",
+        "gold.daily_prices_adj",
+        "gold.fundamentals_pit",
+    }
+    master = pl.read_parquet(tmp_path / "gold" / "security_master.parquet")
+    assert master.select("corp_code").item() == "00126380"
+    prices = pl.read_parquet(
+        tmp_path / "gold" / "daily_prices_adj" / "dt=2024-01-03" / "part.parquet"
+    )
+    assert prices.select("return_1d").item() == 0.1
+    pit = pl.read_parquet(
+        tmp_path / "gold" / "fundamentals_pit" / "dt=2024-01-03" / "part.parquet"
+    )
+    assert pit.select("amount").item() == 1000.0
+
+    dq = build_data_quality_report(tmp_path, date(2024, 1, 3))
+    fraud = build_fraud_report(tmp_path, date(2024, 1, 3))
+    assert dq.checks
+    assert fraud.checks

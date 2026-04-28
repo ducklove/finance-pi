@@ -11,15 +11,36 @@ platform. The implementation follows `finance-pi-architecture.md`:
 
 ## Quick Start
 
-```powershell
+```bash
 python -m pip install -e ".[dev]"
-finance-pi init
-finance-pi catalog build
-finance-pi factors list
+python -m finance_pi.cli.app init --root .
+python -m finance_pi.cli.app doctor --root .
+python -m finance_pi.cli.app daily --root . --no-ingest
 pytest
 ```
 
 The local data lake is created under `data/` and is intentionally ignored by Git.
+
+## Runtime Commands
+
+```bash
+# Source ingest
+python -m finance_pi.cli.app ingest krx --since 2026-04-29 --until 2026-04-29
+python -m finance_pi.cli.app ingest dart-company
+python -m finance_pi.cli.app ingest dart-filings --since 2026-04-28 --until 2026-04-29
+python -m finance_pi.cli.app ingest dart-financials --corp-code 00126380 --year 2025
+python -m finance_pi.cli.app ingest kis --ticker 005930 --since 2026-04-01 --until 2026-04-29
+
+# Deterministic transforms
+python -m finance_pi.cli.app build all --root .
+python -m finance_pi.cli.app catalog build --root .
+
+# Research outputs
+python -m finance_pi.cli.app factors list
+python -m finance_pi.cli.app backtest run --factor momentum_12_1 --start 2024-01-01 --end 2024-12-31
+python -m finance_pi.cli.app reports dq --report-date 2026-04-29
+python -m finance_pi.cli.app reports fraud --report-date 2026-04-29
+```
 
 ## Raspberry Pi Server
 
@@ -35,8 +56,7 @@ python -m finance_pi.cli.app daily --root .
 
 ## Current Scope
 
-This repository is bootstrapped with the core package structure, storage/catalog
-contracts, source adapter interfaces, security identity models, PIT helpers,
-factor registry, backtest skeleton, and HTML report scaffolding. Live source
-credentials and large historical backfills are expected to be added through the
-adapter layer.
+This repository now includes live source adapters for KRX, OpenDART, and KIS;
+Bronze to Silver/Gold transforms; identity and universe builders; PIT
+fundamentals; factor registration; a monthly backtest runner; data quality and
+backtest fraud reports; and Raspberry Pi systemd scheduling templates.

@@ -68,6 +68,14 @@ class DataLakeLayout:
                 return self.root / "silver" / "prices" / f"dt={dt}" / "part.parquet"
             case "silver.filings":
                 return self.root / "silver" / "filings" / f"dt={dt}" / "part.parquet"
+            case "silver.financials":
+                return (
+                    self.root
+                    / "silver"
+                    / "financials"
+                    / f"fiscal_year={dt[:4]}"
+                    / "part.parquet"
+                )
             case "silver.corporate_actions":
                 return self.root / "silver" / "corporate_actions" / f"dt={dt}" / "part.parquet"
             case "gold.daily_prices_adj":

@@ -73,7 +73,7 @@ source .venv/bin/activate
 python -m finance_pi.cli.app doctor --root .
 python -m ruff check .
 python -m pytest
-python -m finance_pi.cli.app daily --root .
+python -m finance_pi.cli.app daily --root . --no-ingest
 ```
 
 Expected outputs:
@@ -81,6 +81,22 @@ Expected outputs:
 - `data/catalog/finance_pi.duckdb`
 - `data/reports/data_quality/YYYY-MM-DD.html`
 - `data/reports/backtest_fraud/YYYY-MM-DD.html`
+
+After `.env` is configured, run the real daily path:
+
+```bash
+python -m finance_pi.cli.app daily --root .
+```
+
+Manual source commands are also available:
+
+```bash
+python -m finance_pi.cli.app ingest krx --since 2026-04-29 --until 2026-04-29
+python -m finance_pi.cli.app ingest dart-company
+python -m finance_pi.cli.app ingest dart-filings --since 2026-04-28 --until 2026-04-29
+python -m finance_pi.cli.app build all --root .
+python -m finance_pi.cli.app catalog build --root .
+```
 
 ## 6. Schedule With systemd
 
@@ -119,7 +135,7 @@ python -m pytest
 
 ## Current Runtime Scope
 
-The scheduled `daily` command currently initializes the data lake, rebuilds the
-DuckDB view catalog, and writes baseline DQ/Fraud reports. Live KRX/OpenDART/KIS
-network ingestion is the next implementation step and will attach to the same
-daily entrypoint.
+The scheduled `daily` command initializes the data lake, attempts KRX and
+OpenDART filing ingest when keys are configured, rebuilds Silver/Gold datasets,
+rebuilds the DuckDB view catalog, and writes DQ/Fraud reports. KIS remains a
+manual cross-check command because it is ticker-range oriented.

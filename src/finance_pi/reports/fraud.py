@@ -5,6 +5,8 @@ from datetime import date
 from html import escape
 from pathlib import Path
 
+import polars as pl
+
 from finance_pi.reports.data_quality import ReportCheck
 
 
@@ -69,3 +71,53 @@ def empty_fraud_report(report_date: date) -> FraudReport:
             ),
         ),
     )
+
+
+def build_fraud_report(data_root: Path, report_date: date) -> FraudReport:
+    checks: list[ReportCheck] = []
+    universe = _read_optional(data_root / "gold/universe_history/dt=*/part.parquet")
+    prices = _read_optional(data_root / "gold/daily_prices_adj/dt=*/part.parquet")
+
+    if universe is None or universe.is_empty():
+        checks.append(ReportCheck("universe", "WARN", "No universe_history rows yet."))
+        return FraudReport(report_date, tuple(checks))
+
+    day_universe = universe.filter(pl.col("date") == report_date)
+    size = day_universe.height
+    checks.append(
+        ReportCheck(
+            "tiny_universe",
+            "PASS" if size >= 30 or size == 0 else "WARN",
+            f"{size} securities in universe for {report_date.isoformat()}",
+        )
+    )
+
+    spac_pre = day_universe.filter(pl.col("is_spac_pre").fill_null(False)).height
+    checks.append(
+        ReportCheck(
+            "spac_pre_merger",
+            "PASS" if spac_pre == 0 else "WARN",
+            f"{spac_pre} pre-merger SPAC rows are present in universe",
+        )
+    )
+
+    if prices is not None and not prices.is_empty():
+        penny = prices.filter((pl.col("date") == report_date) & (pl.col("close_adj") < 1000)).height
+        checks.append(
+            ReportCheck(
+                "penny_stocks",
+                "PASS" if penny == 0 else "WARN",
+                f"{penny} securities closed below 1,000 KRW",
+            )
+        )
+
+    return FraudReport(report_date, tuple(checks))
+
+
+def _read_optional(pattern: Path) -> pl.DataFrame | None:
+    from glob import glob
+
+    files = sorted(glob(pattern.as_posix()))
+    if not files:
+        return None
+    return pl.read_parquet(files, hive_partitioning=True)

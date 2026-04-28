@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-import httpx
+from finance_pi.http import HttpJsonClient
 
 
 @dataclass(frozen=True)
@@ -23,15 +23,12 @@ class KisAuthClient:
     app_secret: str
 
     def issue_token(self) -> KisToken:
-        url = f"{self.base_url.rstrip('/')}/oauth2/tokenP"
         payload = {
             "grant_type": "client_credentials",
             "appkey": self.app_key,
             "appsecret": self.app_secret,
         }
-        response = httpx.post(url, json=payload, timeout=20)
-        response.raise_for_status()
-        data = response.json()
+        data = HttpJsonClient("kis", self.base_url).post_json("/oauth2/tokenP", json=payload)
         expires_in = int(data.get("expires_in", 0))
         return KisToken(
             access_token=data["access_token"],
