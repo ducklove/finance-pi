@@ -6,6 +6,7 @@ from datetime import date
 
 from finance_pi.ingest.models import IngestUnit, RawBatch, WriteResult
 from finance_pi.sources.kis.client import KisDailyPriceClient
+from finance_pi.sources.schemas import PRICE_SCHEMA
 from finance_pi.storage.layout import DataLakeLayout
 from finance_pi.storage.parquet import ParquetDatasetWriter
 
@@ -49,7 +50,7 @@ class KisDailyAdapter:
             if path.exists():
                 continue
             self.writer.write(
-                RawBatch(batch.unit, rows).to_frame(),
+                RawBatch(batch.unit, rows).to_frame(PRICE_SCHEMA),
                 path,
                 source="kis",
                 request_hash=batch.unit.request_hash,

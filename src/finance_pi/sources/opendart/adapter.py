@@ -4,6 +4,8 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date
 
+import polars as pl
+
 from finance_pi.ingest.models import IngestUnit, RawBatch, WriteResult
 from finance_pi.sources.opendart.client import OpenDartClient
 from finance_pi.storage.layout import DataLakeLayout
@@ -31,7 +33,15 @@ class DartCompanyAdapter:
         if path.exists():
             return WriteResult(path=path, rows=0, skipped=True, reason="bronze partition exists")
         self.writer.write(
-            batch.to_frame(),
+            batch.to_frame(
+                {
+                    "snapshot_dt": pl.Date,
+                    "corp_code": pl.String,
+                    "corp_name": pl.String,
+                    "stock_code": pl.String,
+                    "modify_date": pl.String,
+                }
+            ),
             path,
             source="opendart",
             request_hash=batch.unit.request_hash,
@@ -78,7 +88,17 @@ class DartFilingsAdapter:
             if path.exists():
                 continue
             self.writer.write(
-                RawBatch(batch.unit, rows).to_frame(),
+                RawBatch(batch.unit, rows).to_frame(
+                    {
+                        "rcept_dt": pl.Date,
+                        "corp_code": pl.String,
+                        "corp_name": pl.String,
+                        "stock_code": pl.String,
+                        "rcept_no": pl.String,
+                        "report_nm": pl.String,
+                        "rm": pl.String,
+                    }
+                ),
                 path,
                 source="opendart",
                 request_hash=batch.unit.request_hash,
@@ -138,7 +158,22 @@ class DartFinancialsAdapter:
         if path.exists():
             return WriteResult(path=path, rows=0, skipped=True, reason="bronze partition exists")
         self.writer.write(
-            batch.to_frame(),
+            batch.to_frame(
+                {
+                    "security_id": pl.String,
+                    "corp_code": pl.String,
+                    "fiscal_period_end": pl.Date,
+                    "event_date": pl.Date,
+                    "rcept_dt": pl.Date,
+                    "available_date": pl.Date,
+                    "report_type": pl.String,
+                    "account_id": pl.String,
+                    "account_name": pl.String,
+                    "amount": pl.Float64,
+                    "is_consolidated": pl.Boolean,
+                    "accounting_basis": pl.String,
+                }
+            ),
             path,
             source="opendart",
             request_hash=batch.unit.request_hash,

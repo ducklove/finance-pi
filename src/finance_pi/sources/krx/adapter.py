@@ -10,6 +10,7 @@ from finance_pi.http import HttpJsonClient, SourceApiError
 from finance_pi.ingest.models import IngestUnit, RawBatch, WriteResult
 from finance_pi.sources.krx.schemas import KrxDailyPriceRow
 from finance_pi.sources.parsing import parse_float, parse_int, value_for
+from finance_pi.sources.schemas import PRICE_SCHEMA
 from finance_pi.storage.layout import DataLakeLayout
 from finance_pi.storage.parquet import ParquetDatasetWriter
 
@@ -60,7 +61,7 @@ class KrxDailyAdapter:
         if not batch.rows:
             return WriteResult(path=path, rows=0, skipped=True, reason="no KRX rows")
         rows = [KrxDailyPriceRow.model_validate(row).model_dump(mode="json") for row in batch.rows]
-        frame = RawBatch(batch.unit, rows).to_frame()
+        frame = RawBatch(batch.unit, rows).to_frame(PRICE_SCHEMA)
         if path.exists():
             return WriteResult(path=path, rows=0, skipped=True, reason="bronze partition exists")
         self.writer.write(

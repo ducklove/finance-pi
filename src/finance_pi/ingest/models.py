@@ -28,8 +28,12 @@ class RawBatch:
     unit: IngestUnit
     rows: list[dict[str, Any]]
 
-    def to_frame(self) -> pl.DataFrame:
-        return pl.DataFrame(self.rows)
+    def to_frame(self, schema_overrides: dict[str, pl.DataType] | None = None) -> pl.DataFrame:
+        return pl.DataFrame(
+            self.rows,
+            infer_schema_length=None,
+            schema_overrides=schema_overrides,
+        )
 
 
 @dataclass(frozen=True)
