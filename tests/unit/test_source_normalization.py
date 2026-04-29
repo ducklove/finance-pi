@@ -4,6 +4,7 @@ from datetime import date
 
 from finance_pi.sources.kis import normalize_kis_daily_row
 from finance_pi.sources.krx import normalize_krx_daily_row
+from finance_pi.sources.opendart import DartCompanyRow, DartFilingRow
 
 
 def test_normalize_krx_daily_row_accepts_krx_fields() -> None:
@@ -44,3 +45,28 @@ def test_normalize_kis_daily_row_accepts_output2_fields() -> None:
     assert row["date"] == date(2024, 1, 2)
     assert row["ticker"] == "005930"
     assert row["close"] == 70500.0
+
+
+def test_opendart_non_numeric_stock_codes_are_not_fatal() -> None:
+    company = DartCompanyRow.model_validate(
+        {
+            "snapshot_dt": date(2026, 4, 29),
+            "corp_code": "12345678",
+            "corp_name": "Non Equity Corp",
+            "stock_code": "0068Y0",
+            "modify_date": "20260429",
+        }
+    )
+    filing = DartFilingRow.model_validate(
+        {
+            "rcept_dt": date(2026, 4, 29),
+            "corp_code": "12345678",
+            "corp_name": "Non Equity Corp",
+            "stock_code": "0068Y0",
+            "rcept_no": "20260429000001",
+            "report_nm": "Report",
+        }
+    )
+
+    assert company.stock_code is None
+    assert filing.stock_code is None

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class DartCompanyRow(BaseModel):
@@ -13,6 +13,11 @@ class DartCompanyRow(BaseModel):
     corp_name: str
     stock_code: str | None = Field(default=None, pattern=r"^\d{6}$")
     modify_date: str | None = None
+
+    @field_validator("stock_code", mode="before")
+    @classmethod
+    def normalize_stock_code(cls, value: object) -> str | None:
+        return _numeric_stock_code_or_none(value)
 
 
 class DartFilingRow(BaseModel):
@@ -25,6 +30,11 @@ class DartFilingRow(BaseModel):
     rcept_no: str
     report_nm: str
     rm: str | None = None
+
+    @field_validator("stock_code", mode="before")
+    @classmethod
+    def normalize_stock_code(cls, value: object) -> str | None:
+        return _numeric_stock_code_or_none(value)
 
     @property
     def is_correction(self) -> bool:
@@ -46,3 +56,10 @@ class DartFinancialRow(BaseModel):
     amount: float
     is_consolidated: bool = True
     accounting_basis: str | None = None
+
+
+def _numeric_stock_code_or_none(value: object) -> str | None:
+    if value in (None, "", " "):
+        return None
+    text = str(value).strip()
+    return text if len(text) == 6 and text.isdigit() else None
