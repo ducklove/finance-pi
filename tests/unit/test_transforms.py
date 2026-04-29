@@ -6,7 +6,7 @@ import polars as pl
 
 from finance_pi.reports import build_data_quality_report, build_fraud_report
 from finance_pi.storage import DataLakeLayout, ParquetDatasetWriter
-from finance_pi.transforms import build_all
+from finance_pi.transforms import build_all, build_financials_silver
 
 
 def test_build_all_promotes_bronze_to_gold(tmp_path) -> None:
@@ -180,3 +180,54 @@ def test_build_all_enriches_kis_prices_with_naver_summary(tmp_path) -> None:
     assert silver.select("listed_shares").item() == 10_000
     assert gold.select("market_cap").item() == 1_000_000
     assert gold.select("listed_shares").item() == 10_000
+
+
+def test_build_financials_accepts_mixed_bronze_date_schemas(tmp_path) -> None:
+    first = tmp_path / "bronze" / "dart_financials" / "rcept_dt=2026-03-15" / "part.parquet"
+    second = tmp_path / "bronze" / "dart_financials" / "rcept_dt=2026-03-16" / "part.parquet"
+    first.parent.mkdir(parents=True)
+    second.parent.mkdir(parents=True)
+    pl.DataFrame(
+        [
+            {
+                "security_id": None,
+                "corp_code": "00126380",
+                "fiscal_period_end": date(2025, 12, 31),
+                "event_date": date(2025, 12, 31),
+                "rcept_dt": date(2026, 3, 15),
+                "available_date": date(2026, 3, 15),
+                "report_type": "11011",
+                "account_id": "ifrs-full_Assets",
+                "account_name": "Assets",
+                "amount": 1000.0,
+                "is_consolidated": True,
+                "accounting_basis": "K-IFRS",
+            }
+        ]
+    ).write_parquet(first)
+    pl.DataFrame(
+        [
+            {
+                "security_id": None,
+                "corp_code": "00258801",
+                "fiscal_period_end": "2025-12-31",
+                "event_date": "2025-12-31",
+                "rcept_dt": "2026-03-16",
+                "available_date": "2026-03-16",
+                "report_type": "11011",
+                "account_id": "ifrs-full_Assets",
+                "account_name": "Assets",
+                "amount": 2000.0,
+                "is_consolidated": True,
+                "accounting_basis": "K-IFRS",
+            }
+        ]
+    ).write_parquet(second)
+
+    summary = build_financials_silver(tmp_path)[0]
+
+    silver = pl.read_parquet(
+        tmp_path / "silver" / "financials" / "fiscal_year=2025" / "part.parquet"
+    )
+    assert summary.rows == 2
+    assert silver["rcept_dt"].dtype == pl.Date

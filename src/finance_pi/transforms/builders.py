@@ -319,7 +319,11 @@ def _read_optional(pattern: Path) -> pl.DataFrame | None:
     files = sorted(glob(pattern.as_posix()))
     if not files:
         return None
-    return pl.read_parquet(files, hive_partitioning=True)
+    try:
+        return pl.read_parquet(files, hive_partitioning=True)
+    except pl.exceptions.SchemaError:
+        frames = [pl.read_parquet(file, hive_partitioning=True) for file in files]
+        return pl.concat(frames, how="diagonal_relaxed")
 
 
 def _latest_company_frame(data_root: Path) -> pl.DataFrame | None:

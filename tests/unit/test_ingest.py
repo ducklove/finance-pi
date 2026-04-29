@@ -4,6 +4,8 @@ from datetime import date
 
 import polars as pl
 
+from finance_pi.cli.app import _dart_financial_requests
+from finance_pi.config import ProjectPaths
 from finance_pi.ingest import ResponseCache, request_hash
 from finance_pi.ingest.models import IngestUnit, RawBatch
 from finance_pi.sources.kis.adapter import KisUniverseDailyAdapter
@@ -85,6 +87,50 @@ def test_dart_filings_adapter_chunks_and_marks_completed_ranges(tmp_path) -> Non
     assert len(units) == 3
     assert result.rows == 1
     assert len(list(adapter.list_pending(date(2026, 4, 1), date(2026, 4, 5)))) == 2
+
+
+def test_dart_financial_requests_accepts_mixed_filing_date_schemas(tmp_path) -> None:
+    data_root = tmp_path / "data"
+    first = data_root / "bronze" / "dart_filings" / "dt=2026-03-15" / "part.parquet"
+    second = data_root / "bronze" / "dart_filings" / "dt=2026-03-16" / "part.parquet"
+    first.parent.mkdir(parents=True)
+    second.parent.mkdir(parents=True)
+    pl.DataFrame(
+        [
+            {
+                "rcept_dt": date(2026, 3, 15),
+                "corp_code": "00126380",
+                "corp_name": "Samsung",
+                "stock_code": "005930",
+                "rcept_no": "20260315000001",
+                "report_nm": "\uc0ac\uc5c5\ubcf4\uace0\uc11c (2025.12)",
+                "rm": None,
+            }
+        ]
+    ).write_parquet(first)
+    pl.DataFrame(
+        [
+            {
+                "rcept_dt": "2026-03-16",
+                "corp_code": "00258801",
+                "corp_name": "Kakao",
+                "stock_code": "035720",
+                "rcept_no": "20260316000001",
+                "report_nm": "\uc0ac\uc5c5\ubcf4\uace0\uc11c (2025.12)",
+                "rm": None,
+            }
+        ]
+    ).write_parquet(second)
+
+    requests = _dart_financial_requests(
+        ProjectPaths(root=tmp_path),
+        date(2026, 3, 1),
+        date(2026, 3, 31),
+        ("11011",),
+    )
+
+    assert [request["corp_code"] for request in requests] == ["00126380", "00258801"]
+    assert {request["bsns_year"] for request in requests} == {2025}
 
 
 def test_kis_universe_adapter_writes_combined_date_partitions(tmp_path) -> None:

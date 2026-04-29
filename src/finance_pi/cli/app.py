@@ -822,7 +822,7 @@ def _dart_financial_requests(
         raise typer.BadParameter("No DART filings data. Run ingest dart-filings first.")
 
     filings = (
-        pl.read_parquet([path.as_posix() for path in files], hive_partitioning=True)
+        _read_parquet_files_relaxed(files)
         .with_columns(
             pl.col("rcept_dt").cast(pl.Date, strict=False),
             pl.col("corp_code").cast(pl.String),
@@ -882,6 +882,14 @@ def _dart_financial_requests(
         .sort(["bsns_year", "report_code", "corp_code"])
         .to_dicts()
     )
+
+
+def _read_parquet_files_relaxed(files: list[Path]) -> pl.DataFrame:
+    try:
+        return pl.read_parquet([path.as_posix() for path in files], hive_partitioning=True)
+    except pl.exceptions.SchemaError:
+        frames = [pl.read_parquet(path.as_posix(), hive_partitioning=True) for path in files]
+        return pl.concat(frames, how="diagonal_relaxed")
 
 
 def _latest_dart_tickers(paths: ProjectPaths, limit: int | None = None) -> tuple[str, ...]:
