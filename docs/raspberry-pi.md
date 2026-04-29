@@ -116,9 +116,11 @@ python -m finance_pi.cli.app bootstrap --since 2026-04-28 --until 2026-04-28 --r
 The default historical bootstrap price path is:
 
 1. OpenDART `corpCode.xml` for the current listed ticker universe.
-2. Naver daily chart data for historical OHLCV.
-3. Naver Finance market summary snapshot for same-day `market_cap` and `listed_shares`.
-4. Bronze to Silver/Gold transforms.
+2. OpenDART filing list chunks, used to schedule PIT financial statement loads.
+3. Naver daily chart data for historical OHLCV.
+4. OpenDART annual financial statements by filing date.
+5. Naver Finance market summary snapshot for same-day `market_cap` and `listed_shares`.
+6. Bronze to Silver/Gold transforms.
 
 KIS is still available for short recent runs with `--price-source kis` or
 `--price-source both`, but do not use it for multi-year universe backfills. It is
@@ -140,8 +142,19 @@ python -m finance_pi.cli.app ingest naver-summary --snapshot-date 2026-04-29 --r
 python -m finance_pi.cli.app ingest naver-daily --since 2024-01-01 --until 2026-04-28 --root . --limit 20
 python -m finance_pi.cli.app ingest kis-universe --since 2026-04-29 --until 2026-04-29 --limit 20
 python -m finance_pi.cli.app ingest dart-filings --since 2026-04-28 --until 2026-04-29
+python -m finance_pi.cli.app ingest dart-financials-bulk --since 2026-04-28 --until 2026-04-29
 python -m finance_pi.cli.app build all --root .
 python -m finance_pi.cli.app catalog build --root .
+```
+
+For quarterly DART financials, use:
+
+```bash
+python -m finance_pi.cli.app ingest dart-financials-bulk \
+  --since 2024-01-01 \
+  --until 2026-04-28 \
+  --report-codes 11013,11012,11014,11011 \
+  --root .
 ```
 
 ## 6. Schedule With systemd
@@ -183,6 +196,6 @@ python -m pytest
 
 The scheduled `daily` command initializes the data lake, refreshes the OpenDART
 company snapshot, ingests the Naver same-day market summary, attempts KIS
-universe price ingest and OpenDART filing ingest when keys are configured,
+universe price ingest and OpenDART filing/financial ingest when keys are configured,
 rebuilds Silver/Gold datasets, rebuilds the DuckDB view catalog, and writes
 DQ/Fraud reports.

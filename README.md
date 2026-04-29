@@ -36,6 +36,7 @@ python -m finance_pi.cli.app ingest naver-daily --since 2024-01-01 --until 2026-
 python -m finance_pi.cli.app ingest kis-universe --since 2026-04-29 --until 2026-04-29
 python -m finance_pi.cli.app ingest dart-filings --since 2026-04-28 --until 2026-04-29
 python -m finance_pi.cli.app ingest dart-financials --corp-code 00126380 --year 2025
+python -m finance_pi.cli.app ingest dart-financials-bulk --since 2024-01-01 --until 2026-04-28
 python -m finance_pi.cli.app ingest kis --ticker 005930 --since 2026-04-01 --until 2026-04-29
 
 # Deterministic transforms
@@ -71,6 +72,13 @@ KIS access tokens are cached under `data/_cache/kis/token.json` so `check-kis`,
 `bootstrap`, and `daily` do not trip the KIS one-token-per-minute issuance limit.
 Naver Finance does not require a key, but its summary page is treated as a
 snapshot source and is only joined to matching price dates to avoid look-ahead.
+OpenDART filings are used to schedule financial statement requests. Bulk
+financial ingestion is resumable and stores statement rows by `rcept_dt`, so
+`silver.financials` and `gold.fundamentals_pit` are built from the disclosure
+date, not from the date the backfill happened. `bootstrap` ingests annual
+financial statements by default; pass
+`--financial-report-codes 11013,11012,11014,11011` when quarterly statements are
+needed too.
 
 ## Raspberry Pi Server
 

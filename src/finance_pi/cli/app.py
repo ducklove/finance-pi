@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import platform
+import re
 import sys
 from datetime import date, timedelta
 from pathlib import Path
@@ -35,6 +36,7 @@ from finance_pi.sources.opendart import (
     DartCompanyAdapter,
     DartFilingsAdapter,
     DartFinancialsAdapter,
+    DartFinancialsBulkAdapter,
     OpenDartClient,
 )
 from finance_pi.storage import CatalogBuilder, DataLakeLayout, dataset_registry
@@ -222,16 +224,15 @@ def ingest_dart_filings(
     since: str = typer.Option(..., help="Start date as YYYY-MM-DD"),
     until: str = typer.Option(..., help="End date as YYYY-MM-DD"),
     root: Path = typer.Option(Path("."), help="Workspace root"),
+    chunk_days: int = typer.Option(7, help="Date range days per resumable DART filing chunk"),
 ) -> None:
     paths = ProjectPaths(root=root)
     settings = RuntimeSettings.load(paths.root)
     client = _opendart_client(settings)
     layout = DataLakeLayout(paths.data_root)
     layout.ensure_base_dirs()
-    adapter = DartFilingsAdapter(layout, ParquetDatasetWriter(), client)
-    _print_results(
-        IngestOrchestrator([adapter]).run(_parse_report_date(since), _parse_report_date(until))
-    )
+    adapter = DartFilingsAdapter(layout, ParquetDatasetWriter(), client, chunk_days)
+    _run_and_print([adapter], _parse_report_date(since), _parse_report_date(until))
 
 
 @ingest_app.command("dart-financials")
@@ -260,6 +261,48 @@ def ingest_dart_financials(
         fs_div,
     )
     _print_results(IngestOrchestrator([adapter]).run(parsed_available, parsed_available))
+
+
+@ingest_app.command("dart-financials-bulk")
+def ingest_dart_financials_bulk(
+    since: str = typer.Option(..., help="Start filing date as YYYY-MM-DD"),
+    until: str = typer.Option(..., help="End filing date as YYYY-MM-DD"),
+    root: Path = typer.Option(Path("."), help="Workspace root"),
+    report_codes: str = typer.Option(
+        "11011",
+        help="Comma-separated DART report codes; use 11013,11012,11014,11011 for quarterly",
+    ),
+    corp_limit: int | None = typer.Option(None, help="Limit unique corp_code count for smoke runs"),
+    batch_size: int = typer.Option(25, help="Financial API calls per resumable chunk"),
+    sleep_seconds: float = typer.Option(0.05, help="Sleep between OpenDART financial calls"),
+    fs_div: str = typer.Option("CFS", help="CFS or OFS"),
+) -> None:
+    paths = ProjectPaths(root=root)
+    settings = RuntimeSettings.load(paths.root)
+    start = _parse_report_date(since)
+    end = _parse_report_date(until)
+    try:
+        requests = _dart_financial_requests(
+            paths,
+            start,
+            end,
+            _parse_report_codes(report_codes),
+            corp_limit,
+        )
+    except typer.BadParameter as exc:
+        typer.echo(f"OpenDART financial ingest skipped: {exc}")
+        return
+    typer.echo(f"OpenDART financial requests: {len(requests)} from filings {since}..{until}")
+    adapter = DartFinancialsBulkAdapter(
+        layout=DataLakeLayout(paths.data_root),
+        writer=ParquetDatasetWriter(),
+        client=_opendart_client(settings),
+        requests=requests,
+        fs_div=fs_div,
+        batch_size=batch_size,
+        sleep_seconds=sleep_seconds,
+    )
+    _run_and_print([adapter], start, end)
 
 
 @ingest_app.command("kis")
@@ -368,12 +411,20 @@ def bootstrap(
     skip_kis: bool = typer.Option(False, help="Skip KIS price backfill"),
     skip_krx: bool = typer.Option(True, help="KRX is disabled by default"),
     skip_dart_company: bool = typer.Option(False, help="Skip DART corpCode snapshot"),
+    skip_dart_filings: bool = typer.Option(False, help="Skip DART filing list backfill"),
+    skip_dart_financials: bool = typer.Option(False, help="Skip DART financial statement backfill"),
     naver_summary: bool = typer.Option(
         False,
         "--naver-summary/--no-naver-summary",
         help="Fetch current Naver summary for the bootstrap end date",
     ),
     price_source: str = typer.Option("naver", help="Price source: naver, kis, or both"),
+    financial_report_codes: str = typer.Option(
+        "11011",
+        help="DART financial reports to ingest; annual default, comma-separate for quarterly",
+    ),
+    financial_batch_size: int = typer.Option(25, help="DART financial API calls per chunk"),
+    financial_sleep_seconds: float = typer.Option(0.05, help="Sleep between DART financial calls"),
     ticker_limit: int | None = typer.Option(None, help="Limit tickers for smoke bootstrap"),
     chunk_days: int = typer.Option(90, help="Date range days per KIS round"),
     naver_chunk_days: int = typer.Option(3650, help="Date range days per Naver round"),
@@ -408,6 +459,15 @@ def bootstrap(
                 failures.append(f"OpenDART company ingest failed: {exc}")
         else:
             failures.append("OpenDART company ingest skipped: OPENDART_API_KEY missing")
+
+    if not skip_dart_filings:
+        if settings.has_opendart:
+            try:
+                ingest_dart_filings(start.isoformat(), end.isoformat(), paths.root)
+            except Exception as exc:  # noqa: BLE001
+                failures.append(f"OpenDART filings ingest failed: {exc}")
+        else:
+            failures.append("OpenDART filings ingest skipped: OPENDART_API_KEY missing")
 
     if naver_summary:
         try:
@@ -445,6 +505,24 @@ def bootstrap(
                 failures.append(f"KIS universe price ingest failed: {exc}")
         else:
             failures.append("KIS price ingest skipped: KIS_APP_KEY/KIS_APP_SECRET missing")
+
+    if not skip_dart_financials:
+        if settings.has_opendart:
+            try:
+                ingest_dart_financials_bulk(
+                    start.isoformat(),
+                    end.isoformat(),
+                    paths.root,
+                    financial_report_codes,
+                    ticker_limit,
+                    financial_batch_size,
+                    financial_sleep_seconds,
+                    "CFS",
+                )
+            except Exception as exc:  # noqa: BLE001
+                failures.append(f"OpenDART financial ingest failed: {exc}")
+        else:
+            failures.append("OpenDART financial ingest skipped: OPENDART_API_KEY missing")
 
     for message in failures:
         typer.echo(message)
@@ -716,7 +794,94 @@ def _run_daily_ingest(
             ingest_dart_filings(filing_start.isoformat(), report_date.isoformat(), paths.root)
         except Exception as exc:  # noqa: BLE001
             failures.append(f"OpenDART filings ingest failed: {exc}")
+        try:
+            ingest_dart_financials_bulk(
+                filing_start.isoformat(),
+                report_date.isoformat(),
+                paths.root,
+                "11013,11012,11014,11011",
+                None,
+                25,
+                0.05,
+                "CFS",
+            )
+        except Exception as exc:  # noqa: BLE001
+            failures.append(f"OpenDART financial ingest failed: {exc}")
     return failures
+
+
+def _dart_financial_requests(
+    paths: ProjectPaths,
+    since: date,
+    until: date,
+    report_codes: tuple[str, ...],
+    corp_limit: int | None = None,
+) -> tuple[dict[str, object], ...]:
+    files = sorted(paths.data_root.glob("bronze/dart_filings/dt=*/part.parquet"))
+    if not files:
+        raise typer.BadParameter("No DART filings data. Run ingest dart-filings first.")
+
+    filings = (
+        pl.read_parquet([path.as_posix() for path in files], hive_partitioning=True)
+        .with_columns(
+            pl.col("rcept_dt").cast(pl.Date, strict=False),
+            pl.col("corp_code").cast(pl.String),
+            pl.col("stock_code").cast(pl.String),
+            pl.col("report_nm").cast(pl.String),
+        )
+        .filter(
+            (pl.col("rcept_dt") >= since)
+            & (pl.col("rcept_dt") <= until)
+            & pl.col("stock_code").is_not_null()
+        )
+    )
+    if filings.is_empty():
+        raise typer.BadParameter(f"No listed DART filings found from {since} to {until}.")
+
+    parsed_rows: list[dict[str, object]] = []
+    for row in filings.iter_rows(named=True):
+        parsed = _parse_dart_financial_report(str(row["report_nm"]), row["rcept_dt"])
+        if parsed is None:
+            continue
+        bsns_year, report_code = parsed
+        if report_code not in report_codes:
+            continue
+        parsed_rows.append(
+            {
+                "corp_code": row["corp_code"],
+                "corp_name": row.get("corp_name"),
+                "stock_code": str(row["stock_code"]).zfill(6),
+                "bsns_year": bsns_year,
+                "report_code": report_code,
+                "available_date": row["rcept_dt"],
+            }
+        )
+
+    if not parsed_rows:
+        raise typer.BadParameter("No filings matched the requested financial report codes.")
+
+    requests = pl.DataFrame(parsed_rows, infer_schema_length=None).sort("available_date")
+    if corp_limit is not None:
+        corps = (
+            requests.select("corp_code")
+            .unique()
+            .sort("corp_code")
+            .head(corp_limit)
+            .to_series()
+            .to_list()
+        )
+        requests = requests.filter(pl.col("corp_code").is_in(corps))
+
+    return tuple(
+        requests.group_by(["corp_code", "bsns_year", "report_code"], maintain_order=True)
+        .agg(
+            pl.col("corp_name").drop_nulls().last(),
+            pl.col("stock_code").drop_nulls().last(),
+            pl.col("available_date").max(),
+        )
+        .sort(["bsns_year", "report_code", "corp_code"])
+        .to_dicts()
+    )
 
 
 def _latest_dart_tickers(paths: ProjectPaths, limit: int | None = None) -> tuple[str, ...]:
@@ -758,6 +923,37 @@ def _parse_price_source(value: str) -> str:
     if source not in {"naver", "kis", "both"}:
         raise typer.BadParameter("price_source must be one of: naver, kis, both")
     return source
+
+
+def _parse_report_codes(value: str) -> tuple[str, ...]:
+    codes = tuple(code.strip() for code in value.split(",") if code.strip())
+    valid = {"11013", "11012", "11014", "11011"}
+    invalid = [code for code in codes if code not in valid]
+    if invalid:
+        raise typer.BadParameter(f"unsupported DART report codes: {', '.join(invalid)}")
+    if not codes:
+        raise typer.BadParameter("at least one DART report code is required")
+    return codes
+
+
+def _parse_dart_financial_report(report_nm: str, rcept_dt: date) -> tuple[int, str] | None:
+    match = re.search(r"\((\d{4})\.(\d{2})\)", report_nm)
+    bsns_year = int(match.group(1)) if match else rcept_dt.year
+    month = int(match.group(2)) if match else None
+
+    if "\uc0ac\uc5c5\ubcf4\uace0\uc11c" in report_nm:
+        return (bsns_year if match else rcept_dt.year - 1, "11011")
+    if "\ubc18\uae30\ubcf4\uace0\uc11c" in report_nm:
+        return (bsns_year, "11012")
+    if "\ubd84\uae30\ubcf4\uace0\uc11c" in report_nm:
+        if month is not None and month <= 3:
+            return (bsns_year, "11013")
+        if month is not None and month >= 9:
+            return (bsns_year, "11014")
+        if rcept_dt.month <= 5:
+            return (bsns_year, "11013")
+        return (bsns_year, "11014")
+    return None
 
 
 def _previous_weekday(value: date) -> date:

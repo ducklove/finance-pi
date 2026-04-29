@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 
+from finance_pi.cli.app import _parse_dart_financial_report
 from finance_pi.sources.kis import normalize_kis_daily_row
 from finance_pi.sources.krx import normalize_krx_daily_row
 from finance_pi.sources.naver import parse_daily_price_payload, parse_market_sum_page
@@ -116,3 +117,18 @@ def test_parse_naver_daily_price_payload() -> None:
     assert row["ticker"] == "005930"
     assert row["close"] == 222000.0
     assert row["volume"] == 18444490
+
+
+def test_parse_dart_financial_report_names() -> None:
+    assert _parse_dart_financial_report(
+        "\uc0ac\uc5c5\ubcf4\uace0\uc11c (2025.12)",
+        date(2026, 3, 15),
+    ) == (2025, "11011")
+    assert _parse_dart_financial_report(
+        "\ubc18\uae30\ubcf4\uace0\uc11c (2026.06)",
+        date(2026, 8, 14),
+    ) == (2026, "11012")
+    assert _parse_dart_financial_report(
+        "\ubd84\uae30\ubcf4\uace0\uc11c (2026.09)",
+        date(2026, 11, 14),
+    ) == (2026, "11014")

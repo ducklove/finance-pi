@@ -215,10 +215,29 @@ def build_financials_silver(data_root: Path) -> list[BuildSummary]:
             on="corp_code",
             how="left",
         )
-    financials = _cast_dates(
-        financials,
-        ["fiscal_period_end", "event_date", "rcept_dt", "available_date"],
-    ).with_columns(pl.col("fiscal_period_end").dt.year().alias("fiscal_year"))
+    financials = (
+        _cast_dates(
+            financials,
+            ["fiscal_period_end", "event_date", "rcept_dt", "available_date"],
+        )
+        .select(
+            [
+                "security_id",
+                "corp_code",
+                "fiscal_period_end",
+                "event_date",
+                "rcept_dt",
+                "available_date",
+                "report_type",
+                "account_id",
+                "account_name",
+                "amount",
+                "is_consolidated",
+                "accounting_basis",
+            ]
+        )
+        .with_columns(pl.col("fiscal_period_end").dt.year().alias("fiscal_year"))
+    )
     return _write_by_partition(
         data_root,
         "silver.financials",

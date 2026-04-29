@@ -8,6 +8,7 @@ from finance_pi.ingest import ResponseCache, request_hash
 from finance_pi.ingest.models import IngestUnit, RawBatch
 from finance_pi.sources.kis.adapter import KisUniverseDailyAdapter
 from finance_pi.sources.naver.adapter import NaverDailyBackfillAdapter
+from finance_pi.sources.opendart.adapter import DartFilingsAdapter, DartFinancialsBulkAdapter
 from finance_pi.storage import DataLakeLayout, ParquetDatasetWriter
 
 
@@ -52,6 +53,38 @@ def test_raw_batch_to_frame_casts_json_date_strings() -> None:
     assert frame["snapshot_dt"].dtype == pl.Date
     assert frame["snapshot_dt"].to_list() == [date(2026, 4, 28), date(2026, 4, 28)]
     assert frame["stock_code"].to_list() == [None, "036720"]
+
+
+def test_dart_filings_adapter_chunks_and_marks_completed_ranges(tmp_path) -> None:
+    class FakeOpenDartClient:
+        def fetch_filings(self, since: date, until: date):
+            return [
+                {
+                    "rcept_dt": since,
+                    "corp_code": "00126380",
+                    "corp_name": "Samsung",
+                    "stock_code": "005930",
+                    "rcept_no": f"{since:%Y%m%d}000001",
+                    "report_nm": "report",
+                    "rm": None,
+                }
+            ]
+
+    layout = DataLakeLayout(tmp_path)
+    layout.ensure_base_dirs()
+    adapter = DartFilingsAdapter(
+        layout,
+        ParquetDatasetWriter(),
+        FakeOpenDartClient(),
+        chunk_days=2,
+    )
+
+    units = list(adapter.list_pending(date(2026, 4, 1), date(2026, 4, 5)))
+    result = adapter.write_bronze(adapter.fetch(units[0]))
+
+    assert len(units) == 3
+    assert result.rows == 1
+    assert len(list(adapter.list_pending(date(2026, 4, 1), date(2026, 4, 5)))) == 2
 
 
 def test_kis_universe_adapter_writes_combined_date_partitions(tmp_path) -> None:
@@ -235,3 +268,66 @@ def test_naver_daily_backfill_adapter_writes_request_chunks(tmp_path) -> None:
     remaining = list(adapter.list_pending(date(2026, 4, 28), date(2026, 4, 28)))
     assert len(remaining) == 1
     assert remaining[0].params["tickers"] == ("035720",)
+
+
+def test_dart_financials_bulk_merges_same_rcept_date_partitions(tmp_path) -> None:
+    class FakeOpenDartClient:
+        def fetch_financials(
+            self,
+            corp_code: str,
+            bsns_year: int,
+            reprt_code: str,
+            *,
+            available_date: date,
+            fs_div: str = "CFS",
+        ):
+            return [
+                {
+                    "security_id": None,
+                    "corp_code": corp_code,
+                    "fiscal_period_end": date(bsns_year, 12, 31),
+                    "event_date": date(bsns_year, 12, 31),
+                    "rcept_dt": available_date,
+                    "available_date": available_date,
+                    "report_type": reprt_code,
+                    "account_id": "ifrs-full_Assets",
+                    "account_name": "Assets",
+                    "amount": 1000.0,
+                    "is_consolidated": fs_div == "CFS",
+                    "accounting_basis": "K-IFRS",
+                }
+            ]
+
+    layout = DataLakeLayout(tmp_path)
+    layout.ensure_base_dirs()
+    adapter = DartFinancialsBulkAdapter(
+        layout,
+        ParquetDatasetWriter(),
+        FakeOpenDartClient(),
+        (
+            {
+                "corp_code": "00126380",
+                "bsns_year": 2025,
+                "report_code": "11011",
+                "available_date": date(2026, 3, 15),
+            },
+            {
+                "corp_code": "00258801",
+                "bsns_year": 2025,
+                "report_code": "11011",
+                "available_date": date(2026, 3, 15),
+            },
+        ),
+        batch_size=1,
+        sleep_seconds=0,
+    )
+
+    units = list(adapter.list_pending(date(2026, 3, 1), date(2026, 3, 31)))
+    first = adapter.write_bronze(adapter.fetch(units[0]))
+    second = adapter.write_bronze(adapter.fetch(units[1]))
+
+    frame = pl.read_parquet(layout.partition_path("bronze.dart_financials_raw", date(2026, 3, 15)))
+    assert first.rows == 1
+    assert second.rows == 1
+    assert sorted(frame["corp_code"].to_list()) == ["00126380", "00258801"]
+    assert list(adapter.list_pending(date(2026, 3, 1), date(2026, 3, 31))) == []
