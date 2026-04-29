@@ -1,6 +1,7 @@
 from finance_pi.transforms.builders import (
     BuildSummary,
     build_all,
+    build_all_iter,
     build_daily_prices_adj,
     build_financials_silver,
     build_fundamentals_pit,
@@ -12,6 +13,7 @@ from finance_pi.transforms.builders import (
 __all__ = [
     "BuildSummary",
     "build_all",
+    "build_all_iter",
     "build_daily_prices_adj",
     "build_financials_silver",
     "build_fundamentals_pit",

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import date
 from glob import glob
 from pathlib import Path
 
@@ -18,7 +20,10 @@ class BuildSummary:
 
 
 def build_all(data_root: Path) -> list[BuildSummary]:
-    summaries: list[BuildSummary] = []
+    return list(build_all_iter(data_root))
+
+
+def build_all_iter(data_root: Path) -> Iterable[BuildSummary]:
     for builder in [
         build_silver_prices,
         build_security_master,
@@ -27,8 +32,7 @@ def build_all(data_root: Path) -> list[BuildSummary]:
         build_financials_silver,
         build_fundamentals_pit,
     ]:
-        summaries.extend(builder(data_root))
-    return summaries
+        yield from builder(data_root)
 
 
 def build_silver_prices(data_root: Path) -> list[BuildSummary]:
@@ -249,30 +253,62 @@ def build_financials_silver(data_root: Path) -> list[BuildSummary]:
 
 def build_fundamentals_pit(data_root: Path) -> list[BuildSummary]:
     financials = _read_optional(data_root / "silver/financials/fiscal_year=*/part.parquet")
-    universe = _read_optional(data_root / "gold/universe_history/dt=*/part.parquet")
-    if financials is None or financials.is_empty() or universe is None or universe.is_empty():
+    universe_pattern = data_root / "gold/universe_history/dt=*/part.parquet"
+    universe_files = sorted(glob(universe_pattern.as_posix()))
+    if financials is None or financials.is_empty() or not universe_files:
         return [BuildSummary("gold.fundamentals_pit", 0, 0)]
-    joined = (
-        universe.select("date", "security_id")
-        .join(financials, on="security_id", how="inner")
-        .filter(pl.col("available_date") <= pl.col("date"))
-        .sort(
-            [
-                "date",
-                "security_id",
-                "account_id",
-                "fiscal_period_end",
-                "available_date",
-                "rcept_dt",
-            ]
+    financials = (
+        _cast_dates(
+            financials,
+            ["fiscal_period_end", "event_date", "rcept_dt", "available_date"],
         )
-        .unique(
-            subset=["date", "security_id", "account_id", "fiscal_period_end"],
-            keep="last",
-        )
-        .rename({"date": "as_of_date"})
+        .filter(pl.col("security_id").is_not_null())
+        .sort(["security_id", "account_id", "fiscal_period_end", "available_date", "rcept_dt"])
     )
-    return _write_by_date(data_root, "gold.fundamentals_pit", joined, "as_of_date")
+
+    layout = DataLakeLayout(data_root)
+    writer = ParquetDatasetWriter()
+    total_rows = 0
+    total_files = 0
+    for file in universe_files:
+        universe = pl.read_parquet(file, hive_partitioning=True).select("date", "security_id")
+        if universe.is_empty():
+            continue
+        as_of_date = _partition_date_from_path(Path(file), "dt")
+        security_ids = universe["security_id"].drop_nulls().unique().to_list()
+        if not security_ids:
+            continue
+        eligible = financials.filter(
+            pl.col("security_id").is_in(security_ids)
+            & (pl.col("available_date") <= pl.lit(as_of_date))
+        )
+        if eligible.is_empty():
+            continue
+        pit = (
+            universe.join(eligible, on="security_id", how="inner")
+            .sort(
+                [
+                    "date",
+                    "security_id",
+                    "account_id",
+                    "fiscal_period_end",
+                    "available_date",
+                    "rcept_dt",
+                ]
+            )
+            .unique(subset=["date", "security_id", "account_id"], keep="last")
+            .rename({"date": "as_of_date"})
+        )
+        if pit.is_empty():
+            continue
+        writer.write(
+            pit,
+            layout.partition_path("gold.fundamentals_pit", as_of_date),
+            mode="overwrite",
+        )
+        total_rows += pit.height
+        total_files += 1
+    return [BuildSummary("gold.fundamentals_pit", total_rows, total_files)]
 
 
 def _normalize_price_frame(frame: pl.DataFrame, source: str) -> pl.DataFrame:
@@ -387,6 +423,14 @@ def _cast_dates(frame: pl.DataFrame, columns: list[str]) -> pl.DataFrame:
         if column in frame.columns:
             exprs.append(pl.col(column).cast(pl.Date, strict=False))
     return frame.with_columns(exprs) if exprs else frame
+
+
+def _partition_date_from_path(path: Path, key: str) -> date:
+    prefix = f"{key}="
+    for part in path.parts:
+        if part.startswith(prefix):
+            return date.fromisoformat(part.removeprefix(prefix))
+    raise ValueError(f"{path} does not contain {key}= partition")
 
 
 def _write_by_date(

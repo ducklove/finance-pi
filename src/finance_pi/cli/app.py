@@ -43,6 +43,7 @@ from finance_pi.storage import CatalogBuilder, DataLakeLayout, dataset_registry
 from finance_pi.storage.parquet import ParquetDatasetWriter
 from finance_pi.transforms import (
     build_all,
+    build_all_iter,
     build_daily_prices_adj,
     build_financials_silver,
     build_fundamentals_pit,
@@ -400,7 +401,8 @@ def ingest_naver_summary(
 
 @build_app.command("all")
 def build_everything(root: Path = typer.Option(Path("."), help="Workspace root")) -> None:
-    _print_summaries(build_all(ProjectPaths(root=root).data_root))
+    for summary in build_all_iter(ProjectPaths(root=root).data_root):
+        _print_summary(summary)
 
 
 @app.command("bootstrap")
@@ -989,7 +991,11 @@ def _print_result(result) -> None:
 
 def _print_summaries(summaries) -> None:
     for summary in summaries:
-        typer.echo(f"{summary.dataset}\trows={summary.rows}\tfiles={summary.files}")
+        _print_summary(summary)
+
+
+def _print_summary(summary) -> None:
+    typer.echo(f"{summary.dataset}\trows={summary.rows}\tfiles={summary.files}")
 
 
 def _print_dotenv_issues(root: Path) -> None:

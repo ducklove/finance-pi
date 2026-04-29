@@ -231,3 +231,73 @@ def test_build_financials_accepts_mixed_bronze_date_schemas(tmp_path) -> None:
     )
     assert summary.rows == 2
     assert silver["rcept_dt"].dtype == pl.Date
+
+
+def test_fundamentals_pit_keeps_latest_account_per_day(tmp_path) -> None:
+    layout = DataLakeLayout(tmp_path)
+    layout.ensure_base_dirs()
+    writer = ParquetDatasetWriter()
+    writer.write(
+        pl.DataFrame(
+            [
+                {
+                    "date": date(2024, 1, 3),
+                    "security_id": "S005930",
+                    "listing_id": "L005930",
+                    "market": "KOSPI",
+                    "is_active": True,
+                    "share_class": "common",
+                    "security_type": "equity",
+                    "is_spac_pre": False,
+                    "is_halted": False,
+                    "is_designated": False,
+                    "is_liquidation_window": False,
+                }
+            ]
+        ),
+        layout.partition_path("gold.universe_history", date(2024, 1, 3)),
+    )
+    silver_path = tmp_path / "silver" / "financials" / "fiscal_year=2023" / "part.parquet"
+    silver_path.parent.mkdir(parents=True)
+    pl.DataFrame(
+        [
+            {
+                "security_id": "S005930",
+                "corp_code": "00126380",
+                "fiscal_period_end": date(2022, 12, 31),
+                "event_date": date(2022, 12, 31),
+                "rcept_dt": date(2023, 3, 15),
+                "available_date": date(2023, 3, 15),
+                "report_type": "11011",
+                "account_id": "ifrs-full_Assets",
+                "account_name": "Assets",
+                "amount": 1000.0,
+                "is_consolidated": True,
+                "accounting_basis": "K-IFRS",
+            },
+            {
+                "security_id": "S005930",
+                "corp_code": "00126380",
+                "fiscal_period_end": date(2023, 12, 31),
+                "event_date": date(2023, 12, 31),
+                "rcept_dt": date(2024, 1, 2),
+                "available_date": date(2024, 1, 2),
+                "report_type": "11011",
+                "account_id": "ifrs-full_Assets",
+                "account_name": "Assets",
+                "amount": 2000.0,
+                "is_consolidated": True,
+                "accounting_basis": "K-IFRS",
+            },
+        ]
+    ).write_parquet(silver_path)
+
+    from finance_pi.transforms import build_fundamentals_pit
+
+    summary = build_fundamentals_pit(tmp_path)[0]
+
+    pit = pl.read_parquet(
+        tmp_path / "gold" / "fundamentals_pit" / "dt=2024-01-03" / "part.parquet"
+    )
+    assert summary.rows == 1
+    assert pit.select("amount").item() == 2000.0
