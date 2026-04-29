@@ -25,7 +25,12 @@ from finance_pi.sources.kis import (
     KisUniverseDailyAdapter,
 )
 from finance_pi.sources.krx import KrxDailyAdapter
-from finance_pi.sources.naver import NaverFinanceClient, NaverSummaryAdapter
+from finance_pi.sources.naver import (
+    NaverDailyBackfillAdapter,
+    NaverDailyPriceClient,
+    NaverFinanceClient,
+    NaverSummaryAdapter,
+)
 from finance_pi.sources.opendart import (
     DartCompanyAdapter,
     DartFilingsAdapter,
@@ -287,6 +292,7 @@ def ingest_kis_universe(
     limit: int | None = typer.Option(None, help="Limit ticker count for a small smoke run"),
     chunk_days: int = typer.Option(90, help="Date range days per KIS round"),
     sleep_seconds: float = typer.Option(0.05, help="Sleep between ticker calls"),
+    ticker_batch_size: int = typer.Option(50, help="Tickers per incremental KIS write"),
 ) -> None:
     paths = ProjectPaths(root=root)
     settings = RuntimeSettings.load(paths.root)
@@ -298,10 +304,34 @@ def ingest_kis_universe(
         tickers=tickers,
         chunk_days=chunk_days,
         sleep_seconds=sleep_seconds,
+        ticker_batch_size=ticker_batch_size,
     )
-    _print_results(
-        IngestOrchestrator([adapter]).run(_parse_report_date(since), _parse_report_date(until))
+    _run_and_print([adapter], _parse_report_date(since), _parse_report_date(until))
+
+
+@ingest_app.command("naver-daily")
+def ingest_naver_daily(
+    since: str = typer.Option(..., help="Start date as YYYY-MM-DD"),
+    until: str = typer.Option(..., help="End date as YYYY-MM-DD"),
+    root: Path = typer.Option(Path("."), help="Workspace root"),
+    limit: int | None = typer.Option(None, help="Limit ticker count for a small smoke run"),
+    chunk_days: int = typer.Option(3650, help="Date range days per Naver request round"),
+    ticker_batch_size: int = typer.Option(50, help="Tickers per incremental Naver write"),
+    sleep_seconds: float = typer.Option(0.02, help="Sleep between ticker calls"),
+) -> None:
+    paths = ProjectPaths(root=root)
+    settings = RuntimeSettings.load(paths.root)
+    tickers = _latest_dart_tickers(paths, limit=limit)
+    adapter = NaverDailyBackfillAdapter(
+        layout=DataLakeLayout(paths.data_root),
+        writer=ParquetDatasetWriter(),
+        client=_naver_daily_client(settings),
+        tickers=tickers,
+        chunk_days=chunk_days,
+        ticker_batch_size=ticker_batch_size,
+        sleep_seconds=sleep_seconds,
     )
+    _run_and_print([adapter], _parse_report_date(since), _parse_report_date(until))
 
 
 @ingest_app.command("naver-summary")
@@ -343,8 +373,11 @@ def bootstrap(
         "--naver-summary/--no-naver-summary",
         help="Fetch current Naver summary for the bootstrap end date",
     ),
+    price_source: str = typer.Option("naver", help="Price source: naver, kis, or both"),
     ticker_limit: int | None = typer.Option(None, help="Limit tickers for smoke bootstrap"),
     chunk_days: int = typer.Option(90, help="Date range days per KIS round"),
+    naver_chunk_days: int = typer.Option(3650, help="Date range days per Naver round"),
+    ticker_batch_size: int = typer.Option(50, help="Tickers per incremental price write"),
     sleep_seconds: float = typer.Option(0.05, help="Sleep between KIS ticker calls"),
     strict: bool = typer.Option(True, help="Fail if a configured live source fails"),
 ) -> None:
@@ -354,6 +387,7 @@ def bootstrap(
     settings = RuntimeSettings.load(paths.root)
     start = _parse_report_date(since)
     end = _parse_report_date(until) if until else _previous_weekday(date.today())
+    source_choice = _parse_price_source(price_source)
     DataLakeLayout(paths.data_root).ensure_base_dirs()
     failures: list[str] = []
 
@@ -381,7 +415,21 @@ def bootstrap(
         except Exception as exc:  # noqa: BLE001
             failures.append(f"Naver summary ingest failed: {exc}")
 
-    if not skip_kis:
+    if source_choice in {"naver", "both"}:
+        try:
+            ingest_naver_daily(
+                start.isoformat(),
+                end.isoformat(),
+                paths.root,
+                ticker_limit,
+                naver_chunk_days,
+                ticker_batch_size,
+                0.02,
+            )
+        except Exception as exc:  # noqa: BLE001
+            failures.append(f"Naver daily price ingest failed: {exc}")
+
+    if source_choice in {"kis", "both"} and not skip_kis:
         if settings.has_kis:
             try:
                 ingest_kis_universe(
@@ -391,6 +439,7 @@ def bootstrap(
                     ticker_limit,
                     chunk_days,
                     sleep_seconds,
+                    ticker_batch_size,
                 )
             except Exception as exc:  # noqa: BLE001
                 failures.append(f"KIS universe price ingest failed: {exc}")
@@ -598,6 +647,13 @@ def _naver_client(settings: RuntimeSettings) -> NaverFinanceClient:
     )
 
 
+def _naver_daily_client(settings: RuntimeSettings) -> NaverDailyPriceClient:
+    return NaverDailyPriceClient(
+        HttpJsonClient("naver", settings.naver_finance_api_base_url),
+        settings.naver_finance_user_agent,
+    )
+
+
 def _krx_client(settings: RuntimeSettings) -> HttpJsonClient:
     if not settings.krx_openapi_key:
         raise typer.BadParameter("KRX_OPENAPI_KEY is required")
@@ -697,6 +753,13 @@ def _parse_markets(value: str) -> tuple[str, ...]:
     return markets
 
 
+def _parse_price_source(value: str) -> str:
+    source = value.strip().lower()
+    if source not in {"naver", "kis", "both"}:
+        raise typer.BadParameter("price_source must be one of: naver, kis, both")
+    return source
+
+
 def _previous_weekday(value: date) -> date:
     current = value
     if current.weekday() >= 5:
@@ -706,9 +769,18 @@ def _previous_weekday(value: date) -> date:
 
 def _print_results(results) -> None:
     for result in results:
-        status = "skipped" if result.skipped else "wrote"
-        suffix = f" ({result.reason})" if result.reason else ""
-        typer.echo(f"{status}: {result.path} rows={result.rows}{suffix}")
+        _print_result(result)
+
+
+def _run_and_print(adapters, since: date, until: date) -> None:
+    for result in IngestOrchestrator(adapters).run_iter(since, until):
+        _print_result(result)
+
+
+def _print_result(result) -> None:
+    status = "skipped" if result.skipped else "wrote"
+    suffix = f" ({result.reason})" if result.reason else ""
+    typer.echo(f"{status}: {result.path} rows={result.rows}{suffix}")
 
 
 def _print_summaries(summaries) -> None:

@@ -13,10 +13,11 @@ class IngestOrchestrator:
 
     adapters: Iterable[SourceAdapter]
 
-    def run(self, since: date, until: date) -> list[WriteResult]:
-        results: list[WriteResult] = []
+    def run_iter(self, since: date, until: date) -> Iterable[WriteResult]:
         for adapter in self.adapters:
             for unit in adapter.list_pending(since, until):
                 batch = adapter.fetch(unit)
-                results.append(adapter.write_bronze(batch))
-        return results
+                yield adapter.write_bronze(batch)
+
+    def run(self, since: date, until: date) -> list[WriteResult]:
+        return list(self.run_iter(since, until))

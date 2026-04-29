@@ -48,35 +48,47 @@ class KisUniverseDailyAdapter:
     tickers: tuple[str, ...]
     chunk_days: int = 90
     sleep_seconds: float = 0.05
+    ticker_batch_size: int = 50
     name: str = "kis_universe_daily"
 
     def list_pending(self, since: date, until: date) -> Iterable[IngestUnit]:
         current = since
         while current <= until:
             chunk_until = min(until, current + timedelta(days=max(1, self.chunk_days) - 1))
-            yield IngestUnit(
-                self.name,
-                chunk_until,
-                "/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice",
-                {
-                    "ticker_count": len(self.tickers),
-                    "since": current.isoformat(),
-                    "until": chunk_until.isoformat(),
-                },
-            )
+            tickers = self.tickers
+            if current == chunk_until:
+                existing = _existing_tickers_for_date(self.layout, current)
+                tickers = tuple(ticker for ticker in self.tickers if ticker not in existing)
+            batch_size = max(1, self.ticker_batch_size)
+            for start in range(0, len(tickers), batch_size):
+                batch_tickers = tickers[start : start + batch_size]
+                yield IngestUnit(
+                    self.name,
+                    chunk_until,
+                    "/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice",
+                    {
+                        "ticker_count": len(batch_tickers),
+                        "total_ticker_count": len(self.tickers),
+                        "ticker_start": start,
+                        "tickers": batch_tickers,
+                        "since": current.isoformat(),
+                        "until": chunk_until.isoformat(),
+                    },
+                )
             current = chunk_until + timedelta(days=1)
 
     def fetch(self, unit: IngestUnit) -> RawBatch:
         since = date.fromisoformat(str(unit.params["since"]))
         until = date.fromisoformat(str(unit.params["until"]))
+        tickers = tuple(str(ticker) for ticker in unit.params.get("tickers", self.tickers))
         rows: list[dict[str, object]] = []
         failures: list[str] = []
-        for index, ticker in enumerate(self.tickers, start=1):
+        for index, ticker in enumerate(tickers, start=1):
             try:
                 rows.extend(self.client.fetch_daily_prices(ticker, since, until))
             except Exception as exc:  # noqa: BLE001
                 failures.append(f"{ticker}:{exc}")
-            if self.sleep_seconds > 0 and index < len(self.tickers):
+            if self.sleep_seconds > 0 and index < len(tickers):
                 sleep(self.sleep_seconds)
         if failures and not rows:
             sample = "; ".join(failures[:5])
@@ -203,3 +215,14 @@ def _align_price_frame(frame: pl.DataFrame) -> pl.DataFrame:
             for column, dtype in PRICE_SCHEMA.items()
         ]
     )
+
+
+def _existing_tickers_for_date(layout: DataLakeLayout, logical_date: date) -> set[str]:
+    path = layout.partition_path("bronze.kis_daily_raw", logical_date)
+    if not path.exists():
+        return set()
+    try:
+        frame = pl.read_parquet(path, columns=["ticker"])
+    except (OSError, pl.exceptions.PolarsError):
+        return set()
+    return set(frame["ticker"].cast(pl.String).str.zfill(6).to_list())

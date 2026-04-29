@@ -220,6 +220,12 @@ dataset_registry: dict[str, DatasetSpec] = {
         "bronze/kis_daily/dt=*/part.parquet",
         _empty_price_raw(),
     ),
+    "bronze.naver_daily_raw": DatasetSpec(
+        "bronze.naver_daily_raw",
+        "bronze",
+        "bronze/naver_daily/request_dt=*/chunk=*/part.parquet",
+        _empty_price_raw(),
+    ),
     "bronze.naver_summary_raw": DatasetSpec(
         "bronze.naver_summary_raw",
         "bronze",

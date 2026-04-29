@@ -106,19 +106,23 @@ python -m finance_pi.cli.app bootstrap --since 2024-01-01 --until 2026-04-28 --r
 ```
 
 For a larger historical load, widen `--since`. Start with a short range or
-`--ticker-limit 20` first so KIS authorization and rate limits are visible before
-launching a long job:
+`--ticker-limit 20` first so Naver throughput and local disk writes are visible
+before launching a long job:
 
 ```bash
 python -m finance_pi.cli.app bootstrap --since 2026-04-28 --until 2026-04-28 --root . --ticker-limit 20
 ```
 
-The default price path is:
+The default historical bootstrap price path is:
 
 1. OpenDART `corpCode.xml` for the current listed ticker universe.
-2. Naver Finance market summary snapshot for `market_cap` and `listed_shares`.
-3. KIS daily item chart per ticker for OHLCV/trading value.
+2. Naver daily chart data for historical OHLCV.
+3. Naver Finance market summary snapshot for same-day `market_cap` and `listed_shares`.
 4. Bronze to Silver/Gold transforms.
+
+KIS is still available for short recent runs with `--price-source kis` or
+`--price-source both`, but do not use it for multi-year universe backfills. It is
+too slow for that shape of workload.
 
 KRX is not required for the normal pipeline.
 
@@ -133,6 +137,7 @@ Manual source commands are also available:
 python -m finance_pi.cli.app check-kis 005930 2026-04-28 --root .
 python -m finance_pi.cli.app ingest dart-company
 python -m finance_pi.cli.app ingest naver-summary --snapshot-date 2026-04-29 --root .
+python -m finance_pi.cli.app ingest naver-daily --since 2024-01-01 --until 2026-04-28 --root . --limit 20
 python -m finance_pi.cli.app ingest kis-universe --since 2026-04-29 --until 2026-04-29 --limit 20
 python -m finance_pi.cli.app ingest dart-filings --since 2026-04-28 --until 2026-04-29
 python -m finance_pi.cli.app build all --root .

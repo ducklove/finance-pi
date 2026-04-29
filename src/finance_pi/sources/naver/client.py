@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import ast
 import html
 import re
 from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
+from finance_pi.config import format_yyyymmdd, parse_yyyymmdd
 from finance_pi.http import HttpJsonClient
 from finance_pi.sources.parsing import parse_float, parse_int
 
@@ -64,6 +66,26 @@ class NaverFinanceClient:
         )
 
 
+@dataclass(frozen=True)
+class NaverDailyPriceClient:
+    http: HttpJsonClient
+    user_agent: str = "Mozilla/5.0 finance-pi/0.1"
+
+    def fetch_daily_prices(self, ticker: str, since: date, until: date) -> list[dict[str, Any]]:
+        payload = self.http.get_text(
+            "/siseJson.naver",
+            headers={"User-Agent": self.user_agent},
+            params={
+                "symbol": ticker.zfill(6),
+                "requestType": 1,
+                "startTime": format_yyyymmdd(since),
+                "endTime": format_yyyymmdd(until),
+                "timeframe": "day",
+            },
+        )
+        return parse_daily_price_payload(payload, ticker)
+
+
 def parse_market_sum_page(
     text: str,
     snapshot_date: date,
@@ -99,6 +121,34 @@ def parse_market_sum_page(
                 "volume": _parse_int(cells[9]),
                 "per": _parse_float(cells[10]),
                 "roe": _parse_float(cells[11]),
+            }
+        )
+    return rows
+
+
+def parse_daily_price_payload(payload: str, ticker: str) -> list[dict[str, Any]]:
+    parsed = ast.literal_eval(payload.strip())
+    if not isinstance(parsed, list) or not parsed:
+        return []
+    rows: list[dict[str, Any]] = []
+    for raw in parsed[1:]:
+        if not isinstance(raw, list) or len(raw) < 6:
+            continue
+        rows.append(
+            {
+                "date": parse_yyyymmdd(str(raw[0])),
+                "ticker": ticker.zfill(6),
+                "isin": None,
+                "name": ticker.zfill(6),
+                "market": "KRX",
+                "open": parse_float(raw[1], default=0.0),
+                "high": parse_float(raw[2], default=0.0),
+                "low": parse_float(raw[3], default=0.0),
+                "close": parse_float(raw[4], default=0.0),
+                "volume": parse_int(raw[5], default=0),
+                "trading_value": None,
+                "market_cap": None,
+                "listed_shares": None,
             }
         )
     return rows

@@ -26,6 +26,7 @@ KNOWN_DOTENV_KEYS = frozenset(
         "KIS_ACCOUNT_NO",
         "KIS_ACCOUNT_PRODUCT_CODE",
         "NAVER_FINANCE_BASE_URL",
+        "NAVER_FINANCE_API_BASE_URL",
         "NAVER_FINANCE_USER_AGENT",
     }
 )
@@ -77,6 +78,7 @@ class RuntimeSettings:
     kis_app_secret: str | None = None
     kis_access_token: str | None = None
     naver_finance_base_url: str = "https://finance.naver.com"
+    naver_finance_api_base_url: str = "https://api.finance.naver.com"
     naver_finance_user_agent: str = "Mozilla/5.0 finance-pi/0.1"
 
     @classmethod
@@ -106,6 +108,8 @@ class RuntimeSettings:
             kis_access_token=_env_first("KIS_ACCESS_TOKEN"),
             naver_finance_base_url=_env_first("NAVER_FINANCE_BASE_URL")
             or cls.naver_finance_base_url,
+            naver_finance_api_base_url=_env_first("NAVER_FINANCE_API_BASE_URL")
+            or cls.naver_finance_api_base_url,
             naver_finance_user_agent=_env_first("NAVER_FINANCE_USER_AGENT")
             or cls.naver_finance_user_agent,
         )

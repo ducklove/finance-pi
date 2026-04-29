@@ -15,6 +15,7 @@ class DataLakeLayout:
         for relative in [
             "bronze/krx_daily",
             "bronze/kis_daily",
+            "bronze/naver_daily",
             "bronze/naver_summary",
             "bronze/dart_filings",
             "bronze/dart_financials",

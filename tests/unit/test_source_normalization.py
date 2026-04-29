@@ -4,7 +4,7 @@ from datetime import date
 
 from finance_pi.sources.kis import normalize_kis_daily_row
 from finance_pi.sources.krx import normalize_krx_daily_row
-from finance_pi.sources.naver import parse_market_sum_page
+from finance_pi.sources.naver import parse_daily_price_payload, parse_market_sum_page
 from finance_pi.sources.opendart import DartCompanyRow, DartFilingRow
 
 
@@ -102,3 +102,17 @@ def test_parse_naver_market_sum_page_converts_units() -> None:
     assert row["market_cap"] == 1_234_567 * 100_000_000
     assert row["listed_shares"] == 5_846_279_000
     assert row["foreign_ownership_pct"] == 49.19
+
+
+def test_parse_naver_daily_price_payload() -> None:
+    payload = """
+    [['날짜', '시가', '고가', '저가', '종가', '거래량', '외국인소진율'],
+     ['20260428', 224000, 226000, 221500, 222000, 18444490, 49.19]]
+    """
+
+    row = parse_daily_price_payload(payload, "005930")[0]
+
+    assert row["date"] == date(2026, 4, 28)
+    assert row["ticker"] == "005930"
+    assert row["close"] == 222000.0
+    assert row["volume"] == 18444490

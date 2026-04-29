@@ -37,6 +37,7 @@ def build_silver_prices(data_root: Path) -> list[BuildSummary]:
     for source, pattern in [
         ("krx", "bronze/krx_daily/dt=*/part.parquet"),
         ("kis", "bronze/kis_daily/dt=*/part.parquet"),
+        ("naver", "bronze/naver_daily/request_dt=*/chunk=*/part.parquet"),
         ("pre2010", "bronze/pre2010/source=*/dt=*/part.parquet"),
     ]:
         frame = _read_optional(data_root / pattern)
