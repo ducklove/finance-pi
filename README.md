@@ -63,6 +63,8 @@ pipeline no longer depends on KRX.
 Required live keys are `OPENDART_API_KEY`, `KIS_APP_KEY`, and
 `KIS_APP_SECRET`. Keep KIS secrets as exact single-line values in `.env`;
 `doctor` and `check-kis` warn when a pasted secret appears to be wrapped.
+KIS access tokens are cached under `data/_cache/kis/token.json` so `check-kis`,
+`bootstrap`, and `daily` do not trip the KIS one-token-per-minute issuance limit.
 Naver Finance does not require a key, but its summary page is treated as a
 snapshot source and is only joined to matching price dates to avoid look-ahead.
 

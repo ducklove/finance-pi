@@ -56,6 +56,10 @@ wraps onto the next line in `.env`, KIS token issuance will fail with
 `EGW00105` / invalid AppSecret. `doctor` prints line-number warnings for
 malformed `.env` entries without showing secret values.
 
+KIS allows token issuance only about once per minute. `finance-pi` caches issued
+tokens in `data/_cache/kis/token.json`, so run `check-kis` once and then reuse
+the cached token for `bootstrap` and `daily`.
+
 Keep `.env` on the server only. It is ignored by Git.
 
 ## 4. Put Data On SSD

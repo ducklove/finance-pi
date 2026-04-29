@@ -21,6 +21,7 @@ from finance_pi.sources.kis import (
     KisAuthClient,
     KisDailyAdapter,
     KisDailyPriceClient,
+    KisTokenCache,
     KisUniverseDailyAdapter,
 )
 from finance_pi.sources.krx import KrxDailyAdapter
@@ -126,7 +127,11 @@ def check_kis(
     _print_dotenv_issues(paths.root)
     date_value = _parse_report_date(check_date)
     try:
-        rows = _kis_client(settings).fetch_daily_prices(ticker.zfill(6), date_value, date_value)
+        rows = _kis_client(settings, paths).fetch_daily_prices(
+            ticker.zfill(6),
+            date_value,
+            date_value,
+        )
         typer.echo(
             f"KIS: OK ticker={ticker.zfill(6)} date={date_value.isoformat()} rows={len(rows)}"
         )
@@ -266,7 +271,7 @@ def ingest_kis(
     adapter = KisDailyAdapter(
         layout,
         ParquetDatasetWriter(),
-        _kis_client(settings),
+        _kis_client(settings, paths),
         ticker,
     )
     _print_results(
@@ -289,7 +294,7 @@ def ingest_kis_universe(
     adapter = KisUniverseDailyAdapter(
         layout=DataLakeLayout(paths.data_root),
         writer=ParquetDatasetWriter(),
-        client=_kis_client(settings),
+        client=_kis_client(settings, paths),
         tickers=tickers,
         chunk_days=chunk_days,
         sleep_seconds=sleep_seconds,
@@ -557,20 +562,27 @@ def _opendart_client(settings: RuntimeSettings) -> OpenDartClient:
     )
 
 
-def _kis_client(settings: RuntimeSettings) -> KisDailyPriceClient:
+def _kis_client(settings: RuntimeSettings, paths: ProjectPaths) -> KisDailyPriceClient:
     if not settings.kis_app_key or not settings.kis_app_secret:
         raise typer.BadParameter("KIS_APP_KEY and KIS_APP_SECRET are required")
     if settings.kis_access_token:
         token = settings.kis_access_token
     else:
-        try:
-            token = KisAuthClient(
-                settings.kis_base_url,
-                settings.kis_app_key,
-                settings.kis_app_secret,
-            ).issue_token().access_token
-        except SourceApiError as exc:
-            raise SourceApiError("kis", _kis_error_message(exc)) from exc
+        cache = KisTokenCache(paths.data_root / "_cache" / "kis" / "token.json")
+        cached = cache.read(settings.kis_app_key)
+        if cached is not None:
+            token = cached.access_token
+        else:
+            try:
+                issued = KisAuthClient(
+                    settings.kis_base_url,
+                    settings.kis_app_key,
+                    settings.kis_app_secret,
+                ).issue_token()
+                cache.write(settings.kis_app_key, issued)
+                token = issued.access_token
+            except SourceApiError as exc:
+                raise SourceApiError("kis", _kis_error_message(exc)) from exc
     return KisDailyPriceClient(
         HttpJsonClient("kis", settings.kis_base_url),
         settings.kis_app_key,
@@ -727,6 +739,11 @@ def _kis_error_message(exc: Exception) -> str:
         and "check kis_app_key" not in lowered
     ):
         hints.append("hint: check KIS_APP_KEY and whether the app is approved in KIS Open API.")
+    if "egw00133" in lowered and "token issuance" not in lowered:
+        hints.append(
+            "hint: KIS limits token issuance to about once per minute. Wait 60 seconds "
+            "once; successful future runs reuse data/_cache/kis/token.json."
+        )
     if (
         ("invalid token" in lowered or "기간이 만료" in base)
         and "fresh token" not in lowered
