@@ -41,16 +41,20 @@ cp .env.example .env
 nano .env
 ```
 
-Required once live ingestion is enabled:
+Required for the normal live pipeline:
 
-- `KRX_OPENAPI_KEY`
 - `OPENDART_API_KEY`
-
-Optional for KIS cross-checks:
-
-- `KIS_BASE_URL`
 - `KIS_APP_KEY`
 - `KIS_APP_SECRET`
+
+Optional diagnostics:
+
+- `KRX_OPENAPI_KEY`
+
+KIS `AppKey` and `AppSecret` must be exact single-line values. If a long secret
+wraps onto the next line in `.env`, KIS token issuance will fail with
+`EGW00105` / invalid AppSecret. `doctor` prints line-number warnings for
+malformed `.env` entries without showing secret values.
 
 Keep `.env` on the server only. It is ignored by Git.
 
@@ -71,6 +75,7 @@ cd /opt/finance-pi
 source .venv/bin/activate
 
 python -m finance_pi.cli.app doctor --root .
+python -m finance_pi.cli.app check-kis 005930 2026-04-28 --root .
 python -m ruff check .
 python -m pytest
 python -m finance_pi.cli.app daily --root . --no-ingest
@@ -93,27 +98,31 @@ will finish quickly unless the source APIs are slow. The first real server run
 should be a backfill:
 
 ```bash
-python -m finance_pi.cli.app check-krx 2026-04-28 --root .
 python -m finance_pi.cli.app bootstrap --since 2024-01-01 --until 2026-04-28 --root .
 ```
 
-For a larger historical load, widen `--since`. Start with a short range first so
-KRX authorization problems are visible before launching a long job.
+For a larger historical load, widen `--since`. Start with a short range or
+`--ticker-limit 20` first so KIS authorization and rate limits are visible before
+launching a long job:
 
-If KRX returns `401 Unauthorized`, the usual causes are:
+```bash
+python -m finance_pi.cli.app bootstrap --since 2026-04-28 --until 2026-04-28 --root . --ticker-limit 20
+```
 
-- the API key has expired or was copied with hidden whitespace
-- the KRX Open API portal has not approved the specific stock API service
-- only one of the two stock APIs was approved:
-  - KOSPI: `/svc/apis/sto/stk_bydd_trd`
-  - KOSDAQ: `/svc/apis/sto/ksq_bydd_trd`
+The default price path is:
+
+1. OpenDART `corpCode.xml` for the current listed ticker universe.
+2. KIS daily item chart per ticker for OHLCV/trading value.
+3. Bronze to Silver/Gold transforms.
+
+KRX is not required for the normal pipeline.
 
 Manual source commands are also available:
 
 ```bash
-python -m finance_pi.cli.app check-krx 2026-04-28
-python -m finance_pi.cli.app ingest krx --since 2026-04-29 --until 2026-04-29
+python -m finance_pi.cli.app check-kis 005930 2026-04-28 --root .
 python -m finance_pi.cli.app ingest dart-company
+python -m finance_pi.cli.app ingest kis-universe --since 2026-04-29 --until 2026-04-29 --limit 20
 python -m finance_pi.cli.app ingest dart-filings --since 2026-04-28 --until 2026-04-29
 python -m finance_pi.cli.app build all --root .
 python -m finance_pi.cli.app catalog build --root .
@@ -156,7 +165,7 @@ python -m pytest
 
 ## Current Runtime Scope
 
-The scheduled `daily` command initializes the data lake, attempts KRX and
-OpenDART filing ingest when keys are configured, rebuilds Silver/Gold datasets,
-rebuilds the DuckDB view catalog, and writes DQ/Fraud reports. KIS remains a
-manual cross-check command because it is ticker-range oriented.
+The scheduled `daily` command initializes the data lake, refreshes the OpenDART
+company snapshot, attempts KIS universe price ingest and OpenDART filing ingest
+when keys are configured, rebuilds Silver/Gold datasets, rebuilds the DuckDB
+view catalog, and writes DQ/Fraud reports.

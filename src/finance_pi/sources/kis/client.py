@@ -37,18 +37,25 @@ class KisDailyPriceClient:
         )
         if str(payload.get("rt_cd", "0")) != "0":
             raise SourceApiError("kis", str(payload.get("msg1", "request failed")), payload=payload)
+        metadata = payload.get("output1", {})
+        metadata = metadata if isinstance(metadata, dict) else {}
         rows = payload.get("output2", [])
         if not isinstance(rows, list):
             raise SourceApiError("kis", "expected output2 list", payload=payload)
-        return [normalize_kis_daily_row(ticker, row) for row in rows if isinstance(row, dict)]
+        return [
+            normalize_kis_daily_row(ticker, {**metadata, **row})
+            for row in rows
+            if isinstance(row, dict)
+        ]
 
 
 def normalize_kis_daily_row(ticker: str, row: dict[str, Any]) -> dict[str, Any]:
+    normalized_ticker = ticker.zfill(6)
     return {
         "date": parse_date(value_for(row, "stck_bsop_date", "date")),
-        "ticker": ticker.zfill(6),
+        "ticker": normalized_ticker,
         "isin": None,
-        "name": ticker.zfill(6),
+        "name": str(value_for(row, "hts_kor_isnm", "prdt_name", "name", default=normalized_ticker)),
         "market": "KRX",
         "open": parse_float(value_for(row, "stck_oprc", "open"), default=0.0),
         "high": parse_float(value_for(row, "stck_hgpr", "high"), default=0.0),

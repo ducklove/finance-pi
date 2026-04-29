@@ -11,13 +11,18 @@ import typer
 
 from finance_pi.backtest import BacktestConfig, BacktestEngine
 from finance_pi.calendar import TradingCalendar
-from finance_pi.config import ProjectPaths, RuntimeSettings
+from finance_pi.config import ProjectPaths, RuntimeSettings, diagnose_dotenv
 from finance_pi.factors import ParquetFactorContext, factor_registry
-from finance_pi.http import HttpJsonClient
+from finance_pi.http import HttpJsonClient, SourceApiError
 from finance_pi.ingest import IngestOrchestrator
 from finance_pi.reports.data_quality import build_data_quality_report
 from finance_pi.reports.fraud import build_fraud_report
-from finance_pi.sources.kis import KisAuthClient, KisDailyAdapter, KisDailyPriceClient
+from finance_pi.sources.kis import (
+    KisAuthClient,
+    KisDailyAdapter,
+    KisDailyPriceClient,
+    KisUniverseDailyAdapter,
+)
 from finance_pi.sources.krx import KrxDailyAdapter
 from finance_pi.sources.opendart import (
     DartCompanyAdapter,
@@ -71,6 +76,7 @@ def doctor(root: Path = typer.Option(Path("."), help="Workspace root")) -> None:
     typer.echo(f"KRX key: {'configured' if settings.has_krx else 'missing'}")
     typer.echo(f"OpenDART key: {'configured' if settings.has_opendart else 'missing'}")
     typer.echo(f"KIS key/token: {'configured' if settings.has_kis else 'missing'}")
+    _print_dotenv_issues(paths.root)
 
     if platform.machine() in {"armv7l", "armv6l"}:
         typer.echo("Warning: 32-bit Raspberry Pi OS is not recommended for DuckDB/Polars.")
@@ -104,6 +110,29 @@ def check_krx(
                 "specific stock API service was not approved in the KRX Open API portal."
             )
             raise typer.Exit(code=1) from exc
+
+
+@app.command("check-kis")
+def check_kis(
+    ticker: str = typer.Argument("005930", help="Six-digit ticker"),
+    check_date: str | None = typer.Argument(None, help="Date as YYYY-MM-DD"),
+    root: Path = typer.Option(Path("."), help="Workspace root"),
+) -> None:
+    """Issue or reuse a KIS token and fetch one daily OHLCV sample."""
+
+    paths = ProjectPaths(root=root)
+    settings = RuntimeSettings.load(paths.root)
+    _print_dotenv_issues(paths.root)
+    date_value = _parse_report_date(check_date)
+    try:
+        rows = _kis_client(settings).fetch_daily_prices(ticker.zfill(6), date_value, date_value)
+        typer.echo(
+            f"KIS: OK ticker={ticker.zfill(6)} date={date_value.isoformat()} rows={len(rows)}"
+        )
+    except Exception as exc:  # noqa: BLE001
+        typer.echo("KIS: FAIL")
+        typer.echo(_kis_error_message(exc))
+        raise typer.Exit(code=1) from exc
 
 
 @app.command("init")
@@ -231,25 +260,38 @@ def ingest_kis(
 ) -> None:
     paths = ProjectPaths(root=root)
     settings = RuntimeSettings.load(paths.root)
-    if not settings.kis_app_key or not settings.kis_app_secret:
-        raise typer.BadParameter("KIS_APP_KEY and KIS_APP_SECRET are required")
-    token = settings.kis_access_token or KisAuthClient(
-        settings.kis_base_url,
-        settings.kis_app_key,
-        settings.kis_app_secret,
-    ).issue_token().access_token
     layout = DataLakeLayout(paths.data_root)
     layout.ensure_base_dirs()
     adapter = KisDailyAdapter(
         layout,
         ParquetDatasetWriter(),
-        KisDailyPriceClient(
-            HttpJsonClient("kis", settings.kis_base_url),
-            settings.kis_app_key,
-            settings.kis_app_secret,
-            token,
-        ),
+        _kis_client(settings),
         ticker,
+    )
+    _print_results(
+        IngestOrchestrator([adapter]).run(_parse_report_date(since), _parse_report_date(until))
+    )
+
+
+@ingest_app.command("kis-universe")
+def ingest_kis_universe(
+    since: str = typer.Option(..., help="Start date as YYYY-MM-DD"),
+    until: str = typer.Option(..., help="End date as YYYY-MM-DD"),
+    root: Path = typer.Option(Path("."), help="Workspace root"),
+    limit: int | None = typer.Option(None, help="Limit ticker count for a small smoke run"),
+    chunk_days: int = typer.Option(90, help="Date range days per KIS round"),
+    sleep_seconds: float = typer.Option(0.05, help="Sleep between ticker calls"),
+) -> None:
+    paths = ProjectPaths(root=root)
+    settings = RuntimeSettings.load(paths.root)
+    tickers = _latest_dart_tickers(paths, limit=limit)
+    adapter = KisUniverseDailyAdapter(
+        layout=DataLakeLayout(paths.data_root),
+        writer=ParquetDatasetWriter(),
+        client=_kis_client(settings),
+        tickers=tickers,
+        chunk_days=chunk_days,
+        sleep_seconds=sleep_seconds,
     )
     _print_results(
         IngestOrchestrator([adapter]).run(_parse_report_date(since), _parse_report_date(until))
@@ -266,8 +308,12 @@ def bootstrap(
     since: str = typer.Option(..., help="Initial backfill start date as YYYY-MM-DD"),
     until: str | None = typer.Option(None, help="Initial backfill end date as YYYY-MM-DD"),
     root: Path = typer.Option(Path("."), help="Workspace root"),
-    skip_krx: bool = typer.Option(False, help="Skip KRX price backfill"),
+    skip_kis: bool = typer.Option(False, help="Skip KIS price backfill"),
+    skip_krx: bool = typer.Option(True, help="KRX is disabled by default"),
     skip_dart_company: bool = typer.Option(False, help="Skip DART corpCode snapshot"),
+    ticker_limit: int | None = typer.Option(None, help="Limit tickers for smoke bootstrap"),
+    chunk_days: int = typer.Option(90, help="Date range days per KIS round"),
+    sleep_seconds: float = typer.Option(0.05, help="Sleep between KIS ticker calls"),
     strict: bool = typer.Option(True, help="Fail if a configured live source fails"),
 ) -> None:
     """Run the first real bootstrap: source backfill, transforms, catalog, reports."""
@@ -296,6 +342,22 @@ def bootstrap(
                 failures.append(f"OpenDART company ingest failed: {exc}")
         else:
             failures.append("OpenDART company ingest skipped: OPENDART_API_KEY missing")
+
+    if not skip_kis:
+        if settings.has_kis:
+            try:
+                ingest_kis_universe(
+                    start.isoformat(),
+                    end.isoformat(),
+                    paths.root,
+                    ticker_limit,
+                    chunk_days,
+                    sleep_seconds,
+                )
+            except Exception as exc:  # noqa: BLE001
+                failures.append(f"KIS universe price ingest failed: {exc}")
+        else:
+            failures.append("KIS price ingest skipped: KIS_APP_KEY/KIS_APP_SECRET missing")
 
     for message in failures:
         typer.echo(message)
@@ -410,9 +472,9 @@ def run_daily(
 ) -> None:
     """Run the daily local maintenance job.
 
-    Live source ingestion will plug into this command once the KRX/OpenDART/KIS
-    adapters are configured. For now it guarantees the data lake layout,
-    DuckDB catalog, and baseline reports exist.
+    KIS is the default daily price source. OpenDART filings are ingested when
+    configured, then Silver/Gold datasets, the DuckDB catalog, and reports are
+    rebuilt.
     """
 
     parsed_date = _parse_report_date(report_date)
@@ -461,6 +523,28 @@ def _opendart_client(settings: RuntimeSettings) -> OpenDartClient:
     )
 
 
+def _kis_client(settings: RuntimeSettings) -> KisDailyPriceClient:
+    if not settings.kis_app_key or not settings.kis_app_secret:
+        raise typer.BadParameter("KIS_APP_KEY and KIS_APP_SECRET are required")
+    if settings.kis_access_token:
+        token = settings.kis_access_token
+    else:
+        try:
+            token = KisAuthClient(
+                settings.kis_base_url,
+                settings.kis_app_key,
+                settings.kis_app_secret,
+            ).issue_token().access_token
+        except SourceApiError as exc:
+            raise SourceApiError("kis", _kis_error_message(exc)) from exc
+    return KisDailyPriceClient(
+        HttpJsonClient("kis", settings.kis_base_url),
+        settings.kis_app_key,
+        settings.kis_app_secret,
+        token,
+    )
+
+
 def _krx_client(settings: RuntimeSettings) -> HttpJsonClient:
     if not settings.krx_openapi_key:
         raise typer.BadParameter("KRX_OPENAPI_KEY is required")
@@ -489,22 +573,52 @@ def _run_daily_ingest(
 ) -> list[str]:
     start = _previous_weekday(report_date - timedelta(days=1))
     failures: list[str] = []
-    if settings.has_krx:
+    if settings.has_opendart:
         try:
-            ingest_krx(start.isoformat(), start.isoformat(), paths.root)
+            ingest_dart_company(report_date.isoformat(), paths.root)
         except Exception as exc:  # noqa: BLE001
-            failures.append(f"KRX ingest failed: {exc}")
+            failures.append(f"OpenDART company ingest failed: {exc}")
     else:
-        typer.echo("KRX ingest skipped: KRX_OPENAPI_KEY missing")
+        typer.echo("OpenDART company/filings ingest skipped: OPENDART_API_KEY missing")
+
+    if settings.has_kis:
+        try:
+            ingest_kis_universe(start.isoformat(), start.isoformat(), paths.root, None, 1, 0.05)
+        except Exception as exc:  # noqa: BLE001
+            failures.append(f"KIS universe price ingest failed: {exc}")
+    else:
+        typer.echo("KIS price ingest skipped: KIS_APP_KEY/KIS_APP_SECRET missing")
 
     if settings.has_opendart:
         try:
             ingest_dart_filings(start.isoformat(), report_date.isoformat(), paths.root)
         except Exception as exc:  # noqa: BLE001
             failures.append(f"OpenDART filings ingest failed: {exc}")
-    else:
-        typer.echo("OpenDART filings ingest skipped: OPENDART_API_KEY missing")
     return failures
+
+
+def _latest_dart_tickers(paths: ProjectPaths, limit: int | None = None) -> tuple[str, ...]:
+    files = sorted(paths.data_root.glob("bronze/dart_company/snapshot_dt=*/part.parquet"))
+    if not files:
+        raise typer.BadParameter("No DART company data. Run ingest dart-company first.")
+    frame = pl.read_parquet([path.as_posix() for path in files], hive_partitioning=True)
+    if frame.is_empty():
+        raise typer.BadParameter("DART company dataset is empty.")
+    latest = frame["snapshot_dt"].max()
+    tickers = (
+        frame.filter((pl.col("snapshot_dt") == latest) & pl.col("stock_code").is_not_null())
+        .select(pl.col("stock_code").cast(pl.String).str.zfill(6).alias("ticker"))
+        .unique()
+        .sort("ticker")
+        .to_series()
+        .to_list()
+    )
+    if limit is not None:
+        tickers = tickers[:limit]
+    if not tickers:
+        raise typer.BadParameter("No stock_code values found in latest DART company snapshot.")
+    typer.echo(f"KIS universe tickers: {len(tickers)} from DART snapshot {latest}")
+    return tuple(tickers)
 
 
 def _previous_weekday(value: date) -> date:
@@ -524,6 +638,37 @@ def _print_results(results) -> None:
 def _print_summaries(summaries) -> None:
     for summary in summaries:
         typer.echo(f"{summary.dataset}\trows={summary.rows}\tfiles={summary.files}")
+
+
+def _print_dotenv_issues(root: Path) -> None:
+    for issue in diagnose_dotenv(root / ".env"):
+        typer.echo(f".env warning line {issue.line_no}: {issue.message}")
+
+
+def _kis_error_message(exc: Exception) -> str:
+    message = str(exc)
+    base = message.removeprefix("kis: ")
+    lowered = base.lower()
+    hints: list[str] = []
+    if (
+        ("egw00105" in lowered or "appsecret" in lowered)
+        and "kis_app_secret was rejected" not in lowered
+    ):
+        hints.append(
+            "hint: KIS_APP_SECRET was rejected. Copy the AppSecret exactly as a single "
+            "line in .env; remove any wrapped secret fragments on following lines."
+        )
+    if (
+        ("egw00103" in lowered or "appkey" in lowered)
+        and "check kis_app_key" not in lowered
+    ):
+        hints.append("hint: check KIS_APP_KEY and whether the app is approved in KIS Open API.")
+    if (
+        ("invalid token" in lowered or "기간이 만료" in base)
+        and "fresh token" not in lowered
+    ):
+        hints.append("hint: remove KIS_ACCESS_TOKEN and let finance-pi issue a fresh token.")
+    return "\n".join([base, *hints])
 
 
 if __name__ == "__main__":

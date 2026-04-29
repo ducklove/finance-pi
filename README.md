@@ -15,6 +15,7 @@ platform. The implementation follows `finance-pi-architecture.md`:
 python -m pip install -e ".[dev]"
 python -m finance_pi.cli.app init --root .
 python -m finance_pi.cli.app doctor --root .
+python -m finance_pi.cli.app check-kis 005930 2026-04-28 --root .
 python -m finance_pi.cli.app daily --root . --no-ingest
 pytest
 ```
@@ -24,10 +25,13 @@ The local data lake is created under `data/` and is intentionally ignored by Git
 ## Runtime Commands
 
 ```bash
+# Source diagnostics
+python -m finance_pi.cli.app check-kis 005930 2026-04-28 --root .
+python -m finance_pi.cli.app check-krx 2026-04-28 --root .
+
 # Source ingest
-python -m finance_pi.cli.app check-krx 2026-04-28
-python -m finance_pi.cli.app ingest krx --since 2026-04-29 --until 2026-04-29
 python -m finance_pi.cli.app ingest dart-company
+python -m finance_pi.cli.app ingest kis-universe --since 2026-04-29 --until 2026-04-29
 python -m finance_pi.cli.app ingest dart-filings --since 2026-04-28 --until 2026-04-29
 python -m finance_pi.cli.app ingest dart-financials --corp-code 00126380 --year 2025
 python -m finance_pi.cli.app ingest kis --ticker 005930 --since 2026-04-01 --until 2026-04-29
@@ -50,9 +54,12 @@ with a real date range:
 python -m finance_pi.cli.app bootstrap --since 2024-01-01 --until 2026-04-28 --root .
 ```
 
-If KRX returns `401`, run `check-krx` and verify that the key is approved for
-both KRX stock APIs in the portal: `stk_bydd_trd` for KOSPI and `ksq_bydd_trd`
-for KOSDAQ. A key can exist but still lack service-level approval.
+The default price source is KIS. KRX commands remain available for diagnostics
+or future use, but the normal pipeline no longer depends on KRX.
+
+Required live keys are `OPENDART_API_KEY`, `KIS_APP_KEY`, and
+`KIS_APP_SECRET`. Keep KIS secrets as exact single-line values in `.env`;
+`doctor` and `check-kis` warn when a pasted secret appears to be wrapped.
 
 ## Raspberry Pi Server
 

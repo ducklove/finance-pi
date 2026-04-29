@@ -34,6 +34,7 @@ def test_normalize_kis_daily_row_accepts_output2_fields() -> None:
         "005930",
         {
             "stck_bsop_date": "20240102",
+            "hts_kor_isnm": "Samsung Electronics",
             "stck_oprc": "70000",
             "stck_hgpr": "71000",
             "stck_lwpr": "69000",
@@ -44,6 +45,7 @@ def test_normalize_kis_daily_row_accepts_output2_fields() -> None:
 
     assert row["date"] == date(2024, 1, 2)
     assert row["ticker"] == "005930"
+    assert row["name"] == "Samsung Electronics"
     assert row["close"] == 70500.0
 
 
