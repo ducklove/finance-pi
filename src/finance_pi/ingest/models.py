@@ -29,11 +29,16 @@ class RawBatch:
     rows: list[dict[str, Any]]
 
     def to_frame(self, schema_overrides: dict[str, pl.DataType] | None = None) -> pl.DataFrame:
-        return pl.DataFrame(
-            self.rows,
-            infer_schema_length=None,
-            schema_overrides=schema_overrides,
-        )
+        frame = pl.DataFrame(self.rows, infer_schema_length=None)
+        if not schema_overrides:
+            return frame
+
+        casts = [
+            pl.col(column).cast(dtype, strict=False)
+            for column, dtype in schema_overrides.items()
+            if column in frame.columns
+        ]
+        return frame.with_columns(casts) if casts else frame
 
 
 @dataclass(frozen=True)

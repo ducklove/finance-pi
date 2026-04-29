@@ -33,3 +33,19 @@ def test_raw_batch_to_frame_accepts_null_then_string() -> None:
     frame = batch.to_frame({"stock_code": pl.String})
 
     assert frame["stock_code"].to_list() == [None, "036720"]
+
+
+def test_raw_batch_to_frame_casts_json_date_strings() -> None:
+    batch = RawBatch(
+        IngestUnit("opendart", date(2026, 4, 29), "corpCode.xml"),
+        [
+            {"snapshot_dt": "2026-04-28", "stock_code": None},
+            {"snapshot_dt": "2026-04-28", "stock_code": "036720"},
+        ],
+    )
+
+    frame = batch.to_frame({"snapshot_dt": pl.Date, "stock_code": pl.String})
+
+    assert frame["snapshot_dt"].dtype == pl.Date
+    assert frame["snapshot_dt"].to_list() == [date(2026, 4, 28), date(2026, 4, 28)]
+    assert frame["stock_code"].to_list() == [None, "036720"]
