@@ -24,6 +24,7 @@ from finance_pi.sources.kis import (
     KisUniverseDailyAdapter,
 )
 from finance_pi.sources.krx import KrxDailyAdapter
+from finance_pi.sources.naver import NaverFinanceClient, NaverSummaryAdapter
 from finance_pi.sources.opendart import (
     DartCompanyAdapter,
     DartFilingsAdapter,
@@ -298,6 +299,27 @@ def ingest_kis_universe(
     )
 
 
+@ingest_app.command("naver-summary")
+def ingest_naver_summary(
+    snapshot_date: str | None = typer.Option(None, help="Snapshot date as YYYY-MM-DD"),
+    root: Path = typer.Option(Path("."), help="Workspace root"),
+    markets: str = typer.Option("KOSPI,KOSDAQ", help="Comma-separated KOSPI,KOSDAQ"),
+) -> None:
+    paths = ProjectPaths(root=root)
+    settings = RuntimeSettings.load(paths.root)
+    parsed = _parse_report_date(snapshot_date)
+    layout = DataLakeLayout(paths.data_root)
+    layout.ensure_base_dirs()
+    adapter = NaverSummaryAdapter(
+        layout,
+        ParquetDatasetWriter(),
+        _naver_client(settings),
+        parsed,
+        _parse_markets(markets),
+    )
+    _print_results(IngestOrchestrator([adapter]).run(parsed, parsed))
+
+
 @build_app.command("all")
 def build_everything(root: Path = typer.Option(Path("."), help="Workspace root")) -> None:
     _print_summaries(build_all(ProjectPaths(root=root).data_root))
@@ -311,6 +333,11 @@ def bootstrap(
     skip_kis: bool = typer.Option(False, help="Skip KIS price backfill"),
     skip_krx: bool = typer.Option(True, help="KRX is disabled by default"),
     skip_dart_company: bool = typer.Option(False, help="Skip DART corpCode snapshot"),
+    naver_summary: bool = typer.Option(
+        False,
+        "--naver-summary/--no-naver-summary",
+        help="Fetch current Naver summary for the bootstrap end date",
+    ),
     ticker_limit: int | None = typer.Option(None, help="Limit tickers for smoke bootstrap"),
     chunk_days: int = typer.Option(90, help="Date range days per KIS round"),
     sleep_seconds: float = typer.Option(0.05, help="Sleep between KIS ticker calls"),
@@ -342,6 +369,12 @@ def bootstrap(
                 failures.append(f"OpenDART company ingest failed: {exc}")
         else:
             failures.append("OpenDART company ingest skipped: OPENDART_API_KEY missing")
+
+    if naver_summary:
+        try:
+            ingest_naver_summary(end.isoformat(), paths.root, "KOSPI,KOSDAQ")
+        except Exception as exc:  # noqa: BLE001
+            failures.append(f"Naver summary ingest failed: {exc}")
 
     if not skip_kis:
         if settings.has_kis:
@@ -472,7 +505,8 @@ def run_daily(
 ) -> None:
     """Run the daily local maintenance job.
 
-    KIS is the default daily price source. OpenDART filings are ingested when
+    KIS is the default daily price source. Naver summary snapshots enrich KIS
+    rows with market cap/share count. OpenDART filings are ingested when
     configured, then Silver/Gold datasets, the DuckDB catalog, and reports are
     rebuilt.
     """
@@ -545,6 +579,13 @@ def _kis_client(settings: RuntimeSettings) -> KisDailyPriceClient:
     )
 
 
+def _naver_client(settings: RuntimeSettings) -> NaverFinanceClient:
+    return NaverFinanceClient(
+        HttpJsonClient("naver", settings.naver_finance_base_url),
+        settings.naver_finance_user_agent,
+    )
+
+
 def _krx_client(settings: RuntimeSettings) -> HttpJsonClient:
     if not settings.krx_openapi_key:
         raise typer.BadParameter("KRX_OPENAPI_KEY is required")
@@ -571,7 +612,8 @@ def _run_daily_ingest(
     settings: RuntimeSettings,
     report_date: date,
 ) -> list[str]:
-    start = _previous_weekday(report_date - timedelta(days=1))
+    price_date = _previous_weekday(report_date)
+    filing_start = _previous_weekday(report_date - timedelta(days=1))
     failures: list[str] = []
     if settings.has_opendart:
         try:
@@ -581,9 +623,21 @@ def _run_daily_ingest(
     else:
         typer.echo("OpenDART company/filings ingest skipped: OPENDART_API_KEY missing")
 
+    try:
+        ingest_naver_summary(price_date.isoformat(), paths.root, "KOSPI,KOSDAQ")
+    except Exception as exc:  # noqa: BLE001
+        failures.append(f"Naver summary ingest failed: {exc}")
+
     if settings.has_kis:
         try:
-            ingest_kis_universe(start.isoformat(), start.isoformat(), paths.root, None, 1, 0.05)
+            ingest_kis_universe(
+                price_date.isoformat(),
+                price_date.isoformat(),
+                paths.root,
+                None,
+                1,
+                0.05,
+            )
         except Exception as exc:  # noqa: BLE001
             failures.append(f"KIS universe price ingest failed: {exc}")
     else:
@@ -591,7 +645,7 @@ def _run_daily_ingest(
 
     if settings.has_opendart:
         try:
-            ingest_dart_filings(start.isoformat(), report_date.isoformat(), paths.root)
+            ingest_dart_filings(filing_start.isoformat(), report_date.isoformat(), paths.root)
         except Exception as exc:  # noqa: BLE001
             failures.append(f"OpenDART filings ingest failed: {exc}")
     return failures
@@ -619,6 +673,16 @@ def _latest_dart_tickers(paths: ProjectPaths, limit: int | None = None) -> tuple
         raise typer.BadParameter("No stock_code values found in latest DART company snapshot.")
     typer.echo(f"KIS universe tickers: {len(tickers)} from DART snapshot {latest}")
     return tuple(tickers)
+
+
+def _parse_markets(value: str) -> tuple[str, ...]:
+    markets = tuple(market.strip().upper() for market in value.split(",") if market.strip())
+    invalid = [market for market in markets if market not in {"KOSPI", "KOSDAQ"}]
+    if invalid:
+        raise typer.BadParameter(f"unsupported markets: {', '.join(invalid)}")
+    if not markets:
+        raise typer.BadParameter("at least one market is required")
+    return markets
 
 
 def _previous_weekday(value: date) -> date:

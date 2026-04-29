@@ -66,6 +66,24 @@ class HttpJsonClient:
         wait=wait_exponential(multiplier=0.5, min=0.5, max=5),
         retry=retry_if_exception_type((httpx.TimeoutException, httpx.TransportError)),
     )
+    def get_text(
+        self,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> str:
+        with httpx.Client(base_url=self.base_url, timeout=self.timeout) as client:
+            response = client.get(path, params=params, headers=self._headers(headers))
+            _raise_for_status(self.source, response)
+            return response.text
+
+    @retry(
+        reraise=True,
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=0.5, min=0.5, max=5),
+        retry=retry_if_exception_type((httpx.TimeoutException, httpx.TransportError)),
+    )
     def post_json(
         self,
         path: str,

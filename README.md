@@ -31,6 +31,7 @@ python -m finance_pi.cli.app check-krx 2026-04-28 --root .
 
 # Source ingest
 python -m finance_pi.cli.app ingest dart-company
+python -m finance_pi.cli.app ingest naver-summary --snapshot-date 2026-04-29 --root .
 python -m finance_pi.cli.app ingest kis-universe --since 2026-04-29 --until 2026-04-29
 python -m finance_pi.cli.app ingest dart-filings --since 2026-04-28 --until 2026-04-29
 python -m finance_pi.cli.app ingest dart-financials --corp-code 00126380 --year 2025
@@ -54,12 +55,16 @@ with a real date range:
 python -m finance_pi.cli.app bootstrap --since 2024-01-01 --until 2026-04-28 --root .
 ```
 
-The default price source is KIS. KRX commands remain available for diagnostics
-or future use, but the normal pipeline no longer depends on KRX.
+The default price source is KIS. Naver Finance is used as a same-day summary
+snapshot to enrich KIS rows with KRX-like `market_cap` and `listed_shares`.
+KRX commands remain available for diagnostics or future use, but the normal
+pipeline no longer depends on KRX.
 
 Required live keys are `OPENDART_API_KEY`, `KIS_APP_KEY`, and
 `KIS_APP_SECRET`. Keep KIS secrets as exact single-line values in `.env`;
 `doctor` and `check-kis` warn when a pasted secret appears to be wrapped.
+Naver Finance does not require a key, but its summary page is treated as a
+snapshot source and is only joined to matching price dates to avoid look-ahead.
 
 ## Raspberry Pi Server
 
@@ -75,7 +80,8 @@ python -m finance_pi.cli.app daily --root .
 
 ## Current Scope
 
-This repository now includes live source adapters for KRX, OpenDART, and KIS;
+This repository now includes live source adapters for KRX, OpenDART, KIS, and
+Naver Finance;
 Bronze to Silver/Gold transforms; identity and universe builders; PIT
 fundamentals; factor registration; a monthly backtest runner; data quality and
 backtest fraud reports; and Raspberry Pi systemd scheduling templates.

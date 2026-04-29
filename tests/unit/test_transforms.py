@@ -117,3 +117,66 @@ def test_build_all_promotes_bronze_to_gold(tmp_path) -> None:
     fraud = build_fraud_report(tmp_path, date(2024, 1, 3))
     assert dq.checks
     assert fraud.checks
+
+
+def test_build_all_enriches_kis_prices_with_naver_summary(tmp_path) -> None:
+    layout = DataLakeLayout(tmp_path)
+    layout.ensure_base_dirs()
+    writer = ParquetDatasetWriter()
+
+    writer.write(
+        pl.DataFrame(
+            [
+                {
+                    "date": date(2024, 1, 2),
+                    "ticker": "005930",
+                    "isin": None,
+                    "name": "005930",
+                    "market": "KOSPI",
+                    "open": 100.0,
+                    "high": 110.0,
+                    "low": 90.0,
+                    "close": 100.0,
+                    "volume": 10,
+                    "trading_value": 1000,
+                    "market_cap": None,
+                    "listed_shares": None,
+                }
+            ]
+        ),
+        layout.partition_path("bronze.kis_daily_raw", date(2024, 1, 2)),
+    )
+    writer.write(
+        pl.DataFrame(
+            [
+                {
+                    "snapshot_dt": date(2024, 1, 2),
+                    "ticker": "005930",
+                    "name": "Samsung",
+                    "market": "KOSPI",
+                    "close": 100,
+                    "change_abs": 0,
+                    "change_rate_pct": 0.0,
+                    "par_value": 100,
+                    "market_cap": 1_000_000,
+                    "listed_shares": 10_000,
+                    "foreign_ownership_pct": 49.0,
+                    "volume": 10,
+                    "per": 10.0,
+                    "roe": 5.0,
+                }
+            ]
+        ),
+        layout.partition_path("bronze.naver_summary_raw", date(2024, 1, 2)),
+    )
+
+    build_all(tmp_path)
+
+    silver = pl.read_parquet(tmp_path / "silver" / "prices" / "dt=2024-01-02" / "part.parquet")
+    gold = pl.read_parquet(
+        tmp_path / "gold" / "daily_prices_adj" / "dt=2024-01-02" / "part.parquet"
+    )
+    assert silver.select("market_cap").item() == 1_000_000
+    assert silver.select("listed_shares").item() == 10_000
+    assert gold.select("market_cap").item() == 1_000_000
+    assert gold.select("listed_shares").item() == 10_000

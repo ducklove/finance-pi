@@ -112,16 +112,23 @@ python -m finance_pi.cli.app bootstrap --since 2026-04-28 --until 2026-04-28 --r
 The default price path is:
 
 1. OpenDART `corpCode.xml` for the current listed ticker universe.
-2. KIS daily item chart per ticker for OHLCV/trading value.
-3. Bronze to Silver/Gold transforms.
+2. Naver Finance market summary snapshot for `market_cap` and `listed_shares`.
+3. KIS daily item chart per ticker for OHLCV/trading value.
+4. Bronze to Silver/Gold transforms.
 
 KRX is not required for the normal pipeline.
+
+Naver Finance is a current snapshot source, not a historical point-in-time API.
+The build only joins Naver fields to the same `snapshot_dt`/price date, so it
+will enrich future daily runs without leaking today's share count into older
+backtests.
 
 Manual source commands are also available:
 
 ```bash
 python -m finance_pi.cli.app check-kis 005930 2026-04-28 --root .
 python -m finance_pi.cli.app ingest dart-company
+python -m finance_pi.cli.app ingest naver-summary --snapshot-date 2026-04-29 --root .
 python -m finance_pi.cli.app ingest kis-universe --since 2026-04-29 --until 2026-04-29 --limit 20
 python -m finance_pi.cli.app ingest dart-filings --since 2026-04-28 --until 2026-04-29
 python -m finance_pi.cli.app build all --root .
@@ -166,6 +173,7 @@ python -m pytest
 ## Current Runtime Scope
 
 The scheduled `daily` command initializes the data lake, refreshes the OpenDART
-company snapshot, attempts KIS universe price ingest and OpenDART filing ingest
-when keys are configured, rebuilds Silver/Gold datasets, rebuilds the DuckDB
-view catalog, and writes DQ/Fraud reports.
+company snapshot, ingests the Naver same-day market summary, attempts KIS
+universe price ingest and OpenDART filing ingest when keys are configured,
+rebuilds Silver/Gold datasets, rebuilds the DuckDB view catalog, and writes
+DQ/Fraud reports.

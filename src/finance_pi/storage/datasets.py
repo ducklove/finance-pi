@@ -63,6 +63,7 @@ def _empty_prices_silver() -> str:
         CAST(NULL AS BIGINT) AS volume,
         CAST(NULL AS BIGINT) AS trading_value,
         CAST(NULL AS BIGINT) AS market_cap,
+        CAST(NULL AS BIGINT) AS listed_shares,
         CAST(NULL AS VARCHAR) AS price_source,
         CAST(NULL AS BOOLEAN) AS is_halted,
         CAST(NULL AS BOOLEAN) AS is_designated,
@@ -85,6 +86,7 @@ def _empty_daily_prices_adj() -> str:
         CAST(NULL AS BIGINT) AS volume,
         CAST(NULL AS BIGINT) AS trading_value,
         CAST(NULL AS BIGINT) AS market_cap,
+        CAST(NULL AS BIGINT) AS listed_shares,
         CAST(NULL AS BOOLEAN) AS is_halted,
         CAST(NULL AS BOOLEAN) AS is_designated,
         CAST(NULL AS BOOLEAN) AS is_liquidation_window
@@ -143,6 +145,30 @@ def _empty_company() -> str:
     """
 
 
+def _empty_naver_summary() -> str:
+    return """
+    SELECT
+        CAST(NULL AS DATE) AS snapshot_dt,
+        CAST(NULL AS VARCHAR) AS ticker,
+        CAST(NULL AS VARCHAR) AS name,
+        CAST(NULL AS VARCHAR) AS market,
+        CAST(NULL AS BIGINT) AS close,
+        CAST(NULL AS BIGINT) AS change_abs,
+        CAST(NULL AS DOUBLE) AS change_rate_pct,
+        CAST(NULL AS BIGINT) AS par_value,
+        CAST(NULL AS BIGINT) AS market_cap,
+        CAST(NULL AS BIGINT) AS listed_shares,
+        CAST(NULL AS DOUBLE) AS foreign_ownership_pct,
+        CAST(NULL AS BIGINT) AS volume,
+        CAST(NULL AS DOUBLE) AS per,
+        CAST(NULL AS DOUBLE) AS roe,
+        CAST(NULL AS TIMESTAMP) AS _ingested_at,
+        CAST(NULL AS VARCHAR) AS _source,
+        CAST(NULL AS VARCHAR) AS _source_request_hash
+    WHERE FALSE
+    """
+
+
 def _empty_security_master() -> str:
     return """
     SELECT
@@ -193,6 +219,12 @@ dataset_registry: dict[str, DatasetSpec] = {
         "bronze",
         "bronze/kis_daily/dt=*/part.parquet",
         _empty_price_raw(),
+    ),
+    "bronze.naver_summary_raw": DatasetSpec(
+        "bronze.naver_summary_raw",
+        "bronze",
+        "bronze/naver_summary/dt=*/part.parquet",
+        _empty_naver_summary(),
     ),
     "bronze.dart_filings_raw": DatasetSpec(
         "bronze.dart_filings_raw",

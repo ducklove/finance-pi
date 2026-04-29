@@ -33,6 +33,7 @@ def build_all(data_root: Path) -> list[BuildSummary]:
 
 def build_silver_prices(data_root: Path) -> list[BuildSummary]:
     frames: list[pl.DataFrame] = []
+    naver_summary = _naver_summary_frame(data_root)
     for source, pattern in [
         ("krx", "bronze/krx_daily/dt=*/part.parquet"),
         ("kis", "bronze/kis_daily/dt=*/part.parquet"),
@@ -40,7 +41,10 @@ def build_silver_prices(data_root: Path) -> list[BuildSummary]:
     ]:
         frame = _read_optional(data_root / pattern)
         if frame is not None and not frame.is_empty():
-            frames.append(_normalize_price_frame(frame, source))
+            prices = _normalize_price_frame(frame, source)
+            if naver_summary is not None and source in {"kis", "pre2010"}:
+                prices = _enrich_prices_with_naver(prices, naver_summary)
+            frames.append(prices)
     if not frames:
         return [BuildSummary("silver.prices", 0, 0)]
 
@@ -185,6 +189,7 @@ def build_daily_prices_adj(data_root: Path) -> list[BuildSummary]:
                 "volume",
                 "trading_value",
                 "market_cap",
+                "listed_shares",
                 "is_halted",
                 "is_designated",
                 "is_liquidation_window",
@@ -281,6 +286,7 @@ def _normalize_price_frame(frame: pl.DataFrame, source: str) -> pl.DataFrame:
             "volume",
             "trading_value",
             "market_cap",
+            "listed_shares",
             "price_source",
             "is_halted",
             "is_designated",
@@ -304,6 +310,41 @@ def _latest_company_frame(data_root: Path) -> pl.DataFrame | None:
     latest = frame["snapshot_dt"].max()
     return frame.filter(pl.col("snapshot_dt") == latest).with_columns(
         pl.col("stock_code").cast(pl.String).str.zfill(6)
+    )
+
+
+def _naver_summary_frame(data_root: Path) -> pl.DataFrame | None:
+    frame = _read_optional(data_root / "bronze/naver_summary/dt=*/part.parquet")
+    if frame is None or frame.is_empty():
+        return None
+    return (
+        _cast_dates(frame, ["snapshot_dt"])
+        .with_columns(
+            pl.col("ticker").cast(pl.String).str.zfill(6),
+            pl.col("market_cap").cast(pl.Int64, strict=False).alias("naver_market_cap"),
+            pl.col("listed_shares").cast(pl.Int64, strict=False).alias("naver_listed_shares"),
+        )
+        .select(
+            pl.col("snapshot_dt").alias("date"),
+            "ticker",
+            "naver_market_cap",
+            "naver_listed_shares",
+        )
+        .unique(subset=["date", "ticker"], keep="last")
+    )
+
+
+def _enrich_prices_with_naver(
+    prices: pl.DataFrame,
+    naver_summary: pl.DataFrame,
+) -> pl.DataFrame:
+    return (
+        prices.join(naver_summary, on=["date", "ticker"], how="left")
+        .with_columns(
+            pl.coalesce(["market_cap", "naver_market_cap"]).alias("market_cap"),
+            pl.coalesce(["listed_shares", "naver_listed_shares"]).alias("listed_shares"),
+        )
+        .drop(["naver_market_cap", "naver_listed_shares"])
     )
 
 

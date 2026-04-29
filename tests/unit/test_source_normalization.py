@@ -4,6 +4,7 @@ from datetime import date
 
 from finance_pi.sources.kis import normalize_kis_daily_row
 from finance_pi.sources.krx import normalize_krx_daily_row
+from finance_pi.sources.naver import parse_market_sum_page
 from finance_pi.sources.opendart import DartCompanyRow, DartFilingRow
 
 
@@ -72,3 +73,32 @@ def test_opendart_non_numeric_stock_codes_are_not_fatal() -> None:
 
     assert company.stock_code is None
     assert filing.stock_code is None
+
+
+def test_parse_naver_market_sum_page_converts_units() -> None:
+    html = """
+    <table><tbody>
+    <tr>
+      <td class="no">1</td>
+      <td><a href="/item/main.naver?code=005930" class="tltle">Samsung</a></td>
+      <td class="number">70,500</td>
+      <td class="number"><span class="blind">상승</span>1,000</td>
+      <td class="number">+1.44%</td>
+      <td class="number">100</td>
+      <td class="number">1,234,567</td>
+      <td class="number">5,846,279</td>
+      <td class="number">49.19</td>
+      <td class="number">12,345</td>
+      <td class="number">15.3</td>
+      <td class="number">10.1</td>
+      <td></td>
+    </tr>
+    </tbody></table>
+    """
+
+    row = parse_market_sum_page(html, date(2026, 4, 29), "KOSPI")[0]
+
+    assert row["ticker"] == "005930"
+    assert row["market_cap"] == 1_234_567 * 100_000_000
+    assert row["listed_shares"] == 5_846_279_000
+    assert row["foreign_ownership_pct"] == 49.19

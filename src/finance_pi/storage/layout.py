@@ -15,6 +15,7 @@ class DataLakeLayout:
         for relative in [
             "bronze/krx_daily",
             "bronze/kis_daily",
+            "bronze/naver_summary",
             "bronze/dart_filings",
             "bronze/dart_financials",
             "bronze/dart_company",
@@ -47,6 +48,8 @@ class DataLakeLayout:
                 return self.root / "bronze" / "krx_daily" / f"dt={dt}" / "part.parquet"
             case "bronze.kis_daily_raw":
                 return self.root / "bronze" / "kis_daily" / f"dt={dt}" / "part.parquet"
+            case "bronze.naver_summary_raw":
+                return self.root / "bronze" / "naver_summary" / f"dt={dt}" / "part.parquet"
             case "bronze.dart_filings_raw":
                 return self.root / "bronze" / "dart_filings" / f"dt={dt}" / "part.parquet"
             case "bronze.dart_financials_raw":

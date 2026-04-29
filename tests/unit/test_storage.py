@@ -34,3 +34,5 @@ def test_layout_partition_paths(tmp_path) -> None:
     layout = DataLakeLayout(tmp_path)
     path = layout.partition_path("bronze.krx_daily_raw", date(2024, 1, 2))
     assert path.as_posix().endswith("bronze/krx_daily/dt=2024-01-02/part.parquet")
+    naver = layout.partition_path("bronze.naver_summary_raw", date(2024, 1, 2))
+    assert naver.as_posix().endswith("bronze/naver_summary/dt=2024-01-02/part.parquet")

@@ -25,6 +25,8 @@ KNOWN_DOTENV_KEYS = frozenset(
         "KIS_ACCESS_TOKEN",
         "KIS_ACCOUNT_NO",
         "KIS_ACCOUNT_PRODUCT_CODE",
+        "NAVER_FINANCE_BASE_URL",
+        "NAVER_FINANCE_USER_AGENT",
     }
 )
 
@@ -74,6 +76,8 @@ class RuntimeSettings:
     kis_app_key: str | None = None
     kis_app_secret: str | None = None
     kis_access_token: str | None = None
+    naver_finance_base_url: str = "https://finance.naver.com"
+    naver_finance_user_agent: str = "Mozilla/5.0 finance-pi/0.1"
 
     @classmethod
     def load(cls, root: Path | None = None) -> RuntimeSettings:
@@ -100,6 +104,10 @@ class RuntimeSettings:
             kis_app_key=_env_first("KIS_APP_KEY"),
             kis_app_secret=_env_first("KIS_APP_SECRET"),
             kis_access_token=_env_first("KIS_ACCESS_TOKEN"),
+            naver_finance_base_url=_env_first("NAVER_FINANCE_BASE_URL")
+            or cls.naver_finance_base_url,
+            naver_finance_user_agent=_env_first("NAVER_FINANCE_USER_AGENT")
+            or cls.naver_finance_user_agent,
         )
 
     @property
