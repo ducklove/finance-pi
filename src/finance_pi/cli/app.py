@@ -10,6 +10,7 @@ from pathlib import Path
 import polars as pl
 import typer
 
+from finance_pi.admin import run_admin as run_admin_server
 from finance_pi.backtest import BacktestConfig, BacktestEngine
 from finance_pi.calendar import TradingCalendar
 from finance_pi.config import ProjectPaths, RuntimeSettings, diagnose_dotenv
@@ -155,6 +156,17 @@ def init_workspace(root: Path = typer.Option(Path("."), help="Workspace root")) 
     layout = DataLakeLayout(paths.data_root)
     layout.ensure_base_dirs()
     typer.echo(f"Initialized data lake at {paths.data_root}")
+
+
+@app.command("admin")
+def admin_server(
+    root: Path = typer.Option(Path("."), help="Workspace root"),
+    host: str = typer.Option("127.0.0.1", help="Bind host"),
+    port: int = typer.Option(8765, help="Bind port"),
+) -> None:
+    """Run the local web admin for the Raspberry Pi server."""
+
+    run_admin_server(root, host, port)
 
 
 @catalog_app.command("build")
@@ -628,6 +640,15 @@ def generate_fraud_report(
     path = paths.data_root / "reports" / "backtest_fraud" / f"{parsed_date.isoformat()}.html"
     build_fraud_report(paths.data_root, parsed_date).write(path)
     typer.echo(path)
+
+
+@reports_app.command("all")
+def generate_all_reports(
+    report_date: str | None = typer.Option(None, help="Report date as YYYY-MM-DD"),
+    root: Path = typer.Option(Path("."), help="Workspace root"),
+) -> None:
+    generate_dq_report(report_date, root)
+    generate_fraud_report(report_date, root)
 
 
 @app.command("daily")

@@ -83,6 +83,7 @@ python -m finance_pi.cli.app check-kis 005930 2026-04-28 --root .
 python -m ruff check .
 python -m pytest
 python -m finance_pi.cli.app daily --root . --no-ingest
+python -m finance_pi.cli.app admin --root .
 ```
 
 Expected outputs:
@@ -96,6 +97,20 @@ After `.env` is configured, run the real daily path:
 ```bash
 python -m finance_pi.cli.app daily --root .
 ```
+
+Start the web admin on the Pi:
+
+```bash
+python -m finance_pi.cli.app admin --root . --host 127.0.0.1 --port 8765
+```
+
+From your laptop, tunnel it:
+
+```bash
+ssh -L 8765:127.0.0.1:8765 cantabile@raspberrypi
+```
+
+Then open `http://127.0.0.1:8765`.
 
 `daily` is intentionally small: it is the recurring one-day incremental job. It
 will finish quickly unless the source APIs are slow. The first real server run
@@ -145,6 +160,7 @@ python -m finance_pi.cli.app ingest dart-filings --since 2026-04-28 --until 2026
 python -m finance_pi.cli.app ingest dart-financials-bulk --since 2026-04-28 --until 2026-04-29
 python -m finance_pi.cli.app build all --root .
 python -m finance_pi.cli.app catalog build --root .
+python -m finance_pi.cli.app reports all --report-date 2026-04-29 --root .
 ```
 
 For quarterly DART financials, use:
@@ -199,3 +215,7 @@ company snapshot, ingests the Naver same-day market summary, attempts KIS
 universe price ingest and OpenDART filing/financial ingest when keys are configured,
 rebuilds Silver/Gold datasets, rebuilds the DuckDB view catalog, and writes
 DQ/Fraud reports.
+
+The `admin` command serves a local operations dashboard with dataset status,
+recent reports, backtest artifacts, and allowlisted job buttons for daily runs,
+builds, catalog refreshes, reports, and backtests.

@@ -17,6 +17,7 @@ python -m finance_pi.cli.app init --root .
 python -m finance_pi.cli.app doctor --root .
 python -m finance_pi.cli.app check-kis 005930 2026-04-28 --root .
 python -m finance_pi.cli.app daily --root . --no-ingest
+python -m finance_pi.cli.app admin --root .
 pytest
 ```
 
@@ -48,6 +49,8 @@ python -m finance_pi.cli.app factors list
 python -m finance_pi.cli.app backtest run --factor momentum_12_1 --start 2024-01-01 --end 2024-12-31
 python -m finance_pi.cli.app reports dq --report-date 2026-04-29
 python -m finance_pi.cli.app reports fraud --report-date 2026-04-29
+python -m finance_pi.cli.app reports all --report-date 2026-04-29
+python -m finance_pi.cli.app admin --root .
 ```
 
 `daily` is a one-day incremental job. For the first server run, use `bootstrap`
@@ -91,6 +94,15 @@ The daily server entrypoint is:
 ```bash
 python -m finance_pi.cli.app daily --root .
 ```
+
+The local web admin is:
+
+```bash
+python -m finance_pi.cli.app admin --root . --host 127.0.0.1 --port 8765
+```
+
+Bind to `127.0.0.1` and use an SSH tunnel for remote access unless the server is
+already behind a trusted private network.
 
 ## Current Scope
 
