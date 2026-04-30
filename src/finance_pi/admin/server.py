@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import subprocess
 import sys
 import threading
@@ -17,7 +18,7 @@ from urllib.parse import parse_qs, quote, urlparse
 
 import polars as pl
 
-from finance_pi.config import ProjectPaths
+from finance_pi.config import ProjectPaths, load_dotenv
 from finance_pi.storage import dataset_registry
 
 INDEX_HTML = """<!doctype html>
@@ -351,12 +352,26 @@ function bytes(value) {
 }
 
 async function api(path, options = {}) {
+  const token = adminToken();
+  const headers = { 'Content-Type': 'application/json' };
+  if (token) headers['X-Admin-Token'] = token;
   const response = await fetch(path, {
-    headers: { 'Content-Type': 'application/json' },
+    headers,
     ...options,
   });
   if (!response.ok) throw new Error(await response.text());
   return response.json();
+}
+
+function adminToken() {
+  const params = new URLSearchParams(window.location.search);
+  const token = params.get('token');
+  if (token) {
+    localStorage.setItem('financePiAdminToken', token);
+    window.history.replaceState({}, document.title, window.location.pathname);
+    return token;
+  }
+  return localStorage.getItem('financePiAdminToken') || '';
 }
 
 async function refresh() {
@@ -417,7 +432,7 @@ function renderJobs(jobs) {
 function renderReports(reports) {
   qs('reports-list').innerHTML = reports.length ? reports.map(report => `
     <div class="artifact">
-      <a href="${report.url}" target="_blank" rel="noreferrer">${report.name}</a>
+      <a href="${withTokenUrl(report.url)}" target="_blank" rel="noreferrer">${report.name}</a>
       <span>${report.kind}</span>
       <span>${shortDate(report.modified_at)}</span>
     </div>`).join('') : '<div class="artifact"><span>No reports yet</span></div>';
@@ -426,9 +441,17 @@ function renderReports(reports) {
 function renderBacktests(runs) {
   qs('backtests-list').innerHTML = runs.length ? runs.map(run => `
     <div class="artifact">
-      <a href="${run.url}" target="_blank" rel="noreferrer">${run.name}</a>
+      <a href="${withTokenUrl(run.url)}" target="_blank" rel="noreferrer">${run.name}</a>
       <span>${run.nav_rows} nav rows${run.final_nav ? ' / NAV ' + run.final_nav.toFixed(4) : ''}</span>
     </div>`).join('') : '<div class="artifact"><span>No backtests yet</span></div>';
+}
+
+function withTokenUrl(url) {
+  if (!url || url === '#') return '#';
+  const token = adminToken();
+  if (!token) return url;
+  const separator = url.includes('?') ? '&' : '?';
+  return `${url}${separator}token=${encodeURIComponent(token)}`;
 }
 
 async function startAction(action, payload = {}) {
@@ -484,8 +507,9 @@ class AdminJob:
 
 
 class AdminState:
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, token: str | None = None) -> None:
         self.paths = ProjectPaths(root=root)
+        self.token = token
         self.jobs: dict[str, AdminJob] = {}
         self.lock = threading.Lock()
 
@@ -577,11 +601,21 @@ class AdminState:
                 job.ended_at = datetime.now(UTC)
 
 
-def run_admin(root: Path, host: str = "127.0.0.1", port: int = 8765) -> None:
-    state = AdminState(root.resolve())
+def run_admin(
+    root: Path,
+    host: str = "0.0.0.0",
+    port: int = 8400,
+    token: str | None = None,
+) -> None:
+    load_dotenv(root / ".env")
+    auth_token = token or os.environ.get("FINANCE_PI_ADMIN_TOKEN") or secrets.token_urlsafe(24)
+    state = AdminState(root.resolve(), auth_token)
     handler = _handler_for(state)
     server = ThreadingHTTPServer((host, port), handler)
-    print(f"finance-pi admin: http://{host}:{port}")
+    display_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
+    print(f"finance-pi admin bind: http://{host}:{port}")
+    print(f"finance-pi admin url:  http://{display_host}:{port}/?token={auth_token}")
+    print(f"finance-pi health:     http://{display_host}:{port}/api/health")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -595,20 +629,30 @@ def _handler_for(state: AdminState) -> type[BaseHTTPRequestHandler]:
         def do_GET(self) -> None:  # noqa: N802
             parsed = urlparse(self.path)
             try:
-                if parsed.path == "/":
+                if parsed.path == "/api/health":
+                    self._send_json(_health_payload(state))
+                elif parsed.path == "/":
                     self._send_text(INDEX_HTML, "text/html; charset=utf-8")
                 elif parsed.path == "/assets/admin.css":
                     self._send_text(ADMIN_CSS, "text/css; charset=utf-8")
                 elif parsed.path == "/assets/admin.js":
                     self._send_text(ADMIN_JS, "application/javascript; charset=utf-8")
                 elif parsed.path == "/api/overview":
+                    if not self._authorized():
+                        return
                     self._send_json(state.overview())
                 elif parsed.path == "/api/jobs":
+                    if not self._authorized():
+                        return
                     self._send_json({"jobs": state.job_list()})
                 elif parsed.path.startswith("/api/jobs/") and parsed.path.endswith("/log"):
+                    if not self._authorized():
+                        return
                     job_id = parsed.path.split("/")[3]
                     self._send_json(state.job_log(job_id))
                 elif parsed.path == "/files":
+                    if not self._authorized():
+                        return
                     self._serve_file(parse_qs(parsed.query).get("path", [""])[0])
                 else:
                     self._send_json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
@@ -623,6 +667,8 @@ def _handler_for(state: AdminState) -> type[BaseHTTPRequestHandler]:
         def do_POST(self) -> None:  # noqa: N802
             if self.path != "/api/jobs":
                 self._send_json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
+                return
+            if not self._authorized():
                 return
             try:
                 length = int(self.headers.get("Content-Length", "0"))
@@ -648,6 +694,16 @@ def _handler_for(state: AdminState) -> type[BaseHTTPRequestHandler]:
                 return
             content_type = _content_type(path)
             self._send_bytes(path.read_bytes(), content_type)
+
+        def _authorized(self) -> bool:
+            if state.token is None:
+                return True
+            header = self.headers.get("X-Admin-Token", "")
+            query = parse_qs(urlparse(self.path).query).get("token", [""])[0]
+            if secrets.compare_digest(header or query, state.token):
+                return True
+            self._send_json({"error": "unauthorized"}, status=HTTPStatus.UNAUTHORIZED)
+            return False
 
         def _send_json(self, payload: Any, status: HTTPStatus = HTTPStatus.OK) -> None:
             body = json.dumps(payload, default=str).encode("utf-8")
@@ -675,6 +731,16 @@ def _handler_for(state: AdminState) -> type[BaseHTTPRequestHandler]:
             self.wfile.write(payload)
 
     return AdminHandler
+
+
+def _health_payload(state: AdminState) -> dict[str, Any]:
+    return {
+        "status": "ok",
+        "generated_at": datetime.now(UTC).isoformat(),
+        "workspace": str(state.paths.root.resolve()),
+        "data_root": str(state.paths.data_root.resolve()),
+        "auth": "token",
+    }
 
 
 def _job_command(action: str, payload: dict[str, Any], root: Path) -> tuple[str, list[str]]:

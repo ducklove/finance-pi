@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import platform
 import re
 import sys
 from datetime import date, timedelta
 from pathlib import Path
+from urllib.request import Request, urlopen
 
 import polars as pl
 import typer
@@ -161,12 +163,33 @@ def init_workspace(root: Path = typer.Option(Path("."), help="Workspace root")) 
 @app.command("admin")
 def admin_server(
     root: Path = typer.Option(Path("."), help="Workspace root"),
-    host: str = typer.Option("127.0.0.1", help="Bind host"),
-    port: int = typer.Option(8765, help="Bind port"),
+    host: str = typer.Option("0.0.0.0", help="Bind host"),
+    port: int = typer.Option(8400, help="Bind port"),
+    token: str | None = typer.Option(
+        None,
+        help="Admin token. Defaults to FINANCE_PI_ADMIN_TOKEN or a generated token.",
+    ),
 ) -> None:
     """Run the local web admin for the Raspberry Pi server."""
 
-    run_admin_server(root, host, port)
+    run_admin_server(root, host, port, token)
+
+
+@app.command("check-admin")
+def check_admin(
+    url: str = typer.Argument("http://127.0.0.1:8400", help="Admin base URL"),
+    token: str | None = typer.Option(None, help="Optional token to also check /api/overview"),
+) -> None:
+    """Verify that a finance-pi admin server is reachable."""
+
+    base_url = url.rstrip("/")
+    health = _http_get_json(f"{base_url}/api/health")
+    typer.echo(f"health: {health.get('status')} workspace={health.get('workspace')}")
+    if token:
+        overview = _http_get_json(f"{base_url}/api/overview", token=token)
+        datasets = overview.get("datasets", [])
+        ready = len([dataset for dataset in datasets if dataset.get("files", 0) > 0])
+        typer.echo(f"overview: OK datasets={ready}/{len(datasets)}")
 
 
 @catalog_app.command("build")
@@ -1022,6 +1045,20 @@ def _print_summary(summary) -> None:
 def _print_dotenv_issues(root: Path) -> None:
     for issue in diagnose_dotenv(root / ".env"):
         typer.echo(f".env warning line {issue.line_no}: {issue.message}")
+
+
+def _http_get_json(url: str, token: str | None = None) -> dict[str, object]:
+    headers = {"X-Admin-Token": token} if token else {}
+    request = Request(url, headers=headers)
+    try:
+        with urlopen(request, timeout=10) as response:
+            payload = response.read().decode("utf-8")
+    except Exception as exc:  # noqa: BLE001
+        raise typer.BadParameter(f"admin is not reachable at {url}: {exc}") from exc
+    data = json.loads(payload)
+    if not isinstance(data, dict):
+        raise typer.BadParameter(f"admin returned non-object JSON at {url}")
+    return data
 
 
 def _kis_error_message(exc: Exception) -> str:

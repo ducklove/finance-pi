@@ -28,6 +28,7 @@ KNOWN_DOTENV_KEYS = frozenset(
         "NAVER_FINANCE_BASE_URL",
         "NAVER_FINANCE_API_BASE_URL",
         "NAVER_FINANCE_USER_AGENT",
+        "FINANCE_PI_ADMIN_TOKEN",
     }
 )
 

@@ -4,7 +4,7 @@ from datetime import date
 
 import polars as pl
 
-from finance_pi.admin.server import AdminState, _job_command
+from finance_pi.admin.server import AdminState, _health_payload, _job_command
 from finance_pi.storage import DataLakeLayout, ParquetDatasetWriter
 
 
@@ -65,3 +65,12 @@ def test_admin_job_command_is_allowlisted(tmp_path) -> None:
     assert "--factor" in command
     assert "quality_roa" in command
 
+
+def test_admin_health_is_minimal_and_token_state_is_kept(tmp_path) -> None:
+    state = AdminState(tmp_path, token="secret-token")
+    health = _health_payload(state)
+
+    assert state.token == "secret-token"
+    assert health["status"] == "ok"
+    assert health["workspace"] == str(tmp_path.resolve())
+    assert health["auth"] == "token"

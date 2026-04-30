@@ -83,7 +83,8 @@ python -m finance_pi.cli.app check-kis 005930 2026-04-28 --root .
 python -m ruff check .
 python -m pytest
 python -m finance_pi.cli.app daily --root . --no-ingest
-python -m finance_pi.cli.app admin --root .
+python -m finance_pi.cli.app admin --root . --port 8400
+python -m finance_pi.cli.app check-admin http://127.0.0.1:8400
 ```
 
 Expected outputs:
@@ -101,16 +102,27 @@ python -m finance_pi.cli.app daily --root .
 Start the web admin on the Pi:
 
 ```bash
-python -m finance_pi.cli.app admin --root . --host 127.0.0.1 --port 8765
+python -m finance_pi.cli.app admin --root . --host 0.0.0.0 --port 8400
 ```
 
-From your laptop, tunnel it:
+The server prints a tokenized URL. If port `8400` is already forwarded, open:
+
+```text
+http://<raspberry-pi-host>:8400/?token=<printed-token>
+```
+
+For a stable URL across restarts, put this in `.env`:
 
 ```bash
-ssh -L 8765:127.0.0.1:8765 cantabile@raspberrypi
+FINANCE_PI_ADMIN_TOKEN=replace-with-a-long-random-token
 ```
 
-Then open `http://127.0.0.1:8765`.
+Direct reachability check:
+
+```bash
+python -m finance_pi.cli.app check-admin http://127.0.0.1:8400
+curl http://127.0.0.1:8400/api/health
+```
 
 `daily` is intentionally small: it is the recurring one-day incremental job. It
 will finish quickly unless the source APIs are slow. The first real server run

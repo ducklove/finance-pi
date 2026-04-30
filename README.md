@@ -17,7 +17,8 @@ python -m finance_pi.cli.app init --root .
 python -m finance_pi.cli.app doctor --root .
 python -m finance_pi.cli.app check-kis 005930 2026-04-28 --root .
 python -m finance_pi.cli.app daily --root . --no-ingest
-python -m finance_pi.cli.app admin --root .
+python -m finance_pi.cli.app admin --root . --port 8400
+python -m finance_pi.cli.app check-admin http://127.0.0.1:8400
 pytest
 ```
 
@@ -50,7 +51,8 @@ python -m finance_pi.cli.app backtest run --factor momentum_12_1 --start 2024-01
 python -m finance_pi.cli.app reports dq --report-date 2026-04-29
 python -m finance_pi.cli.app reports fraud --report-date 2026-04-29
 python -m finance_pi.cli.app reports all --report-date 2026-04-29
-python -m finance_pi.cli.app admin --root .
+python -m finance_pi.cli.app admin --root . --port 8400
+python -m finance_pi.cli.app check-admin http://127.0.0.1:8400
 ```
 
 `daily` is a one-day incremental job. For the first server run, use `bootstrap`
@@ -98,11 +100,12 @@ python -m finance_pi.cli.app daily --root .
 The local web admin is:
 
 ```bash
-python -m finance_pi.cli.app admin --root . --host 127.0.0.1 --port 8765
+python -m finance_pi.cli.app admin --root . --host 0.0.0.0 --port 8400
 ```
 
-Bind to `127.0.0.1` and use an SSH tunnel for remote access unless the server is
-already behind a trusted private network.
+`admin` prints a tokenized URL. `/api/health` is open for reachability checks;
+the UI, dataset API, logs, files, and job execution require the token. To pin the
+token across restarts, set `FINANCE_PI_ADMIN_TOKEN` in `.env`.
 
 ## Current Scope
 
