@@ -16,6 +16,7 @@ from finance_pi.admin import run_admin as run_admin_server
 from finance_pi.backtest import BacktestConfig, BacktestEngine
 from finance_pi.calendar import TradingCalendar
 from finance_pi.config import ProjectPaths, RuntimeSettings, diagnose_dotenv
+from finance_pi.docs_site import build_docs_site
 from finance_pi.factors import ParquetFactorContext, factor_registry
 from finance_pi.http import HttpJsonClient, SourceApiError
 from finance_pi.ingest import IngestOrchestrator
@@ -62,12 +63,14 @@ ingest_app = typer.Typer(help="Source ingest commands")
 build_app = typer.Typer(help="Bronze to Silver/Gold build commands")
 reports_app = typer.Typer(help="Report generation commands")
 backtest_app = typer.Typer(help="Backtest commands")
+docs_app = typer.Typer(help="Documentation publishing commands")
 app.add_typer(catalog_app, name="catalog")
 app.add_typer(factors_app, name="factors")
 app.add_typer(ingest_app, name="ingest")
 app.add_typer(build_app, name="build")
 app.add_typer(reports_app, name="reports")
 app.add_typer(backtest_app, name="backtest")
+app.add_typer(docs_app, name="docs")
 
 
 @app.command("doctor")
@@ -206,6 +209,18 @@ def build_catalog(root: Path = typer.Option(Path("."), help="Workspace root")) -
 def list_catalog_views() -> None:
     for name in sorted(dataset_registry):
         typer.echo(name)
+
+
+@docs_app.command("build")
+def build_docs(
+    root: Path = typer.Option(Path("."), help="Workspace root"),
+    output: Path | None = typer.Option(None, help="Output directory"),
+) -> None:
+    """Build and publish repository markdown docs as an HTML site."""
+
+    paths = ProjectPaths(root=root)
+    summary = build_docs_site(paths.root, output)
+    typer.echo(f"Docs: {summary.index_path} pages={summary.pages}")
 
 
 @factors_app.command("list")

@@ -173,7 +173,11 @@ python -m finance_pi.cli.app ingest dart-financials-bulk --since 2026-04-28 --un
 python -m finance_pi.cli.app build all --root .
 python -m finance_pi.cli.app catalog build --root .
 python -m finance_pi.cli.app reports all --report-date 2026-04-29 --root .
+python -m finance_pi.cli.app docs build --root .
 ```
+
+Published documentation is available from the admin at `/docs/` after running
+`docs build`.
 
 For quarterly DART financials, use:
 

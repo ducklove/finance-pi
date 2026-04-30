@@ -43,6 +43,7 @@ INDEX_HTML = """<!doctype html>
         <a href="#overview" class="active">Overview</a>
         <a href="#datasets">Datasets</a>
         <a href="#jobs">Jobs</a>
+        <a href="#docs">Docs</a>
         <a href="#research">Research</a>
       </nav>
       <div class="rail-foot">
@@ -106,6 +107,10 @@ INDEX_HTML = """<!doctype html>
         <button data-action="reports">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 19V5h14v14zM8 15h8M8 11h8M8 7h4"/></svg>
           Reports
+        </button>
+        <button data-action="docs_build">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h10l4 4v12H5zM14 4v5h5M8 13h8M8 17h6"/></svg>
+          Docs
         </button>
       </section>
 
@@ -179,6 +184,17 @@ INDEX_HTML = """<!doctype html>
           </div>
         </div>
         <div id="reports-list" class="artifact-grid"></div>
+      </section>
+
+      <section class="panel" id="docs">
+        <div class="panel-head">
+          <div>
+            <p class="eyebrow">Published</p>
+            <h2>Documentation</h2>
+          </div>
+          <a class="pill" id="docs-open" href="/docs/" target="_blank" rel="noreferrer">Open docs</a>
+        </div>
+        <div id="docs-list" class="artifact-grid"></div>
       </section>
     </main>
   </div>
@@ -271,7 +287,7 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
 .metric strong { font-size: 24px; }
 .metric small { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .command-band {
-  display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px;
+  display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 10px;
 }
 .command-band button, .backtest-form button {
   height: 42px; border: 1px solid #1d3f32; background: #1d3f32; color: white;
@@ -282,6 +298,7 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
 .command-band button:nth-child(3) { background: var(--gold); border-color: var(--gold); }
 .command-band button:nth-child(4) { background: #6938a1; border-color: #6938a1; }
 .command-band button:nth-child(5) { background: var(--green); border-color: var(--green); }
+.command-band button:nth-child(6) { background: #3f5661; border-color: #3f5661; }
 .split { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(340px, .85fr); gap: 18px; align-items: start; }
 .stack { display: grid; gap: 18px; }
 .panel { padding: 16px; min-width: 0; }
@@ -393,6 +410,7 @@ function renderOverview(data) {
   renderDatasets(data.datasets);
   renderJobs(data.jobs);
   renderReports(data.reports);
+  renderDocs(data.docs);
   renderBacktests(data.backtests);
   const maxDate = data.max_price_date || new Date().toISOString().slice(0, 10);
   document.querySelector('#backtest-form [name=end]').value = maxDate;
@@ -436,6 +454,15 @@ function renderReports(reports) {
       <span>${report.kind}</span>
       <span>${shortDate(report.modified_at)}</span>
     </div>`).join('') : '<div class="artifact"><span>No reports yet</span></div>';
+}
+
+function renderDocs(docs) {
+  qs('docs-list').innerHTML = docs.length ? docs.map(doc => `
+    <div class="artifact">
+      <a href="${doc.url}" target="_blank" rel="noreferrer">${doc.title}</a>
+      <span>${doc.source}</span>
+      <span>${shortDate(doc.modified_at)}</span>
+    </div>`).join('') : '<div class="artifact"><span>No published docs yet</span></div>';
 }
 
 function renderBacktests(runs) {
@@ -526,6 +553,7 @@ class AdminState:
             },
             "datasets": datasets,
             "reports": _report_artifacts(data_root),
+            "docs": _docs_artifacts(data_root),
             "backtests": _backtest_runs(data_root),
             "jobs": self.job_list(),
             "max_price_date": _latest_partition_for(data_root / "gold/daily_prices_adj/dt=*/part.parquet"),
@@ -631,6 +659,10 @@ def _handler_for(state: AdminState) -> type[BaseHTTPRequestHandler]:
             try:
                 if parsed.path == "/api/health":
                     self._send_json(_health_payload(state))
+                elif parsed.path in {"/docs", "/docs/"}:
+                    self._serve_docs("index.html")
+                elif parsed.path.startswith("/docs/"):
+                    self._serve_docs(parsed.path.removeprefix("/docs/"))
                 elif parsed.path == "/":
                     self._send_text(INDEX_HTML, "text/html; charset=utf-8")
                 elif parsed.path == "/assets/admin.css":
@@ -685,6 +717,7 @@ def _handler_for(state: AdminState) -> type[BaseHTTPRequestHandler]:
             allowed_roots = [
                 (state.paths.data_root / "reports").resolve(),
                 (state.paths.data_root / "backtests").resolve(),
+                (state.paths.data_root / "docs_site").resolve(),
             ]
             if not any(path == root or root in path.parents for root in allowed_roots):
                 self._send_json({"error": "forbidden"}, status=HTTPStatus.FORBIDDEN)
@@ -694,6 +727,17 @@ def _handler_for(state: AdminState) -> type[BaseHTTPRequestHandler]:
                 return
             content_type = _content_type(path)
             self._send_bytes(path.read_bytes(), content_type)
+
+        def _serve_docs(self, relative: str) -> None:
+            docs_root = (state.paths.data_root / "docs_site").resolve()
+            path = (docs_root / relative).resolve()
+            if not (path == docs_root or docs_root in path.parents):
+                self._send_json({"error": "forbidden"}, status=HTTPStatus.FORBIDDEN)
+                return
+            if not path.exists() or not path.is_file():
+                self._send_json({"error": "docs have not been built"}, status=HTTPStatus.NOT_FOUND)
+                return
+            self._send_bytes(path.read_bytes(), _content_type(path))
 
         def _authorized(self) -> bool:
             if state.token is None:
@@ -757,6 +801,8 @@ def _job_command(action: str, payload: dict[str, Any], root: Path) -> tuple[str,
     if action == "reports":
         report_date = str(payload.get("report_date") or datetime.now(UTC).date().isoformat())
         return "Reports", [*base, "reports", "all", "--report-date", report_date, *root_args]
+    if action == "docs_build":
+        return "Build Docs", [*base, "docs", "build", *root_args]
     if action == "backtest":
         factor = _safe_choice(
             payload.get("factor"),
@@ -912,6 +958,36 @@ def _backtest_runs(data_root: Path) -> list[dict[str, Any]]:
     return runs[:8]
 
 
+def _docs_artifacts(data_root: Path) -> list[dict[str, Any]]:
+    manifest = data_root / "docs_site" / "manifest.json"
+    if not manifest.exists():
+        return []
+    try:
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return []
+    pages = data.get("pages", [])
+    if not isinstance(pages, list):
+        return []
+    artifacts: list[dict[str, Any]] = []
+    for page in pages:
+        if not isinstance(page, dict):
+            continue
+        output = str(page.get("output", ""))
+        path = data_root / "docs_site" / output
+        if not path.exists():
+            continue
+        artifacts.append(
+            {
+                "title": str(page.get("title") or output),
+                "source": str(page.get("source") or ""),
+                "url": f"/docs/{quote(output)}",
+                "modified_at": datetime.fromtimestamp(path.stat().st_mtime, UTC).isoformat(),
+            }
+        )
+    return artifacts
+
+
 def _mtime(path: Path) -> float:
     try:
         return path.stat().st_mtime
@@ -922,6 +998,10 @@ def _mtime(path: Path) -> float:
 def _content_type(path: Path) -> str:
     if path.suffix == ".html":
         return "text/html; charset=utf-8"
+    if path.suffix == ".css":
+        return "text/css; charset=utf-8"
+    if path.suffix == ".js":
+        return "application/javascript; charset=utf-8"
     if path.suffix == ".json":
         return "application/json; charset=utf-8"
     if path.suffix == ".parquet":

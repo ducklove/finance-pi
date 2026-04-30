@@ -66,6 +66,13 @@ def test_admin_job_command_is_allowlisted(tmp_path) -> None:
     assert "quality_roa" in command
 
 
+def test_admin_docs_build_command_is_allowlisted(tmp_path) -> None:
+    label, command = _job_command("docs_build", {}, tmp_path)
+
+    assert label == "Build Docs"
+    assert command[-4:] == ["docs", "build", "--root", str(tmp_path)]
+
+
 def test_admin_health_is_minimal_and_token_state_is_kept(tmp_path) -> None:
     state = AdminState(tmp_path, token="secret-token")
     health = _health_payload(state)

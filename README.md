@@ -51,6 +51,7 @@ python -m finance_pi.cli.app backtest run --factor momentum_12_1 --start 2024-01
 python -m finance_pi.cli.app reports dq --report-date 2026-04-29
 python -m finance_pi.cli.app reports fraud --report-date 2026-04-29
 python -m finance_pi.cli.app reports all --report-date 2026-04-29
+python -m finance_pi.cli.app docs build --root .
 python -m finance_pi.cli.app admin --root . --port 8400
 python -m finance_pi.cli.app check-admin http://127.0.0.1:8400
 ```
@@ -106,6 +107,15 @@ python -m finance_pi.cli.app admin --root . --host 0.0.0.0 --port 8400
 `admin` prints a tokenized URL. `/api/health` is open for reachability checks;
 the UI, dataset API, logs, files, and job execution require the token. To pin the
 token across restarts, set `FINANCE_PI_ADMIN_TOKEN` in `.env`.
+
+Build and publish the repository documentation as HTML:
+
+```bash
+python -m finance_pi.cli.app docs build --root .
+```
+
+The generated site is written to `data/docs_site/` and is served by the admin at
+`/docs/`.
 
 ## Current Scope
 
