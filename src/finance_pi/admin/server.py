@@ -1119,10 +1119,6 @@ def _handler_for(state: AdminState) -> type[BaseHTTPRequestHandler]:
 
 
 def _ensure_docs_built(root: Path) -> None:
-    index = root / "data" / "docs_site" / "index.html"
-    manifest = root / "data" / "docs_site" / "manifest.json"
-    if index.exists() and manifest.exists():
-        return
     build_docs_site(root)
 
 
