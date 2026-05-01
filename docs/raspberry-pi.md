@@ -99,6 +99,27 @@ After `.env` is configured, run the real daily path:
 python -m finance_pi.cli.app daily --root .
 ```
 
+If the server missed one or more sessions, run catch-up. For example, to fill
+the already-missed 2026-04-29 and 2026-04-30 sessions:
+
+```bash
+python -m finance_pi.cli.app catchup --root . --since 2026-04-29 --until 2026-04-30 --no-strict
+```
+
+Without `--since`, catch-up starts from the day after the latest
+`gold.daily_prices_adj` partition. The scheduled systemd service uses catch-up
+instead of a single-day run so a missed timer can fill multiple weekdays on the
+next execution. Use `--no-strict` for the scheduled service because the current
+calendar only skips weekends; market holidays can legitimately produce no price
+rows.
+
+Daily and catch-up runs skip the large `gold.fundamentals_pit` rebuild by
+default. Rebuild that derived cache manually when you need PIT fundamentals:
+
+```bash
+python -m finance_pi.cli.app build fundamentals-pit --root .
+```
+
 Start the web admin on the Pi:
 
 ```bash
@@ -212,6 +233,17 @@ Run once manually:
 
 ```bash
 sudo systemctl start finance-pi-daily.service
+```
+
+For this server, adjust the template path/user before copying or override the
+unit after copying:
+
+```ini
+User=cantabile
+Group=cantabile
+WorkingDirectory=/home/cantabile/Works/finance-pi
+EnvironmentFile=-/home/cantabile/Works/finance-pi/.env
+ExecStart=/home/cantabile/Works/finance-pi/.venv/bin/python -m finance_pi.cli.app catchup --root /home/cantabile/Works/finance-pi --no-strict
 ```
 
 ## 7. Update Deployment

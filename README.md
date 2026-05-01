@@ -98,6 +98,21 @@ The daily server entrypoint is:
 python -m finance_pi.cli.app daily --root .
 ```
 
+If the Pi was offline or the timer missed a few sessions, run catch-up once.
+This starts after the latest `gold.daily_prices_adj` date unless `--since` is
+provided:
+
+```bash
+python -m finance_pi.cli.app catchup --root . --since 2026-04-29 --until 2026-04-30 --no-strict
+```
+
+Daily runs skip the large `gold.fundamentals_pit` rebuild by default. Rebuild
+that cache manually when needed:
+
+```bash
+python -m finance_pi.cli.app build fundamentals-pit --root .
+```
+
 The local web admin is:
 
 ```bash

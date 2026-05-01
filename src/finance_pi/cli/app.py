@@ -5,6 +5,7 @@ import json
 import platform
 import re
 import sys
+from contextlib import suppress
 from datetime import date, timedelta
 from pathlib import Path
 from urllib.request import Request, urlopen
@@ -701,6 +702,11 @@ def run_daily(
     report_date: str | None = typer.Option(None, help="Report date as YYYY-MM-DD"),
     ingest: bool = typer.Option(True, help="Attempt live source ingest when keys are configured"),
     strict: bool = typer.Option(True, help="Fail if a configured live source fails"),
+    include_fundamentals_pit: bool = typer.Option(
+        False,
+        "--include-fundamentals-pit/--skip-fundamentals-pit",
+        help="Rebuild the large gold.fundamentals_pit cache during this daily run",
+    ),
 ) -> None:
     """Run the daily local maintenance job.
 
@@ -720,7 +726,7 @@ def run_daily(
             typer.echo(failure)
         if strict and failures:
             raise typer.Exit(code=1)
-    summaries = build_all(paths.data_root)
+    summaries = _run_daily_builds(paths.data_root, include_fundamentals_pit)
     created = CatalogBuilder(paths.data_root, paths.catalog_path).build()
 
     dq_path = paths.data_root / "reports" / "data_quality" / f"{parsed_date.isoformat()}.html"
@@ -736,6 +742,35 @@ def run_daily(
     typer.echo(f"Views: {len(created)}")
     typer.echo(f"Data quality report: {dq_path}")
     typer.echo(f"Fraud report: {fraud_path}")
+
+
+@app.command("catchup")
+def catchup_daily(
+    root: Path = typer.Option(Path("."), help="Workspace root"),
+    since: str | None = typer.Option(
+        None,
+        help="First report date to run. Defaults to latest gold price date + 1 weekday.",
+    ),
+    until: str | None = typer.Option(None, help="Last report date to run. Defaults to today"),
+    ingest: bool = typer.Option(True, help="Attempt live source ingest when keys are configured"),
+    strict: bool = typer.Option(True, help="Fail if a configured live source fails"),
+    include_fundamentals_pit: bool = typer.Option(
+        False,
+        "--include-fundamentals-pit/--skip-fundamentals-pit",
+        help="Rebuild the large gold.fundamentals_pit cache during each daily run",
+    ),
+) -> None:
+    """Run daily for each missing weekday in a date range."""
+
+    paths = ProjectPaths(root=root)
+    end = _parse_report_date(until)
+    dates = _catchup_dates(paths.data_root, _parse_report_date(since) if since else None, end)
+    if not dates:
+        typer.echo("No catch-up dates to run.")
+        return
+    for report_day in dates:
+        typer.echo(f"Catch-up daily: {report_day.isoformat()}")
+        run_daily(paths.root, report_day.isoformat(), ingest, strict, include_fundamentals_pit)
 
 
 def _parse_report_date(value: str | None) -> date:
@@ -875,6 +910,45 @@ def _run_daily_ingest(
         except Exception as exc:  # noqa: BLE001
             failures.append(f"OpenDART financial ingest failed: {exc}")
     return failures
+
+
+def _run_daily_builds(data_root: Path, include_fundamentals_pit: bool) -> list:
+    builders = [
+        build_silver_prices,
+        build_security_master,
+        build_universe_history,
+        build_daily_prices_adj,
+        build_financials_silver,
+    ]
+    if include_fundamentals_pit:
+        builders.append(build_fundamentals_pit)
+
+    summaries = []
+    for builder in builders:
+        summaries.extend(builder(data_root))
+    return summaries
+
+
+def _catchup_dates(data_root: Path, since: date | None, until: date) -> tuple[date, ...]:
+    if since is None:
+        latest = _latest_gold_price_date(data_root)
+        if latest is None:
+            raise typer.BadParameter("No gold price data found. Pass --since explicitly.")
+        since = latest + timedelta(days=1)
+    if until < since:
+        return ()
+    return TradingCalendar.weekdays(since, until).dates
+
+
+def _latest_gold_price_date(data_root: Path) -> date | None:
+    values: list[date] = []
+    for path in data_root.glob("gold/daily_prices_adj/dt=*/part.parquet"):
+        for part in path.parts:
+            if not part.startswith("dt="):
+                continue
+            with suppress(ValueError):
+                values.append(date.fromisoformat(part.removeprefix("dt=")))
+    return max(values) if values else None
 
 
 def _dart_financial_requests(
