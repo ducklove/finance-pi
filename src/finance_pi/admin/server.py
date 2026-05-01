@@ -77,9 +77,9 @@ INDEX_HTML = """<!doctype html>
           <small id="dataset-files">--</small>
         </article>
         <article class="metric">
-          <span>Rows</span>
-          <strong id="row-count">--</strong>
-          <small>known parquet rows</small>
+          <span>Price Coverage</span>
+          <strong id="coverage-start">--</strong>
+          <small id="coverage-end">--</small>
         </article>
         <article class="metric">
           <span>Active Jobs</span>
@@ -135,7 +135,7 @@ INDEX_HTML = """<!doctype html>
                   <th>Layer</th>
                   <th>Rows</th>
                   <th>Files</th>
-                  <th>Latest</th>
+                  <th>Coverage</th>
                   <th>Size</th>
                   <th>Status</th>
                 </tr>
@@ -695,7 +695,10 @@ function renderOverview(data) {
   qs('catalog-path').textContent = data.catalog.path;
   qs('dataset-count').textContent = `${data.datasets.filter(d => d.files > 0).length}/${data.datasets.length}`;
   qs('dataset-files').textContent = `${fmt.format(data.datasets.reduce((n, d) => n + d.files, 0))} files`;
-  qs('row-count').textContent = fmt.format(data.datasets.reduce((n, d) => n + (d.rows || 0), 0));
+  qs('coverage-start').textContent = data.price_coverage.start || '--';
+  qs('coverage-end').textContent = data.price_coverage.end
+    ? `to ${data.price_coverage.end}`
+    : 'no price data yet';
   qs('active-jobs').textContent = data.jobs.filter(j => j.status === 'running').length;
   qs('last-refresh').textContent = shortDate(data.generated_at);
   qs('data-root').textContent = data.data_root;
@@ -724,10 +727,16 @@ function renderDatasets(datasets) {
       <td>${html(d.layer)}</td>
       <td>${fmt.format(d.rows || 0)}</td>
       <td>${fmt.format(d.files)}</td>
-      <td>${html(d.latest_partition || '--')}</td>
+      <td>${html(coverageLabel(d))}</td>
       <td>${bytes(d.bytes)}</td>
       <td><span class="status ${html(d.status)}">${html(d.status)}</span></td>
     </tr>`).join('');
+}
+
+function coverageLabel(dataset) {
+  if (!dataset.coverage_start) return '--';
+  if (dataset.coverage_start === dataset.coverage_end) return dataset.coverage_start;
+  return `${dataset.coverage_start} - ${dataset.coverage_end}`;
 }
 
 function renderJobs(jobs) {
@@ -884,6 +893,7 @@ class AdminState:
                 "exists": self.paths.catalog_path.exists(),
             },
             "datasets": datasets,
+            "price_coverage": _price_coverage(datasets),
             "reports": _report_artifacts(data_root),
             "docs": _docs_artifacts(data_root),
             "backtests": _backtest_runs(data_root),
@@ -1204,6 +1214,7 @@ def _dataset_stat(data_root: Path, name: str, spec: Any) -> dict[str, Any]:
     size = sum(file.stat().st_size for file in files if file.exists())
     rows = _row_count(files, spec.hive_partitioning) if files else 0
     latest = _latest_partition(files)
+    coverage = _coverage_for(files, spec.hive_partitioning) if files else {}
     return {
         "name": name,
         "layer": spec.layer,
@@ -1211,8 +1222,79 @@ def _dataset_stat(data_root: Path, name: str, spec: Any) -> dict[str, Any]:
         "rows": rows,
         "bytes": size,
         "latest_partition": latest,
+        **coverage,
         "status": "ready" if files else "empty",
     }
+
+
+def _coverage_for(files: list[Path], hive_partitioning: bool) -> dict[str, str | None]:
+    columns = ("date", "dt", "rcept_dt", "snapshot_dt", "request_dt", "fiscal_year")
+    try:
+        scan = pl.scan_parquet(
+            [file.as_posix() for file in files],
+            hive_partitioning=hive_partitioning,
+        )
+        schema = scan.collect_schema()
+        for column in columns:
+            if column not in schema.names():
+                continue
+            row = (
+                scan.select(
+                    pl.col(column).min().alias("coverage_start"),
+                    pl.col(column).max().alias("coverage_end"),
+                )
+                .collect()
+                .row(0)
+            )
+            return {
+                "coverage_field": column,
+                "coverage_start": _format_coverage_value(row[0]),
+                "coverage_end": _format_coverage_value(row[1]),
+            }
+    except Exception:  # noqa: BLE001
+        pass
+
+    partitions = _partition_ranges(files)
+    for column in columns:
+        values = partitions.get(column)
+        if values:
+            return {
+                "coverage_field": column,
+                "coverage_start": values[0],
+                "coverage_end": values[-1],
+            }
+    return {"coverage_field": None, "coverage_start": None, "coverage_end": None}
+
+
+def _partition_ranges(files: list[Path]) -> dict[str, list[str]]:
+    ranges: dict[str, set[str]] = {}
+    for file in files:
+        for part in file.parts:
+            if "=" not in part:
+                continue
+            key, value = part.split("=", maxsplit=1)
+            ranges.setdefault(key, set()).add(value)
+    return {key: sorted(values) for key, values in ranges.items()}
+
+
+def _format_coverage_value(value: Any) -> str | None:
+    if value is None:
+        return None
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return str(value)
+
+
+def _price_coverage(datasets: list[dict[str, Any]]) -> dict[str, str | None]:
+    for name in ("gold.daily_prices_adj", "silver.prices", "bronze.naver_daily"):
+        dataset = next((item for item in datasets if item["name"] == name), None)
+        if dataset and dataset.get("coverage_start"):
+            return {
+                "dataset": name,
+                "start": dataset.get("coverage_start"),
+                "end": dataset.get("coverage_end"),
+            }
+    return {"dataset": None, "start": None, "end": None}
 
 
 def _row_count(files: list[Path], hive_partitioning: bool) -> int:

@@ -43,8 +43,15 @@ def test_admin_overview_reports_dataset_counts(tmp_path) -> None:
     )
 
     assert overview["max_price_date"] == "2026-04-28"
+    assert overview["price_coverage"] == {
+        "dataset": "gold.daily_prices_adj",
+        "start": "2026-04-28",
+        "end": "2026-04-28",
+    }
     assert gold_prices["files"] == 1
     assert gold_prices["rows"] == 1
+    assert gold_prices["coverage_start"] == "2026-04-28"
+    assert gold_prices["coverage_end"] == "2026-04-28"
     assert gold_prices["status"] == "ready"
 
 
