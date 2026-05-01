@@ -6,7 +6,7 @@ import platform
 import re
 import sys
 from contextlib import suppress
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from urllib.request import Request, urlopen
 
@@ -65,6 +65,7 @@ build_app = typer.Typer(help="Bronze to Silver/Gold build commands")
 reports_app = typer.Typer(help="Report generation commands")
 backtest_app = typer.Typer(help="Backtest commands")
 docs_app = typer.Typer(help="Documentation publishing commands")
+backfill_app = typer.Typer(help="Historical backfill commands")
 app.add_typer(catalog_app, name="catalog")
 app.add_typer(factors_app, name="factors")
 app.add_typer(ingest_app, name="ingest")
@@ -72,6 +73,7 @@ app.add_typer(build_app, name="build")
 app.add_typer(reports_app, name="reports")
 app.add_typer(backtest_app, name="backtest")
 app.add_typer(docs_app, name="docs")
+app.add_typer(backfill_app, name="backfill")
 
 
 @app.command("doctor")
@@ -594,6 +596,120 @@ def bootstrap(
     typer.echo(f"Views: {len(created)}")
 
 
+@backfill_app.command("yearly")
+def backfill_yearly(
+    root: Path = typer.Option(Path("."), help="Workspace root"),
+    start_year: int = typer.Option(2023, help="Newest year to backfill first"),
+    end_year: int = typer.Option(2010, help="Oldest year to backfill, inclusive"),
+    max_years: int | None = typer.Option(
+        1,
+        help="Maximum missing years to run this invocation; pass 0 for no limit",
+    ),
+    force: bool = typer.Option(False, help="Run even when a yearly completion marker exists"),
+    dry_run: bool = typer.Option(False, help="Only print the planned yearly chunks"),
+    strict: bool = typer.Option(True, help="Fail if a configured live source fails"),
+    include_financials: bool = typer.Option(
+        True,
+        "--include-financials/--skip-financials",
+        help="Ingest DART filings and financial statements for each year",
+    ),
+    include_fundamentals_pit: bool = typer.Option(
+        False,
+        "--include-fundamentals-pit/--skip-fundamentals-pit",
+        help="Rebuild the large gold.fundamentals_pit cache after each year",
+    ),
+    financial_report_codes: str = typer.Option(
+        "11011",
+        help="DART financial reports to ingest; annual default, comma-separate for quarterly",
+    ),
+    ticker_limit: int | None = typer.Option(None, help="Limit tickers for a smoke run"),
+    naver_chunk_days: int = typer.Option(370, help="Date range days per Naver request round"),
+    ticker_batch_size: int = typer.Option(50, help="Tickers per incremental price write"),
+    sleep_seconds: float = typer.Option(0.02, help="Sleep between Naver ticker calls"),
+    financial_batch_size: int = typer.Option(25, help="DART financial API calls per chunk"),
+    financial_sleep_seconds: float = typer.Option(0.05, help="Sleep between DART calls"),
+) -> None:
+    """Backfill historical data one calendar year at a time, newest to oldest."""
+
+    paths = ProjectPaths(root=root)
+    settings = RuntimeSettings.load(paths.root)
+    DataLakeLayout(paths.data_root).ensure_base_dirs()
+    years = _backfill_years(start_year, end_year)
+    limit = None if max_years == 0 else max_years
+    selected: list[int] = []
+    for year in years:
+        marker = _backfill_marker_path(paths.data_root, year)
+        if marker.exists() and not force:
+            typer.echo(f"skip year={year}: completion marker exists")
+            continue
+        selected.append(year)
+        if limit is not None and len(selected) >= limit:
+            break
+    if not selected:
+        typer.echo("No yearly backfill chunks to run.")
+        return
+    for year in selected:
+        since, until = _year_bounds(year)
+        typer.echo(f"Backfill year={year} range={since.isoformat()}..{until.isoformat()}")
+        if dry_run:
+            continue
+        failures = _run_yearly_backfill(
+            paths=paths,
+            settings=settings,
+            since=since,
+            until=until,
+            include_financials=include_financials,
+            include_fundamentals_pit=include_fundamentals_pit,
+            financial_report_codes=financial_report_codes,
+            ticker_limit=ticker_limit,
+            naver_chunk_days=naver_chunk_days,
+            ticker_batch_size=ticker_batch_size,
+            sleep_seconds=sleep_seconds,
+            financial_batch_size=financial_batch_size,
+            financial_sleep_seconds=financial_sleep_seconds,
+        )
+        for failure in failures:
+            typer.echo(failure)
+        if strict and failures:
+            raise typer.Exit(code=1)
+        _write_backfill_marker(
+            paths.data_root,
+            year,
+            {
+                "since": since.isoformat(),
+                "until": until.isoformat(),
+                "include_financials": include_financials,
+                "include_fundamentals_pit": include_fundamentals_pit,
+                "financial_report_codes": financial_report_codes,
+                "failures": failures,
+            },
+        )
+        typer.echo(f"completed year={year}")
+
+
+@backfill_app.command("status")
+def backfill_status(
+    root: Path = typer.Option(Path("."), help="Workspace root"),
+    start_year: int = typer.Option(2023, help="Newest year to show"),
+    end_year: int = typer.Option(2010, help="Oldest year to show, inclusive"),
+) -> None:
+    """Print yearly backfill markers and price coverage."""
+
+    paths = ProjectPaths(root=root)
+    coverage = _dataset_coverage(paths.data_root, "gold/daily_prices_adj/dt=*/part.parquet")
+    typer.echo(
+        "gold.daily_prices_adj coverage: "
+        f"{coverage.get('start') or '--'}..{coverage.get('end') or '--'} "
+        f"rows={coverage.get('rows', 0)} files={coverage.get('files', 0)}"
+    )
+    typer.echo("year\tstatus\tprice_days\trows\tcoverage\tmarker")
+    for item in _yearly_backfill_status(paths.data_root, start_year, end_year):
+        typer.echo(
+            f"{item['year']}\t{item['status']}\t{item['price_days']}\t{item['rows']}\t"
+            f"{item['coverage']}\t{item['marker']}"
+        )
+
+
 @build_app.command("silver-prices")
 def build_cmd_silver_prices(root: Path = typer.Option(Path("."), help="Workspace root")) -> None:
     _print_summaries(build_silver_prices(ProjectPaths(root=root).data_root))
@@ -933,6 +1049,192 @@ def _run_daily_builds(data_root: Path, include_fundamentals_pit: bool) -> list:
     for builder in builders:
         summaries.extend(builder(data_root))
     return summaries
+
+
+def _run_yearly_backfill(
+    *,
+    paths: ProjectPaths,
+    settings: RuntimeSettings,
+    since: date,
+    until: date,
+    include_financials: bool,
+    include_fundamentals_pit: bool,
+    financial_report_codes: str,
+    ticker_limit: int | None,
+    naver_chunk_days: int,
+    ticker_batch_size: int,
+    sleep_seconds: float,
+    financial_batch_size: int,
+    financial_sleep_seconds: float,
+) -> list[str]:
+    failures: list[str] = []
+    if settings.has_opendart and not any(
+        paths.data_root.glob("bronze/dart_company/snapshot_dt=*/part.parquet")
+    ):
+        try:
+            ingest_dart_company(date.today().isoformat(), paths.root)
+        except Exception as exc:  # noqa: BLE001
+            failures.append(f"OpenDART company ingest failed: {exc}")
+
+    try:
+        ingest_naver_daily(
+            since.isoformat(),
+            until.isoformat(),
+            paths.root,
+            ticker_limit,
+            naver_chunk_days,
+            ticker_batch_size,
+            sleep_seconds,
+        )
+    except Exception as exc:  # noqa: BLE001
+        failures.append(f"Naver daily price ingest failed: {exc}")
+
+    if include_financials:
+        if settings.has_opendart:
+            try:
+                ingest_dart_filings(since.isoformat(), until.isoformat(), paths.root, 7)
+            except Exception as exc:  # noqa: BLE001
+                failures.append(f"OpenDART filings ingest failed: {exc}")
+            try:
+                ingest_dart_financials_bulk(
+                    since.isoformat(),
+                    until.isoformat(),
+                    paths.root,
+                    financial_report_codes,
+                    None,
+                    financial_batch_size,
+                    financial_sleep_seconds,
+                    "CFS",
+                )
+            except Exception as exc:  # noqa: BLE001
+                failures.append(f"OpenDART financial ingest failed: {exc}")
+        else:
+            failures.append("OpenDART financial backfill skipped: OPENDART_API_KEY missing")
+
+    summaries = _run_daily_builds(paths.data_root, include_fundamentals_pit)
+    for summary in summaries:
+        typer.echo(f"Build: {summary.dataset} rows={summary.rows} files={summary.files}")
+    created = CatalogBuilder(paths.data_root, paths.catalog_path).build()
+    typer.echo(f"Catalog: {paths.catalog_path}")
+    typer.echo(f"Views: {len(created)}")
+    return failures
+
+
+def _backfill_years(start_year: int, end_year: int) -> tuple[int, ...]:
+    if start_year < end_year:
+        raise typer.BadParameter("start-year must be greater than or equal to end-year")
+    return tuple(range(start_year, end_year - 1, -1))
+
+
+def _year_bounds(year: int) -> tuple[date, date]:
+    return date(year, 1, 1), date(year, 12, 31)
+
+
+def _backfill_marker_path(data_root: Path, year: int) -> Path:
+    return data_root / "_state" / "backfill" / "yearly" / f"{year}.json"
+
+
+def _write_backfill_marker(data_root: Path, year: int, payload: dict[str, object]) -> Path:
+    marker = _backfill_marker_path(data_root, year)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    failures = payload.get("failures")
+    marker.write_text(
+        json.dumps(
+            {
+                "year": year,
+                "status": "complete_with_failures" if failures else "complete",
+                "completed_at": datetime.now(UTC).isoformat(),
+                **payload,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    return marker
+
+
+def _yearly_backfill_status(
+    data_root: Path,
+    start_year: int,
+    end_year: int,
+) -> tuple[dict[str, object], ...]:
+    result: list[dict[str, object]] = []
+    price_dates = _partition_dates(data_root.glob("gold/daily_prices_adj/dt=*/part.parquet"))
+    for year in _backfill_years(start_year, end_year):
+        dates = tuple(value for value in price_dates if value.year == year)
+        files = [
+            path
+            for path in data_root.glob(f"gold/daily_prices_adj/dt={year}-*/part.parquet")
+            if path.is_file()
+        ]
+        marker = _backfill_marker_path(data_root, year)
+        marker_status = _read_backfill_marker_status(marker)
+        if marker_status:
+            status = marker_status
+        elif dates:
+            status = "partial"
+        else:
+            status = "missing"
+        coverage = "--" if not dates else f"{min(dates).isoformat()}..{max(dates).isoformat()}"
+        result.append(
+            {
+                "year": year,
+                "status": status,
+                "price_days": len(dates),
+                "rows": _count_parquet_rows(files),
+                "coverage": coverage,
+                "marker": marker.name if marker.exists() else "-",
+            }
+        )
+    return tuple(result)
+
+
+def _read_backfill_marker_status(marker: Path) -> str | None:
+    if not marker.exists():
+        return None
+    try:
+        data = json.loads(marker.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return "marker_invalid"
+    status = data.get("status")
+    return str(status) if status else "complete"
+
+
+def _dataset_coverage(data_root: Path, pattern: str) -> dict[str, object]:
+    files = [path for path in data_root.glob(pattern) if path.is_file()]
+    dates = _partition_dates(files)
+    return {
+        "start": min(dates).isoformat() if dates else None,
+        "end": max(dates).isoformat() if dates else None,
+        "files": len(files),
+        "rows": _count_parquet_rows(files),
+    }
+
+
+def _partition_dates(files) -> tuple[date, ...]:
+    values: list[date] = []
+    for path in files:
+        for part in path.parts:
+            if not part.startswith("dt="):
+                continue
+            with suppress(ValueError):
+                values.append(date.fromisoformat(part.removeprefix("dt=")))
+    return tuple(sorted(set(values)))
+
+
+def _count_parquet_rows(files: list[Path]) -> int:
+    if not files:
+        return 0
+    try:
+        return int(
+            pl.scan_parquet([path.as_posix() for path in files], hive_partitioning=True)
+            .select(pl.len())
+            .collect()
+            .item()
+        )
+    except Exception:  # noqa: BLE001
+        return 0
 
 
 def _catchup_dates(data_root: Path, since: date | None, until: date) -> tuple[date, ...]:

@@ -113,6 +113,17 @@ that cache manually when needed:
 python -m finance_pi.cli.app build fundamentals-pit --root .
 ```
 
+Historical backfills can be run one year at a time, newest to oldest. The
+default below runs only the next missing year, so it is safe to repeat:
+
+```bash
+python -m finance_pi.cli.app backfill status --root . --start-year 2023 --end-year 2010
+python -m finance_pi.cli.app backfill yearly --root . --start-year 2023 --end-year 2010 --max-years 1 --no-strict
+```
+
+Each completed year writes a marker under `data/_state/backfill/yearly/`, and
+`backfill status` also checks the real `gold.daily_prices_adj` date partitions.
+
 The local web admin is:
 
 ```bash

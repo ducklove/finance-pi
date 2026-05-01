@@ -120,6 +120,35 @@ default. Rebuild that derived cache manually when you need PIT fundamentals:
 python -m finance_pi.cli.app build fundamentals-pit --root .
 ```
 
+## 5.1 Historical Yearly Backfill
+
+Use yearly backfill for older history. It runs newest to oldest and writes a
+completion marker after each year, so it can be stopped and resumed.
+
+Check current progress:
+
+```bash
+python -m finance_pi.cli.app backfill status --root . --start-year 2023 --end-year 2010
+```
+
+Run the next missing year only:
+
+```bash
+python -m finance_pi.cli.app backfill yearly --root . --start-year 2023 --end-year 2010 --max-years 1 --no-strict
+```
+
+To keep walking backward, repeat the same command. To run multiple missing years
+in one invocation, increase `--max-years`; pass `--max-years 0` for no limit.
+The command uses Naver daily price history by default and, when OpenDART is
+configured, ingests yearly filings and annual financial statements. It does not
+rebuild `gold.fundamentals_pit` unless `--include-fundamentals-pit` is passed.
+
+Completion markers live here:
+
+```text
+data/_state/backfill/yearly/YYYY.json
+```
+
 Start the web admin on the Pi:
 
 ```bash
