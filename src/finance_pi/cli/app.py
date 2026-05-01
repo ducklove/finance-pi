@@ -522,7 +522,7 @@ def bootstrap(
     if not skip_dart_filings:
         if settings.has_opendart:
             try:
-                ingest_dart_filings(start.isoformat(), end.isoformat(), paths.root)
+                ingest_dart_filings(start.isoformat(), end.isoformat(), paths.root, 7)
             except Exception as exc:  # noqa: BLE001
                 failures.append(f"OpenDART filings ingest failed: {exc}")
         else:
@@ -885,6 +885,7 @@ def _run_daily_ingest(
                 None,
                 1,
                 0.05,
+                50,
             )
         except Exception as exc:  # noqa: BLE001
             failures.append(f"KIS universe price ingest failed: {exc}")
@@ -893,7 +894,12 @@ def _run_daily_ingest(
 
     if settings.has_opendart:
         try:
-            ingest_dart_filings(filing_start.isoformat(), report_date.isoformat(), paths.root)
+            ingest_dart_filings(
+                filing_start.isoformat(),
+                report_date.isoformat(),
+                paths.root,
+                7,
+            )
         except Exception as exc:  # noqa: BLE001
             failures.append(f"OpenDART filings ingest failed: {exc}")
         try:
