@@ -631,7 +631,7 @@ def backfill_yearly(
 ) -> None:
     """Backfill historical data one calendar year at a time, newest to oldest."""
 
-    paths = ProjectPaths(root=root)
+    paths = _validated_backfill_paths(root)
     settings = RuntimeSettings.load(paths.root)
     DataLakeLayout(paths.data_root).ensure_base_dirs()
     years = _backfill_years(start_year, end_year)
@@ -695,7 +695,7 @@ def backfill_status(
 ) -> None:
     """Print yearly backfill markers and price coverage."""
 
-    paths = ProjectPaths(root=root)
+    paths = _validated_backfill_paths(root)
     coverage = _dataset_coverage(paths.data_root, "gold/daily_prices_adj/dt=*/part.parquet")
     typer.echo(
         "gold.daily_prices_adj coverage: "
@@ -1049,6 +1049,32 @@ def _run_daily_builds(data_root: Path, include_fundamentals_pit: bool) -> list:
     for builder in builders:
         summaries.extend(builder(data_root))
     return summaries
+
+
+def _validated_backfill_paths(root: Path) -> ProjectPaths:
+    resolved = root.resolve()
+    if _looks_like_workspace_root(resolved):
+        return ProjectPaths(root=root)
+
+    suggestion = _nearest_workspace_root(resolved)
+    message = (
+        f"{resolved} does not look like the finance-pi workspace root. "
+        "Run backfill commands from the repository root or pass --root explicitly."
+    )
+    if suggestion is not None:
+        message += f" Try: --root {suggestion}"
+    raise typer.BadParameter(message)
+
+
+def _looks_like_workspace_root(path: Path) -> bool:
+    return (path / "pyproject.toml").exists() and (path / "src" / "finance_pi").is_dir()
+
+
+def _nearest_workspace_root(path: Path) -> Path | None:
+    for candidate in (path, *path.parents):
+        if _looks_like_workspace_root(candidate):
+            return candidate
+    return None
 
 
 def _run_yearly_backfill(

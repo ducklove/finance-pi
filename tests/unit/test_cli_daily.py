@@ -4,6 +4,7 @@ from datetime import date
 from types import SimpleNamespace
 
 import polars as pl
+import pytest
 
 from finance_pi.cli import app as cli_app
 from finance_pi.cli.app import (
@@ -11,6 +12,7 @@ from finance_pi.cli.app import (
     _catchup_dates,
     _latest_gold_price_date,
     _run_daily_ingest,
+    _validated_backfill_paths,
     _write_backfill_marker,
     _yearly_backfill_status,
 )
@@ -113,3 +115,18 @@ def test_backfill_status_uses_markers_and_price_partitions(tmp_path) -> None:
     assert status[0]["price_days"] == 1
     assert status[0]["coverage"] == "2023-01-02..2023-01-02"
     assert status[1]["status"] == "missing"
+
+
+def test_backfill_root_must_be_workspace_root(tmp_path) -> None:
+    workspace = tmp_path / "finance-pi"
+    marker_dir = workspace / "data" / "_state" / "backfill" / "yearly"
+    (workspace / "src" / "finance_pi").mkdir(parents=True)
+    marker_dir.mkdir(parents=True)
+    (workspace / "pyproject.toml").write_text("[project]\nname='finance-pi'\n", encoding="utf-8")
+
+    assert _validated_backfill_paths(workspace).root == workspace
+    with pytest.raises(Exception) as exc_info:
+        _validated_backfill_paths(marker_dir)
+
+    assert "workspace root" in str(exc_info.value)
+    assert str(workspace) in str(exc_info.value)
