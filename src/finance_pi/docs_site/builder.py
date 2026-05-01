@@ -32,67 +32,102 @@ BlockMode = Literal["paragraph", "ul", "ol", "blockquote", "table", "code"]
 DOCS_CSS = """
 :root {
   color-scheme: light;
-  --bg: #f7f4ed;
-  --paper: #fffdf8;
-  --ink: #20242a;
-  --muted: #69717d;
-  --line: #ded7ca;
-  --accent: #244f9e;
-  --green: #1d604b;
+  --bg: #f5f7fa;
+  --paper: #ffffff;
+  --ink: #111827;
+  --muted: #667085;
+  --line: #d9dee7;
+  --line-soft: #edf0f5;
+  --rail: #151a22;
+  --accent: #2563eb;
+  --green: #0f766e;
+  --code: #0f172a;
+  --shadow: 0 18px 50px rgba(17, 24, 39, .08);
 }
 * { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
 body {
   margin: 0;
   background: var(--bg);
   color: var(--ink);
-  font: 16px/1.65 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font: 16px/1.7 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 a { color: var(--accent); text-decoration: none; }
 a:hover { text-decoration: underline; }
-.layout { display: grid; grid-template-columns: 280px minmax(0, 1fr); min-height: 100vh; }
+a:focus-visible { outline: 3px solid rgba(37, 99, 235, .24); outline-offset: 2px; border-radius: 6px; }
+.layout { display: grid; grid-template-columns: 284px minmax(0, 1fr); min-height: 100vh; }
 .sidebar {
-  border-right: 1px solid var(--line);
-  padding: 24px;
-  background: #ede7dc;
   position: sticky;
   top: 0;
   height: 100vh;
   overflow: auto;
+  padding: 22px 16px;
+  background: var(--rail);
+  color: white;
 }
-.brand { display: flex; align-items: center; gap: 12px; margin-bottom: 28px; }
+.brand { display: flex; align-items: center; gap: 12px; margin-bottom: 24px; padding: 0 6px; }
 .mark {
-  width: 42px; height: 42px; border-radius: 8px;
-  display: grid; place-items: center; background: var(--green); color: white;
+  width: 42px;
+  height: 42px;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  background: linear-gradient(135deg, var(--green), var(--accent));
+  color: white;
   font-weight: 800;
+  box-shadow: 0 10px 22px rgba(15, 118, 110, .28);
 }
 .brand strong, .brand span { display: block; }
-.brand span { color: var(--muted); font-size: 13px; }
-.nav { display: grid; gap: 7px; }
+.brand span { color: #aab3c2; font-size: 13px; }
+.nav { display: grid; gap: 5px; }
 .nav a {
-  padding: 8px 10px;
+  min-height: 38px;
+  padding: 9px 10px;
   border-radius: 7px;
-  color: var(--ink);
+  color: #d8dee8;
+  border: 1px solid transparent;
 }
-.nav a.active, .nav a:hover { background: var(--paper); text-decoration: none; }
-.content { padding: 32px; min-width: 0; }
+.nav a.active, .nav a:hover {
+  color: white;
+  background: #202733;
+  border-color: rgba(255,255,255,.08);
+  text-decoration: none;
+}
+.content {
+  padding: 30px;
+  min-width: 0;
+  max-width: 1240px;
+  width: 100%;
+}
 .doc {
   max-width: 980px;
   background: var(--paper);
   border: 1px solid var(--line);
   border-radius: 8px;
-  padding: 34px;
-  box-shadow: 0 14px 34px rgba(42, 32, 20, .10);
+  padding: 36px;
+  box-shadow: var(--shadow);
 }
-.meta { color: var(--muted); font-size: 13px; margin-bottom: 22px; }
-h1, h2, h3, h4, h5, h6 { line-height: 1.25; letter-spacing: 0; scroll-margin-top: 20px; }
-h1 { font-size: 34px; margin: 0 0 10px; }
-h2 { font-size: 24px; margin-top: 36px; padding-top: 18px; border-top: 1px solid var(--line); }
-h3 { font-size: 19px; margin-top: 28px; }
+.doc-home { max-width: 1080px; }
+.doc-topline {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 22px;
+}
+.breadcrumb, .meta, .footer { color: var(--muted); font-size: 13px; }
+.meta { margin: 0 0 22px; }
+h1, h2, h3, h4, h5, h6 { line-height: 1.24; letter-spacing: 0; scroll-margin-top: 20px; }
+h1 { font-size: clamp(32px, 5vw, 48px); margin: 0 0 10px; }
+h2 { font-size: 25px; margin-top: 38px; padding-top: 20px; border-top: 1px solid var(--line-soft); }
+h3 { font-size: 20px; margin-top: 30px; }
+h4, h5, h6 { margin-top: 24px; }
 p { margin: 14px 0; }
 ul, ol { padding-left: 24px; }
 li { margin: 6px 0; }
 code {
-  background: #eee7db;
+  background: #eef2f7;
+  color: #182230;
   padding: 2px 5px;
   border-radius: 5px;
   font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
@@ -100,19 +135,20 @@ code {
 }
 pre {
   overflow: auto;
-  background: #111827;
+  background: var(--code);
   color: #e5e7eb;
-  padding: 15px;
+  padding: 16px;
   border-radius: 8px;
-  line-height: 1.45;
+  line-height: 1.48;
+  border: 1px solid #1e293b;
 }
 pre code { background: transparent; padding: 0; color: inherit; }
 blockquote {
-  margin: 16px 0;
-  padding: 10px 16px;
+  margin: 18px 0;
+  padding: 12px 16px;
   border-left: 4px solid var(--green);
-  background: #f4efe6;
-  color: #354052;
+  background: #f0fdfa;
+  color: #344054;
 }
 table {
   border-collapse: collapse;
@@ -120,30 +156,56 @@ table {
   display: block;
   overflow-x: auto;
   margin: 18px 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
 }
 th, td {
-  border: 1px solid var(--line);
-  padding: 8px 10px;
+  border-bottom: 1px solid var(--line-soft);
+  padding: 9px 11px;
   text-align: left;
   vertical-align: top;
 }
-th { background: #f0eadf; }
-.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px; }
+th { background: #f8fafc; color: #475467; font-size: 13px; }
+tr:last-child td { border-bottom: 0; }
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 12px; margin-top: 22px; }
 .card {
   border: 1px solid var(--line);
   border-radius: 8px;
-  padding: 14px;
-  background: #fffaf0;
+  padding: 16px;
+  background: #ffffff;
+  display: grid;
+  gap: 8px;
+  min-height: 122px;
+  box-shadow: 0 10px 24px rgba(17,24,39,.05);
 }
-.toc { margin: 20px 0; padding: 14px; background: #f6f0e7; border-radius: 8px; }
-.toc a { display: block; padding: 3px 0; color: #354052; }
+.card:hover {
+  border-color: #b6c0cf;
+  text-decoration: none;
+  transform: translateY(-1px);
+}
+.card strong { color: var(--ink); font-size: 17px; }
+.card span { color: var(--muted); font-size: 13px; }
+.toc {
+  margin: 22px 0;
+  padding: 14px;
+  background: #f8fafc;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.toc strong { display: block; margin-bottom: 7px; }
+.toc a { display: block; padding: 4px 0; color: #344054; }
 .toc .h3 { padding-left: 14px; font-size: 14px; }
-.footer { margin-top: 30px; color: var(--muted); font-size: 13px; }
+.footer { margin-top: 30px; padding-top: 18px; border-top: 1px solid var(--line-soft); }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; }
+}
 @media (max-width: 900px) {
   .layout { grid-template-columns: 1fr; }
   .sidebar { position: static; height: auto; }
+  .nav { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
   .content { padding: 16px; }
   .doc { padding: 22px; }
+  .doc-topline { align-items: flex-start; flex-direction: column; }
 }
 """
 
@@ -363,8 +425,9 @@ def _index_html(pages: list[DocPage], root: Path) -> str:
         for page in pages
     )
     content = (
+        '<div class="doc-topline"><span class="breadcrumb">finance-pi docs</span>'
+        f'<span class="meta">Generated {datetime.now(UTC).isoformat()}</span></div>'
         "<h1>finance-pi Documentation</h1>"
-        f'<p class="meta">Generated {datetime.now(UTC).isoformat()}</p>'
         f'<div class="cards">{cards}</div>'
     )
     return _shell("Documentation", content, pages, "index.html")
@@ -381,6 +444,7 @@ def _shell(title: str, content: str, pages: list[DocPage], active: str) -> str:
         f'<a class="{"active" if page.output_name == active else ""}" href="{page.output_name}">{escape(page.title)}</a>'
         for page in pages
     )
+    article_class = "doc doc-home" if active == "index.html" else "doc"
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -395,7 +459,7 @@ def _shell(title: str, content: str, pages: list[DocPage], active: str) -> str:
       <div class="brand"><span class="mark">fp</span><div><strong>finance-pi</strong><span>Documentation</span></div></div>
       <nav class="nav"><a class="{"active" if active == "index.html" else ""}" href="index.html">Home</a>{nav}</nav>
     </aside>
-    <main class="content"><article class="doc">{content}<p class="footer">Published by finance-pi docs build.</p></article></main>
+    <main class="content"><article class="{article_class}">{content}<p class="footer">Published by finance-pi docs build.</p></article></main>
   </div>
 </body>
 </html>
