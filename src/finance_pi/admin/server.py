@@ -19,6 +19,7 @@ from urllib.parse import parse_qs, quote, urlparse
 import polars as pl
 
 from finance_pi.config import ProjectPaths, load_dotenv
+from finance_pi.docs_site import build_docs_site
 from finance_pi.storage import dataset_registry
 
 INDEX_HTML = """<!doctype html>
@@ -637,6 +638,7 @@ def run_admin(
 ) -> None:
     load_dotenv(root / ".env")
     auth_token = token or os.environ.get("FINANCE_PI_ADMIN_TOKEN") or secrets.token_urlsafe(24)
+    _ensure_docs_built(root)
     state = AdminState(root.resolve(), auth_token)
     handler = _handler_for(state)
     server = ThreadingHTTPServer((host, port), handler)
@@ -659,6 +661,8 @@ def _handler_for(state: AdminState) -> type[BaseHTTPRequestHandler]:
             try:
                 if parsed.path == "/api/health":
                     self._send_json(_health_payload(state))
+                elif parsed.path in {"/doc", "/doc/"}:
+                    self._redirect("/docs/")
                 elif parsed.path in {"/docs", "/docs/"}:
                     self._serve_docs("index.html")
                 elif parsed.path.startswith("/docs/"):
@@ -761,6 +765,12 @@ def _handler_for(state: AdminState) -> type[BaseHTTPRequestHandler]:
         ) -> None:
             self._send_bytes(payload.encode("utf-8"), content_type, status)
 
+        def _redirect(self, location: str) -> None:
+            self.send_response(HTTPStatus.FOUND)
+            self.send_header("Location", location)
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+
         def _send_bytes(
             self,
             payload: bytes,
@@ -775,6 +785,14 @@ def _handler_for(state: AdminState) -> type[BaseHTTPRequestHandler]:
             self.wfile.write(payload)
 
     return AdminHandler
+
+
+def _ensure_docs_built(root: Path) -> None:
+    index = root / "data" / "docs_site" / "index.html"
+    manifest = root / "data" / "docs_site" / "manifest.json"
+    if index.exists() and manifest.exists():
+        return
+    build_docs_site(root)
 
 
 def _health_payload(state: AdminState) -> dict[str, Any]:

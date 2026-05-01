@@ -182,6 +182,7 @@ def admin_server(
 def check_admin(
     url: str = typer.Argument("http://127.0.0.1:8400", help="Admin base URL"),
     token: str | None = typer.Option(None, help="Optional token to also check /api/overview"),
+    check_docs: bool = typer.Option(False, help="Also verify that /docs/ is published"),
 ) -> None:
     """Verify that a finance-pi admin server is reachable."""
 
@@ -193,6 +194,11 @@ def check_admin(
         datasets = overview.get("datasets", [])
         ready = len([dataset for dataset in datasets if dataset.get("files", 0) > 0])
         typer.echo(f"overview: OK datasets={ready}/{len(datasets)}")
+    if check_docs:
+        docs_html = _http_get_text(f"{base_url}/docs/")
+        if "finance-pi Documentation" not in docs_html:
+            raise typer.BadParameter("admin /docs/ responded but did not look like docs HTML")
+        typer.echo("docs: OK")
 
 
 @catalog_app.command("build")
@@ -1063,17 +1069,21 @@ def _print_dotenv_issues(root: Path) -> None:
 
 
 def _http_get_json(url: str, token: str | None = None) -> dict[str, object]:
-    headers = {"X-Admin-Token": token} if token else {}
-    request = Request(url, headers=headers)
-    try:
-        with urlopen(request, timeout=10) as response:
-            payload = response.read().decode("utf-8")
-    except Exception as exc:  # noqa: BLE001
-        raise typer.BadParameter(f"admin is not reachable at {url}: {exc}") from exc
+    payload = _http_get_text(url, token=token)
     data = json.loads(payload)
     if not isinstance(data, dict):
         raise typer.BadParameter(f"admin returned non-object JSON at {url}")
     return data
+
+
+def _http_get_text(url: str, token: str | None = None) -> str:
+    headers = {"X-Admin-Token": token} if token else {}
+    request = Request(url, headers=headers)
+    try:
+        with urlopen(request, timeout=10) as response:
+            return response.read().decode("utf-8")
+    except Exception as exc:  # noqa: BLE001
+        raise typer.BadParameter(f"admin is not reachable at {url}: {exc}") from exc
 
 
 def _kis_error_message(exc: Exception) -> str:

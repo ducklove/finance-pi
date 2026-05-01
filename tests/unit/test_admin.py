@@ -4,7 +4,7 @@ from datetime import date
 
 import polars as pl
 
-from finance_pi.admin.server import AdminState, _health_payload, _job_command
+from finance_pi.admin.server import AdminState, _ensure_docs_built, _health_payload, _job_command
 from finance_pi.storage import DataLakeLayout, ParquetDatasetWriter
 
 
@@ -81,3 +81,12 @@ def test_admin_health_is_minimal_and_token_state_is_kept(tmp_path) -> None:
     assert health["status"] == "ok"
     assert health["workspace"] == str(tmp_path.resolve())
     assert health["auth"] == "token"
+
+
+def test_admin_ensure_docs_built_creates_site(tmp_path) -> None:
+    (tmp_path / "README.md").write_text("# Project\n", encoding="utf-8")
+
+    _ensure_docs_built(tmp_path)
+
+    assert (tmp_path / "data" / "docs_site" / "index.html").exists()
+    assert (tmp_path / "data" / "docs_site" / "manifest.json").exists()
