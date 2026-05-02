@@ -130,9 +130,11 @@ The local web admin is:
 python -m finance_pi.cli.app admin --root . --host 0.0.0.0 --port 8400
 ```
 
-`admin` prints a tokenized URL. `/api/health` is open for reachability checks;
-the UI, dataset API, logs, files, and job execution require the token. To pin the
-token across restarts, set `FINANCE_PI_ADMIN_TOKEN` in `.env`.
+`admin` prints a tokenized URL. `/api/health` is open for reachability checks.
+Clients from loopback or a private LAN address can use the admin without a
+token; public/forwarded clients still need the token for dataset APIs, logs,
+files, and job execution. To pin the token across restarts, set
+`FINANCE_PI_ADMIN_TOKEN` in `.env`.
 
 Build and publish the repository documentation as HTML:
 

@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 from glob import glob
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from ipaddress import ip_address
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, quote, urlparse
@@ -986,6 +987,7 @@ def run_admin(
     display_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
     print(f"finance-pi admin bind: http://{host}:{port}")
     print(f"finance-pi admin url:  http://{display_host}:{port}/?token={auth_token}")
+    print(f"finance-pi local:      http://{display_host}:{port}/ (LAN clients bypass token)")
     print(f"finance-pi health:     http://{display_host}:{port}/api/health")
     try:
         server.serve_forever()
@@ -1085,6 +1087,8 @@ def _handler_for(state: AdminState) -> type[BaseHTTPRequestHandler]:
             self._send_bytes(path.read_bytes(), _content_type(path))
 
         def _authorized(self) -> bool:
+            if _is_local_admin_client(self.client_address[0]):
+                return True
             if state.token is None:
                 return True
             header = self.headers.get("X-Admin-Token", "")
@@ -1132,13 +1136,23 @@ def _ensure_docs_built(root: Path) -> None:
     build_docs_site(root)
 
 
+def _is_local_admin_client(host: str) -> bool:
+    try:
+        address = ip_address(host)
+    except ValueError:
+        return False
+    if getattr(address, "ipv4_mapped", None) is not None:
+        address = address.ipv4_mapped
+    return address.is_loopback or address.is_private or address.is_link_local
+
+
 def _health_payload(state: AdminState) -> dict[str, Any]:
     return {
         "status": "ok",
         "generated_at": datetime.now(UTC).isoformat(),
         "workspace": str(state.paths.root.resolve()),
         "data_root": str(state.paths.data_root.resolve()),
-        "auth": "token",
+        "auth": "local-or-token",
     }
 
 

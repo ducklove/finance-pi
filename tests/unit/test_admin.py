@@ -4,7 +4,13 @@ from datetime import date
 
 import polars as pl
 
-from finance_pi.admin.server import AdminState, _ensure_docs_built, _health_payload, _job_command
+from finance_pi.admin.server import (
+    AdminState,
+    _ensure_docs_built,
+    _health_payload,
+    _is_local_admin_client,
+    _job_command,
+)
 from finance_pi.storage import DataLakeLayout, ParquetDatasetWriter
 
 
@@ -87,7 +93,18 @@ def test_admin_health_is_minimal_and_token_state_is_kept(tmp_path) -> None:
     assert state.token == "secret-token"
     assert health["status"] == "ok"
     assert health["workspace"] == str(tmp_path.resolve())
-    assert health["auth"] == "token"
+    assert health["auth"] == "local-or-token"
+
+
+def test_admin_local_network_clients_bypass_token() -> None:
+    assert _is_local_admin_client("127.0.0.1")
+    assert _is_local_admin_client("192.168.0.10")
+    assert _is_local_admin_client("10.0.0.5")
+    assert _is_local_admin_client("172.16.3.8")
+    assert _is_local_admin_client("169.254.1.2")
+    assert _is_local_admin_client("::1")
+    assert _is_local_admin_client("::ffff:192.168.0.10")
+    assert not _is_local_admin_client("8.8.8.8")
 
 
 def test_admin_ensure_docs_built_creates_site(tmp_path) -> None:

@@ -155,7 +155,10 @@ Start the web admin on the Pi:
 python -m finance_pi.cli.app admin --root . --host 0.0.0.0 --port 8400
 ```
 
-The server prints a tokenized URL. If port `8400` is already forwarded, open:
+The server prints a tokenized URL. Clients from loopback or a private LAN
+address can use the admin without a token. Public/forwarded clients still need
+the token for dataset APIs, logs, files, and job execution. If port `8400` is
+already forwarded, open:
 
 ```text
 http://<raspberry-pi-host>:8400/?token=<printed-token>
