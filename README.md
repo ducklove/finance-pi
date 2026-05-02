@@ -123,6 +123,9 @@ python -m finance_pi.cli.app backfill yearly --root . --start-year 2023 --end-ye
 
 Each completed year writes a marker under `data/_state/backfill/yearly/`, and
 `backfill status` also checks the real `gold.daily_prices_adj` date partitions.
+The web admin exposes the same yearly progress table and can queue the next
+missing backfill chunk with separate controls for Naver prices, DART financials,
+Silver/Gold rebuilds, and the large `gold.fundamentals_pit` rebuild.
 
 The local web admin is:
 

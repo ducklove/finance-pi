@@ -8,7 +8,7 @@ import subprocess
 import sys
 import threading
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from glob import glob
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -44,6 +44,7 @@ INDEX_HTML = """<!doctype html>
       <nav>
         <a href="#overview" class="active">Overview</a>
         <a href="#datasets">Datasets</a>
+        <a href="#backfill">Backfill</a>
         <a href="#jobs">Jobs</a>
         <a href="#docs">Docs</a>
         <a href="#research">Research</a>
@@ -114,6 +115,44 @@ INDEX_HTML = """<!doctype html>
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h10l4 4v12H5zM14 4v5h5M8 13h8M8 17h6"/></svg>
           Docs
         </button>
+      </section>
+
+      <section class="panel" id="backfill">
+        <div class="panel-head">
+          <div>
+            <p class="eyebrow">Historical Data</p>
+            <h2>Yearly Backfill</h2>
+          </div>
+          <span class="pill" id="backfill-summary">--</span>
+        </div>
+        <form id="backfill-form" class="backfill-form">
+          <label>Start Year<input name="start_year" type="number" min="1900" max="2100" value="2023"></label>
+          <label>End Year<input name="end_year" type="number" min="1900" max="2100" value="1990"></label>
+          <label>Chunks<input name="max_years" type="number" min="0" max="50" value="1"></label>
+          <label class="check"><input name="include_prices" type="checkbox" checked disabled> Naver prices</label>
+          <label class="check"><input name="include_financials" type="checkbox" checked> DART financials</label>
+          <label class="check"><input name="include_builds" type="checkbox" checked disabled> Silver/Gold builds</label>
+          <label class="check"><input name="include_fundamentals_pit" type="checkbox"> Fundamentals PIT</label>
+          <label class="check"><input name="no_strict" type="checkbox" checked> Continue on source errors</label>
+          <label class="check"><input name="force" type="checkbox"> Force completed years</label>
+          <button type="submit">Run Next</button>
+          <button type="button" id="backfill-dry-run">Dry Run</button>
+        </form>
+        <div class="table-wrap backfill-status">
+          <table>
+            <thead>
+              <tr>
+                <th>Year</th>
+                <th>Status</th>
+                <th>Price Days</th>
+                <th>Rows</th>
+                <th>Coverage</th>
+                <th>Marker</th>
+              </tr>
+            </thead>
+            <tbody id="backfill-body"></tbody>
+          </table>
+        </div>
       </section>
 
       <section class="split">
@@ -390,7 +429,7 @@ svg {
   grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 10px;
 }
-.command-band button, .backtest-form button {
+.command-band button, .backtest-form button, .backfill-form button {
   min-height: 42px;
   border: 1px solid #c8d0dc;
   background: var(--panel);
@@ -404,7 +443,7 @@ svg {
   font-weight: 800;
   transition: transform .16s ease, border-color .16s ease, background .16s ease, color .16s ease;
 }
-.command-band button:hover, .backtest-form button:hover {
+.command-band button:hover, .backtest-form button:hover, .backfill-form button:hover {
   transform: translateY(-1px);
   border-color: #9aa6b8;
   background: #f8fafc;
@@ -419,7 +458,7 @@ svg {
   border-color: var(--green);
   color: white;
 }
-.command-band button.is-busy {
+.command-band button.is-busy, .backfill-form button.is-busy {
   opacity: .72;
   cursor: progress;
   transform: none;
@@ -567,6 +606,51 @@ tr:last-child td { border-bottom: 0; }
   color: white;
   padding: 0 14px;
 }
+.backfill-form {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(130px, 1fr)) repeat(2, minmax(160px, 1fr));
+  gap: 10px;
+  align-items: end;
+  margin-bottom: 14px;
+}
+.backfill-form label {
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+.backfill-form input[type="number"] {
+  height: 38px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 0 9px;
+  background: white;
+  color: var(--ink);
+}
+.backfill-form .check {
+  min-height: 38px;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 8px 10px;
+  background: #f8fafc;
+  color: #344054;
+}
+.backfill-form input[type="checkbox"] { width: 16px; height: 16px; margin: 0; }
+.backfill-form button {
+  background: var(--blue);
+  border-color: var(--blue);
+  color: white;
+  padding: 0 14px;
+}
+.backfill-form button[type="button"] {
+  background: #ffffff;
+  border-color: #c8d0dc;
+  color: #1f2937;
+}
+.backfill-status table { min-width: 720px; }
 .artifact-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
 .artifact a {
   color: #1d4ed8;
@@ -612,6 +696,7 @@ pre { margin: 0; padding: 14px; max-height: 65vh; overflow: auto; background: #0
 @media (max-width: 1120px) {
   .status-grid, .artifact-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .command-band { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .backfill-form { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .split { grid-template-columns: 1fr; }
 }
 @media (max-width: 760px) {
@@ -634,7 +719,7 @@ pre { margin: 0; padding: 14px; max-height: 65vh; overflow: auto; background: #0
   .status-grid, .command-band, .artifact-grid { grid-template-columns: 1fr; }
   .panel-head { flex-direction: column; }
   .panel-tools, .filter-input { width: 100%; }
-  .backtest-form { grid-template-columns: 1fr; }
+  .backtest-form, .backfill-form { grid-template-columns: 1fr; }
 }
 """
 
@@ -708,6 +793,7 @@ function renderOverview(data) {
   renderReports(data.reports);
   renderDocs(data.docs);
   renderBacktests(data.backtests);
+  renderBackfill(data.backfill);
   const maxDate = data.max_price_date || new Date().toISOString().slice(0, 10);
   document.querySelector('#backtest-form [name=end]').value = maxDate;
 }
@@ -783,6 +869,30 @@ function renderBacktests(runs) {
     </div>`).join('') : '<div class="artifact"><span>No backtests yet</span></div>';
 }
 
+function renderBackfill(backfill) {
+  const items = (backfill && backfill.years) || [];
+  const complete = items.filter(item => String(item.status || '').startsWith('complete')).length;
+  qs('backfill-summary').textContent = items.length ? `${complete}/${items.length} years complete` : 'no status';
+  qs('backfill-body').innerHTML = items.length ? items.map(item => `
+    <tr>
+      <td><strong>${html(item.year)}</strong></td>
+      <td><span class="status ${statusClass(item.status)}">${html(item.status)}</span></td>
+      <td>${fmt.format(item.price_days || 0)}</td>
+      <td>${fmt.format(item.rows || 0)}</td>
+      <td>${html(item.coverage || '--')}</td>
+      <td>${html(item.marker || '-')}</td>
+    </tr>`).join('') : '<tr><td colspan="6">No backfill status yet</td></tr>';
+}
+
+function statusClass(status) {
+  const text = String(status || '');
+  if (text === 'complete') return 'ready';
+  if (text === 'complete_with_failures') return 'running';
+  if (text === 'partial') return 'running';
+  if (text === 'missing') return 'empty';
+  return text || 'empty';
+}
+
 function withTokenUrl(url) {
   if (!url || url === '#') return '#';
   const token = adminToken();
@@ -845,6 +955,26 @@ qs('backtest-form').addEventListener('submit', event => {
   const form = new FormData(event.currentTarget);
   startAction('backtest', Object.fromEntries(form.entries()), event.currentTarget.querySelector('button'));
 });
+qs('backfill-form').addEventListener('submit', event => {
+  event.preventDefault();
+  startAction('backfill_yearly', backfillPayload(event.currentTarget, false), event.currentTarget.querySelector('button[type=submit]'));
+});
+qs('backfill-dry-run').addEventListener('click', event => {
+  startAction('backfill_yearly', backfillPayload(qs('backfill-form'), true), event.currentTarget);
+});
+
+function backfillPayload(form, dryRun) {
+  return {
+    start_year: form.elements.start_year.value,
+    end_year: form.elements.end_year.value,
+    max_years: form.elements.max_years.value,
+    include_financials: form.elements.include_financials.checked,
+    include_fundamentals_pit: form.elements.include_fundamentals_pit.checked,
+    no_strict: form.elements.no_strict.checked,
+    force: form.elements.force.checked,
+    dry_run: dryRun,
+  };
+}
 refresh();
 setInterval(refresh, 5000);
 """
@@ -898,6 +1028,7 @@ class AdminState:
             "reports": _report_artifacts(data_root),
             "docs": _docs_artifacts(data_root),
             "backtests": _backtest_runs(data_root),
+            "backfill": _backfill_overview(data_root),
             "jobs": self.job_list(),
             "max_price_date": _latest_partition_for(data_root / "gold/daily_prices_adj/dt=*/part.parquet"),
         }
@@ -1172,6 +1303,33 @@ def _job_command(action: str, payload: dict[str, Any], root: Path) -> tuple[str,
         return "Reports", [*base, "reports", "all", "--report-date", report_date, *root_args]
     if action == "docs_build":
         return "Build Docs", [*base, "docs", "build", *root_args]
+    if action == "backfill_yearly":
+        start_year = _safe_int(payload.get("start_year"), 2023, 1900, 2100)
+        end_year = _safe_int(payload.get("end_year"), 1990, 1900, 2100)
+        max_years = _safe_int(payload.get("max_years"), 1, 0, 50)
+        command = [
+            *base,
+            "backfill",
+            "yearly",
+            *root_args,
+            "--start-year",
+            str(start_year),
+            "--end-year",
+            str(end_year),
+            "--max-years",
+            str(max_years),
+        ]
+        if not _safe_bool(payload.get("include_financials"), True):
+            command.append("--skip-financials")
+        if _safe_bool(payload.get("include_fundamentals_pit"), False):
+            command.append("--include-fundamentals-pit")
+        if _safe_bool(payload.get("no_strict"), True):
+            command.append("--no-strict")
+        if _safe_bool(payload.get("force"), False):
+            command.append("--force")
+        if _safe_bool(payload.get("dry_run"), False):
+            command.append("--dry-run")
+        return f"Backfill {start_year}..{end_year}", command
     if action == "backtest":
         factor = _safe_choice(
             payload.get("factor"),
@@ -1213,6 +1371,27 @@ def _safe_date(value: Any, default: str) -> str:
     except ValueError:
         return default
     return text
+
+
+def _safe_int(value: Any, default: int, minimum: int, maximum: int) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return default
+    return min(maximum, max(minimum, number))
+
+
+def _safe_bool(value: Any, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return default
 
 
 def _safe_float(value: Any, default: str) -> str:
@@ -1309,6 +1488,114 @@ def _price_coverage(datasets: list[dict[str, Any]]) -> dict[str, str | None]:
                 "end": dataset.get("coverage_end"),
             }
     return {"dataset": None, "start": None, "end": None}
+
+
+def _backfill_overview(
+    data_root: Path,
+    start_year: int = 2023,
+    end_year: int = 1990,
+) -> dict[str, Any]:
+    years = tuple(range(max(start_year, end_year), min(start_year, end_year) - 1, -1))
+    price_files = [
+        Path(file)
+        for file in glob((data_root / "gold/daily_prices_adj/dt=*/part.parquet").as_posix())
+    ]
+    dates_by_year: dict[int, list[str]] = {year: [] for year in years}
+    for file in price_files:
+        partition_date = _partition_date(file, "dt")
+        if partition_date is None or partition_date.year not in dates_by_year:
+            continue
+        dates_by_year[partition_date.year].append(partition_date.isoformat())
+
+    rows_by_year = _yearly_price_rows(price_files)
+    rows: list[dict[str, Any]] = []
+    for year in years:
+        dates = sorted(set(dates_by_year[year]))
+        marker = _backfill_marker_path(data_root, year)
+        marker_status = _read_backfill_marker_status(marker)
+        if marker_status:
+            status = marker_status
+        elif dates:
+            status = "partial"
+        else:
+            status = "missing"
+        rows.append(
+            {
+                "year": year,
+                "status": status,
+                "price_days": len(dates),
+                "rows": rows_by_year.get(year, 0),
+                "coverage": "--" if not dates else f"{dates[0]}..{dates[-1]}",
+                "marker": marker.name if marker.exists() else "-",
+            }
+        )
+    return {"start_year": start_year, "end_year": end_year, "years": rows}
+
+
+def _yearly_price_rows(files: list[Path]) -> dict[int, int]:
+    if not files:
+        return {}
+    try:
+        scan = pl.scan_parquet(
+            [file.as_posix() for file in files],
+            hive_partitioning=True,
+        )
+        names = scan.collect_schema().names()
+        if "date" in names:
+            year_expr = pl.col("date").cast(pl.Date, strict=False).dt.year()
+        elif "dt" in names:
+            year_expr = pl.col("dt").cast(pl.Date, strict=False).dt.year()
+        else:
+            raise ValueError("no date column")
+        frame = (
+            scan.with_columns(year_expr.alias("_year"))
+            .group_by("_year")
+            .agg(pl.len().alias("rows"))
+            .collect()
+        )
+        return {
+            int(row["_year"]): int(row["rows"])
+            for row in frame.iter_rows(named=True)
+            if row["_year"] is not None
+        }
+    except Exception:  # noqa: BLE001
+        rows: dict[int, int] = {}
+        for file in files:
+            partition_date = _partition_date(file, "dt")
+            if partition_date is None:
+                continue
+            rows[partition_date.year] = rows.get(partition_date.year, 0) + _row_count_one(
+                file,
+                True,
+            )
+        return rows
+
+
+def _partition_date(path: Path, key: str) -> date | None:
+    prefix = f"{key}="
+    for part in path.parts:
+        if not part.startswith(prefix):
+            continue
+        try:
+            return datetime.strptime(part.removeprefix(prefix), "%Y-%m-%d").date()
+        except ValueError:
+            return None
+    return None
+
+
+def _backfill_marker_path(data_root: Path, year: int) -> Path:
+    return data_root / "_state" / "backfill" / "yearly" / f"{year}.json"
+
+
+def _read_backfill_marker_status(marker: Path) -> str | None:
+    if not marker.exists():
+        return None
+    try:
+        data = json.loads(marker.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return "marker_invalid"
+    status = data.get("status")
+    return str(status) if status else "complete"
 
 
 def _row_count(files: list[Path], hive_partitioning: bool) -> int:

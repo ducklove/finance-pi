@@ -142,6 +142,10 @@ in one invocation, increase `--max-years`; pass `--max-years 0` for no limit.
 The command uses Naver daily price history by default and, when OpenDART is
 configured, ingests yearly filings and annual financial statements. It does not
 rebuild `gold.fundamentals_pit` unless `--include-fundamentals-pit` is passed.
+The admin Backfill panel shows the same yearly marker/coverage status and can
+queue the next missing chunk. Prices and Silver/Gold rebuilds are always on;
+DART financials, strict failure behavior, forced reruns, dry runs, and the large
+fundamentals PIT rebuild are explicit controls.
 
 Completion markers live here:
 
@@ -298,4 +302,4 @@ DQ/Fraud reports.
 
 The `admin` command serves a local operations dashboard with dataset status,
 recent reports, backtest artifacts, and allowlisted job buttons for daily runs,
-builds, catalog refreshes, reports, and backtests.
+builds, catalog refreshes, historical backfills, reports, and backtests.

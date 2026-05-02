@@ -61,6 +61,49 @@ def test_admin_overview_reports_dataset_counts(tmp_path) -> None:
     assert gold_prices["status"] == "ready"
 
 
+def test_admin_overview_reports_yearly_backfill_status(tmp_path) -> None:
+    data_root = tmp_path / "data"
+    layout = DataLakeLayout(data_root)
+    layout.ensure_base_dirs()
+    ParquetDatasetWriter().write(
+        pl.DataFrame(
+            [
+                {
+                    "date": date(2023, 1, 2),
+                    "security_id": "S005930",
+                    "listing_id": "L005930",
+                    "open_adj": 100.0,
+                    "high_adj": 101.0,
+                    "low_adj": 99.0,
+                    "close_adj": 100.0,
+                    "return_1d": 0.0,
+                    "volume": 10,
+                    "trading_value": 1000,
+                    "market_cap": 1_000_000,
+                    "listed_shares": 10_000,
+                    "is_halted": False,
+                    "is_designated": False,
+                    "is_liquidation_window": False,
+                }
+            ]
+        ),
+        layout.partition_path("gold.daily_prices_adj", date(2023, 1, 2)),
+    )
+    marker = data_root / "_state" / "backfill" / "yearly" / "2022.json"
+    marker.parent.mkdir(parents=True)
+    marker.write_text('{"status":"complete"}', encoding="utf-8")
+
+    overview = AdminState(tmp_path).overview()
+    years = {item["year"]: item for item in overview["backfill"]["years"]}
+
+    assert years[2023]["status"] == "partial"
+    assert years[2023]["price_days"] == 1
+    assert years[2023]["rows"] == 1
+    assert years[2023]["coverage"] == "2023-01-02..2023-01-02"
+    assert years[2022]["status"] == "complete"
+    assert years[2022]["marker"] == "2022.json"
+
+
 def test_admin_job_command_is_allowlisted(tmp_path) -> None:
     label, command = _job_command(
         "backtest",
@@ -84,6 +127,43 @@ def test_admin_docs_build_command_is_allowlisted(tmp_path) -> None:
 
     assert label == "Build Docs"
     assert command[-4:] == ["docs", "build", "--root", str(tmp_path)]
+
+
+def test_admin_backfill_job_command_is_allowlisted(tmp_path) -> None:
+    label, command = _job_command(
+        "backfill_yearly",
+        {
+            "start_year": "2023",
+            "end_year": "2001",
+            "max_years": "2",
+            "include_financials": False,
+            "include_fundamentals_pit": True,
+            "no_strict": True,
+            "force": True,
+            "dry_run": True,
+        },
+        tmp_path,
+    )
+
+    assert label == "Backfill 2023..2001"
+    assert command[:4] == [
+        command[0],
+        "-m",
+        "finance_pi.cli.app",
+        "backfill",
+    ]
+    assert command[4:6] == ["yearly", "--root"]
+    assert "--start-year" in command
+    assert "2023" in command
+    assert "--end-year" in command
+    assert "2001" in command
+    assert "--max-years" in command
+    assert "2" in command
+    assert "--skip-financials" in command
+    assert "--include-fundamentals-pit" in command
+    assert "--no-strict" in command
+    assert "--force" in command
+    assert "--dry-run" in command
 
 
 def test_admin_health_is_minimal_and_token_state_is_kept(tmp_path) -> None:
