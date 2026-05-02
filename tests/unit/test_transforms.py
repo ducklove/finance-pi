@@ -182,6 +182,72 @@ def test_build_all_enriches_kis_prices_with_naver_summary(tmp_path) -> None:
     assert gold.select("listed_shares").item() == 10_000
 
 
+def test_build_all_marks_named_alphanumeric_preferred_share(tmp_path) -> None:
+    layout = DataLakeLayout(tmp_path)
+    layout.ensure_base_dirs()
+    writer = ParquetDatasetWriter()
+    naver_daily_path = (
+        tmp_path
+        / "bronze"
+        / "naver_daily"
+        / "request_dt=2026-04-28"
+        / "chunk=test"
+        / "part.parquet"
+    )
+    naver_daily_path.parent.mkdir(parents=True)
+    pl.DataFrame(
+        [
+            {
+                "date": date(2026, 4, 28),
+                "ticker": "12345k",
+                "isin": None,
+                "name": "12345k",
+                "market": "KRX",
+                "open": 100.0,
+                "high": 101.0,
+                "low": 99.0,
+                "close": 100.0,
+                "volume": 10,
+                "trading_value": None,
+                "market_cap": None,
+                "listed_shares": None,
+            }
+        ]
+    ).write_parquet(naver_daily_path)
+    writer.write(
+        pl.DataFrame(
+            [
+                {
+                    "snapshot_dt": date(2026, 4, 28),
+                    "ticker": "12345K",
+                    "name": "Test 2\uc6b0B",
+                    "market": "KOSPI",
+                    "close": 100,
+                    "change_abs": 0,
+                    "change_rate_pct": 0.0,
+                    "par_value": 100,
+                    "market_cap": 1_000_000,
+                    "listed_shares": 10_000,
+                    "foreign_ownership_pct": 0.0,
+                    "volume": 10,
+                    "per": 10.0,
+                    "roe": 5.0,
+                }
+            ]
+        ),
+        layout.partition_path("bronze.naver_summary_raw", date(2026, 4, 28)),
+    )
+
+    build_all(tmp_path)
+
+    master = pl.read_parquet(tmp_path / "gold" / "security_master.parquet")
+    row = master.row(0, named=True)
+    assert row["ticker"] == "12345K"
+    assert row["name"] == "Test 2\uc6b0B"
+    assert row["market"] == "KOSPI"
+    assert row["share_class"] == "preferred"
+
+
 def test_build_financials_accepts_mixed_bronze_date_schemas(tmp_path) -> None:
     first = tmp_path / "bronze" / "dart_financials" / "rcept_dt=2026-03-15" / "part.parquet"
     second = tmp_path / "bronze" / "dart_financials" / "rcept_dt=2026-03-16" / "part.parquet"

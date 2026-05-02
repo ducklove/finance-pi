@@ -66,10 +66,12 @@ python -m finance_pi.cli.app bootstrap --since 2024-01-01 --until 2026-04-28 --r
 The default historical price source is Naver daily chart data because KIS token
 and quotation limits make multi-year universe backfills too slow. KIS remains
 available with `--price-source kis` or `--price-source both` for short recent
-runs and cross-checks. Naver Finance is also used as a same-day summary snapshot
-to enrich price rows with KRX-like `market_cap` and `listed_shares`. KRX commands
-remain available for diagnostics or future use, but the normal pipeline no
-longer depends on KRX.
+runs and cross-checks. Naver Finance summary is the preferred listed-ticker
+universe for price collection, so preferred shares and alphanumeric short codes
+are not lost when OpenDART only exposes a company's representative stock code.
+The same summary snapshot enriches price rows with KRX-like `market_cap` and
+`listed_shares`. KRX commands remain available for diagnostics or future use, but
+the normal pipeline no longer depends on KRX.
 
 Required live keys are `OPENDART_API_KEY`, `KIS_APP_KEY`, and
 `KIS_APP_SECRET`. Keep KIS secrets as exact single-line values in `.env`;

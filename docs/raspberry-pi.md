@@ -199,7 +199,8 @@ python -m finance_pi.cli.app bootstrap --since 2026-04-28 --until 2026-04-28 --r
 
 The default historical bootstrap price path is:
 
-1. OpenDART `corpCode.xml` for the current listed ticker universe.
+1. Naver Finance market summary for the current listed ticker universe,
+   including preferred shares and alphanumeric short codes.
 2. OpenDART filing list chunks, used to schedule PIT financial statement loads.
 3. Naver daily chart data for historical OHLCV.
 4. OpenDART annual financial statements by filing date.

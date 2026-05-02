@@ -51,7 +51,7 @@ def test_normalize_kis_daily_row_accepts_output2_fields() -> None:
     assert row["close"] == 70500.0
 
 
-def test_opendart_non_numeric_stock_codes_are_not_fatal() -> None:
+def test_opendart_alphanumeric_stock_codes_are_kept() -> None:
     company = DartCompanyRow.model_validate(
         {
             "snapshot_dt": date(2026, 4, 29),
@@ -72,8 +72,8 @@ def test_opendart_non_numeric_stock_codes_are_not_fatal() -> None:
         }
     )
 
-    assert company.stock_code is None
-    assert filing.stock_code is None
+    assert company.stock_code == "0068Y0"
+    assert filing.stock_code == "0068Y0"
 
 
 def test_parse_naver_market_sum_page_converts_units() -> None:
@@ -105,6 +105,32 @@ def test_parse_naver_market_sum_page_converts_units() -> None:
     assert row["foreign_ownership_pct"] == 49.19
 
 
+def test_parse_naver_market_sum_page_accepts_alphanumeric_codes() -> None:
+    html = """
+    <table><tbody>
+    <tr>
+      <td class="no">1</td>
+      <td><a href="/item/main.naver?code=12345K" class="tltle">Test Preferred</a></td>
+      <td class="number">10,000</td>
+      <td class="number">0</td>
+      <td class="number">0.00%</td>
+      <td class="number">100</td>
+      <td class="number">1</td>
+      <td class="number">2</td>
+      <td class="number">0.0</td>
+      <td class="number">3</td>
+      <td class="number">4.0</td>
+      <td class="number">5.0</td>
+      <td></td>
+    </tr>
+    </tbody></table>
+    """
+
+    row = parse_market_sum_page(html, date(2026, 4, 29), "KOSPI")[0]
+
+    assert row["ticker"] == "12345K"
+
+
 def test_parse_naver_daily_price_payload() -> None:
     payload = """
     [['날짜', '시가', '고가', '저가', '종가', '거래량', '외국인소진율'],
@@ -117,6 +143,17 @@ def test_parse_naver_daily_price_payload() -> None:
     assert row["ticker"] == "005930"
     assert row["close"] == 222000.0
     assert row["volume"] == 18444490
+
+
+def test_parse_naver_daily_price_payload_keeps_alphanumeric_ticker() -> None:
+    payload = """
+    [['date', 'open', 'high', 'low', 'close', 'volume'],
+     ['20260428', 10000, 10100, 9900, 10050, 123]]
+    """
+
+    row = parse_daily_price_payload(payload, "12345k")[0]
+
+    assert row["ticker"] == "12345K"
 
 
 def test_parse_dart_financial_report_names() -> None:

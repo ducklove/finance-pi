@@ -399,7 +399,7 @@ def ingest_kis_universe(
 ) -> None:
     paths = ProjectPaths(root=root)
     settings = RuntimeSettings.load(paths.root)
-    tickers = _latest_dart_tickers(paths, limit=limit)
+    tickers = _latest_price_universe_tickers(paths, limit=limit)
     adapter = KisUniverseDailyAdapter(
         layout=DataLakeLayout(paths.data_root),
         writer=ParquetDatasetWriter(),
@@ -424,7 +424,7 @@ def ingest_naver_daily(
 ) -> None:
     paths = ProjectPaths(root=root)
     settings = RuntimeSettings.load(paths.root)
-    tickers = _latest_dart_tickers(paths, limit=limit)
+    tickers = _latest_price_universe_tickers(paths, limit=limit)
     adapter = NaverDailyBackfillAdapter(
         layout=DataLakeLayout(paths.data_root),
         writer=ParquetDatasetWriter(),
@@ -537,6 +537,11 @@ def bootstrap(
             failures.append(f"Naver summary ingest failed: {exc}")
 
     if source_choice in {"naver", "both"}:
+        if not _has_naver_summary(paths):
+            try:
+                ingest_naver_summary(end.isoformat(), paths.root, "KOSPI,KOSDAQ")
+            except Exception as exc:  # noqa: BLE001
+                failures.append(f"Naver summary universe ingest failed: {exc}")
         try:
             ingest_naver_daily(
                 start.isoformat(),
@@ -1102,6 +1107,12 @@ def _run_yearly_backfill(
         except Exception as exc:  # noqa: BLE001
             failures.append(f"OpenDART company ingest failed: {exc}")
 
+    if not _has_naver_summary(paths):
+        try:
+            ingest_naver_summary(date.today().isoformat(), paths.root, "KOSPI,KOSDAQ")
+        except Exception as exc:  # noqa: BLE001
+            failures.append(f"Naver summary universe ingest failed: {exc}")
+
     try:
         ingest_naver_daily(
             since.isoformat(),
@@ -1367,28 +1378,81 @@ def _read_parquet_files_relaxed(files: list[Path]) -> pl.DataFrame:
         return pl.concat(frames, how="diagonal_relaxed")
 
 
-def _latest_dart_tickers(paths: ProjectPaths, limit: int | None = None) -> tuple[str, ...]:
+def _has_naver_summary(paths: ProjectPaths) -> bool:
+    return any(paths.data_root.glob("bronze/naver_summary/dt=*/part.parquet"))
+
+
+def _latest_price_universe_tickers(
+    paths: ProjectPaths,
+    limit: int | None = None,
+) -> tuple[str, ...]:
+    naver = _latest_naver_summary_tickers(paths)
+    if naver:
+        tickers = naver[:limit] if limit is not None else naver
+        typer.echo(f"Price universe tickers: {len(tickers)} from Naver summary")
+        return tuple(tickers)
+
+    tickers = _latest_dart_tickers(paths)
+    if limit is not None:
+        tickers = tickers[:limit]
+    typer.echo(f"Price universe tickers: {len(tickers)} from DART company snapshot")
+    return tuple(tickers)
+
+
+def _latest_naver_summary_tickers(paths: ProjectPaths) -> tuple[str, ...]:
+    files = sorted(paths.data_root.glob("bronze/naver_summary/dt=*/part.parquet"))
+    if not files:
+        return ()
+    frame = _read_parquet_files_relaxed(files)
+    if frame.is_empty() or "ticker" not in frame.columns:
+        return ()
+    if "snapshot_dt" in frame.columns:
+        frame = frame.with_columns(pl.col("snapshot_dt").cast(pl.Date, strict=False))
+        latest = frame["snapshot_dt"].max()
+        frame = frame.filter(pl.col("snapshot_dt") == latest)
+    tickers = sorted(
+        {
+            ticker
+            for value in frame["ticker"].to_list()
+            if (ticker := _normalize_ticker_value(value)) is not None
+        }
+    )
+    return tuple(tickers)
+
+
+def _latest_dart_tickers(paths: ProjectPaths) -> tuple[str, ...]:
     files = sorted(paths.data_root.glob("bronze/dart_company/snapshot_dt=*/part.parquet"))
     if not files:
         raise typer.BadParameter("No DART company data. Run ingest dart-company first.")
-    frame = pl.read_parquet([path.as_posix() for path in files], hive_partitioning=True)
+    frame = _read_parquet_files_relaxed(files)
     if frame.is_empty():
         raise typer.BadParameter("DART company dataset is empty.")
     latest = frame["snapshot_dt"].max()
-    tickers = (
+    values = (
         frame.filter((pl.col("snapshot_dt") == latest) & pl.col("stock_code").is_not_null())
-        .select(pl.col("stock_code").cast(pl.String).str.zfill(6).alias("ticker"))
+        .select("stock_code")
         .unique()
-        .sort("ticker")
+        .sort("stock_code")
         .to_series()
         .to_list()
     )
-    if limit is not None:
-        tickers = tickers[:limit]
+    tickers = tuple(
+        ticker for value in values if (ticker := _normalize_ticker_value(value)) is not None
+    )
     if not tickers:
         raise typer.BadParameter("No stock_code values found in latest DART company snapshot.")
-    typer.echo(f"KIS universe tickers: {len(tickers)} from DART snapshot {latest}")
-    return tuple(tickers)
+    return tickers
+
+
+def _normalize_ticker_value(value: object) -> str | None:
+    if value in (None, "", " "):
+        return None
+    text = str(value).strip().upper()
+    if text.isdigit():
+        text = text.zfill(6)
+    if len(text) != 6 or not text.isalnum():
+        return None
+    return text
 
 
 def _parse_markets(value: str) -> tuple[str, ...]:

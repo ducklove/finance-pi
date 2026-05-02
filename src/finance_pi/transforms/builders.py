@@ -47,7 +47,7 @@ def build_silver_prices(data_root: Path) -> list[BuildSummary]:
         frame = _read_optional(data_root / pattern)
         if frame is not None and not frame.is_empty():
             prices = _normalize_price_frame(frame, source)
-            if naver_summary is not None and source in {"kis", "pre2010"}:
+            if naver_summary is not None:
                 prices = _enrich_prices_with_naver(prices, naver_summary)
             frames.append(prices)
     if not frames:
@@ -67,8 +67,8 @@ def build_security_master(data_root: Path) -> list[BuildSummary]:
     grouped = (
         prices.group_by("ticker")
         .agg(
-            pl.col("name").drop_nulls().first().alias("name"),
-            pl.col("market").drop_nulls().first().alias("market"),
+            pl.col("name").drop_nulls().last().alias("name"),
+            pl.col("market").drop_nulls().last().alias("market"),
             pl.col("date").min().alias("listed_date"),
             pl.col("date").max().alias("last_seen_date"),
         )
@@ -316,13 +316,9 @@ def _normalize_price_frame(frame: pl.DataFrame, source: str) -> pl.DataFrame:
     if "name" not in frame.columns:
         frame = frame.with_columns(pl.col("ticker").alias("name"))
     return frame.with_columns(
-        pl.col("ticker").cast(pl.String).str.zfill(6).alias("ticker"),
-        pl.concat_str([pl.lit("S"), pl.col("ticker").cast(pl.String).str.zfill(6)]).alias(
-            "security_id"
-        ),
-        pl.concat_str([pl.lit("L"), pl.col("ticker").cast(pl.String).str.zfill(6)]).alias(
-            "listing_id"
-        ),
+        _ticker_expr("ticker").alias("ticker"),
+        pl.concat_str([pl.lit("S"), _ticker_expr("ticker")]).alias("security_id"),
+        pl.concat_str([pl.lit("L"), _ticker_expr("ticker")]).alias("listing_id"),
         pl.lit(source).alias("price_source"),
         pl.lit(False).alias("is_halted"),
         pl.lit(False).alias("is_designated"),
@@ -369,7 +365,7 @@ def _latest_company_frame(data_root: Path) -> pl.DataFrame | None:
     frame = _cast_dates(frame, ["snapshot_dt"])
     latest = frame["snapshot_dt"].max()
     return frame.filter(pl.col("snapshot_dt") == latest).with_columns(
-        pl.col("stock_code").cast(pl.String).str.zfill(6)
+        _ticker_expr("stock_code").alias("stock_code")
     )
 
 
@@ -380,13 +376,17 @@ def _naver_summary_frame(data_root: Path) -> pl.DataFrame | None:
     return (
         _cast_dates(frame, ["snapshot_dt"])
         .with_columns(
-            pl.col("ticker").cast(pl.String).str.zfill(6),
+            _ticker_expr("ticker").alias("ticker"),
+            pl.col("name").alias("naver_name"),
+            pl.col("market").alias("naver_market"),
             pl.col("market_cap").cast(pl.Int64, strict=False).alias("naver_market_cap"),
             pl.col("listed_shares").cast(pl.Int64, strict=False).alias("naver_listed_shares"),
         )
         .select(
             pl.col("snapshot_dt").alias("date"),
             "ticker",
+            "naver_name",
+            "naver_market",
             "naver_market_cap",
             "naver_listed_shares",
         )
@@ -401,10 +401,18 @@ def _enrich_prices_with_naver(
     return (
         prices.join(naver_summary, on=["date", "ticker"], how="left")
         .with_columns(
+            pl.when(
+                pl.col("naver_name").is_not_null()
+                & (pl.col("name").is_null() | (_ticker_expr("name") == pl.col("ticker")))
+            )
+            .then(pl.col("naver_name"))
+            .otherwise(pl.col("name"))
+            .alias("name"),
+            pl.coalesce(["naver_market", "market"]).alias("market"),
             pl.coalesce(["market_cap", "naver_market_cap"]).alias("market_cap"),
             pl.coalesce(["listed_shares", "naver_listed_shares"]).alias("listed_shares"),
         )
-        .drop(["naver_market_cap", "naver_listed_shares"])
+        .drop(["naver_name", "naver_market", "naver_market_cap", "naver_listed_shares"])
     )
 
 
@@ -413,8 +421,12 @@ def _preferred_expr() -> pl.Expr:
         pl.col("ticker").str.ends_with("5")
         | pl.col("ticker").str.ends_with("7")
         | pl.col("ticker").str.ends_with("9")
-        | pl.col("name").str.contains("우", literal=True)
+        | pl.col("name").str.contains("(?:\\d+)?\\uc6b0[A-Z]?$|\\uc6b0\\uc120", literal=False)
     )
+
+
+def _ticker_expr(column: str) -> pl.Expr:
+    return pl.col(column).cast(pl.String).str.strip_chars().str.to_uppercase().str.zfill(6)
 
 
 def _cast_dates(frame: pl.DataFrame, columns: list[str]) -> pl.DataFrame:

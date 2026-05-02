@@ -11,6 +11,7 @@ from finance_pi.cli.app import (
     _backfill_years,
     _catchup_dates,
     _latest_gold_price_date,
+    _latest_price_universe_tickers,
     _run_daily_ingest,
     _validated_backfill_paths,
     _write_backfill_marker,
@@ -71,6 +72,72 @@ def test_daily_ingest_internal_calls_pass_concrete_defaults(tmp_path, monkeypatc
         50,
     )
     assert calls["dart_filings"] == ("2026-04-29", "2026-04-30", tmp_path, 7)
+
+
+def test_price_universe_prefers_naver_summary_and_keeps_preferred_codes(tmp_path) -> None:
+    paths = ProjectPaths(tmp_path)
+    layout = DataLakeLayout(paths.data_root)
+    layout.ensure_base_dirs()
+    writer = ParquetDatasetWriter()
+    writer.write(
+        pl.DataFrame(
+            [
+                {
+                    "snapshot_dt": date(2026, 4, 30),
+                    "ticker": "005930",
+                    "name": "Samsung",
+                    "market": "KOSPI",
+                    "close": 100,
+                    "change_abs": 0,
+                    "change_rate_pct": 0.0,
+                    "par_value": 100,
+                    "market_cap": 1,
+                    "listed_shares": 1,
+                    "foreign_ownership_pct": 0.0,
+                    "volume": 1,
+                    "per": 1.0,
+                    "roe": 1.0,
+                },
+                {
+                    "snapshot_dt": date(2026, 4, 30),
+                    "ticker": "005935",
+                    "name": "Samsung Preferred",
+                    "market": "KOSPI",
+                    "close": 100,
+                    "change_abs": 0,
+                    "change_rate_pct": 0.0,
+                    "par_value": 100,
+                    "market_cap": 1,
+                    "listed_shares": 1,
+                    "foreign_ownership_pct": 0.0,
+                    "volume": 1,
+                    "per": 1.0,
+                    "roe": 1.0,
+                },
+                {
+                    "snapshot_dt": date(2026, 4, 30),
+                    "ticker": "12345k",
+                    "name": "Alpha Preferred",
+                    "market": "KOSPI",
+                    "close": 100,
+                    "change_abs": 0,
+                    "change_rate_pct": 0.0,
+                    "par_value": 100,
+                    "market_cap": 1,
+                    "listed_shares": 1,
+                    "foreign_ownership_pct": 0.0,
+                    "volume": 1,
+                    "per": 1.0,
+                    "roe": 1.0,
+                },
+            ]
+        ),
+        layout.partition_path("bronze.naver_summary_raw", date(2026, 4, 30)),
+    )
+
+    tickers = _latest_price_universe_tickers(paths)
+
+    assert tickers == ("005930", "005935", "12345K")
 
 
 def test_backfill_status_uses_markers_and_price_partitions(tmp_path) -> None:

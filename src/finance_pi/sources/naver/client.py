@@ -12,7 +12,7 @@ from finance_pi.http import HttpJsonClient
 from finance_pi.sources.parsing import parse_float, parse_int
 
 _ITEM_RE = re.compile(
-    r'<a\s+href="/item/main\.naver\?code=(?P<ticker>\d{6})"[^>]*class="tltle"[^>]*>'
+    r'<a\s+href="/item/main\.naver\?code=(?P<ticker>[0-9A-Z]{6})"[^>]*class="tltle"[^>]*>'
     r"(?P<name>.*?)</a>",
     re.IGNORECASE | re.DOTALL,
 )
@@ -104,7 +104,7 @@ def parse_market_sum_page(
         rows.append(
             {
                 "snapshot_dt": snapshot_date,
-                "ticker": item.group("ticker"),
+                "ticker": _normalize_ticker_symbol(item.group("ticker")),
                 "name": _clean_cell(item.group("name")),
                 "market": market,
                 "close": _parse_int(cells[2]),
@@ -137,9 +137,9 @@ def parse_daily_price_payload(payload: str, ticker: str) -> list[dict[str, Any]]
         rows.append(
             {
                 "date": parse_yyyymmdd(str(raw[0])),
-                "ticker": ticker.zfill(6),
+                "ticker": _normalize_ticker_symbol(ticker),
                 "isin": None,
-                "name": ticker.zfill(6),
+                "name": _normalize_ticker_symbol(ticker),
                 "market": "KRX",
                 "open": parse_float(raw[1], default=0.0),
                 "high": parse_float(raw[2], default=0.0),
@@ -180,6 +180,11 @@ def _normalize_number(value: str) -> str:
     if not match:
         return text
     return f"{sign}{match.group(0)}"
+
+
+def _normalize_ticker_symbol(value: str) -> str:
+    text = value.strip().upper()
+    return text.zfill(6) if text.isdigit() else text
 
 
 def _last_page(text: str) -> int:
