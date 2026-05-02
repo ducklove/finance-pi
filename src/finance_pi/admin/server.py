@@ -810,14 +810,19 @@ function renderDatasets(datasets) {
   }
   qs('dataset-body').innerHTML = visible.map(d => `
     <tr>
-      <td><strong>${html(d.name)}</strong><div class="bar"><span style="width:${Math.max(2, (d.rows || 0) / maxRows * 100)}%"></span></div></td>
+      <td><strong>${html(d.name)}</strong>${rowBar(d.rows, maxRows)}</td>
       <td>${html(d.layer)}</td>
-      <td>${fmt.format(d.rows || 0)}</td>
+      <td>${d.rows == null ? '--' : fmt.format(d.rows)}</td>
       <td>${fmt.format(d.files)}</td>
       <td>${html(coverageLabel(d))}</td>
       <td>${bytes(d.bytes)}</td>
       <td><span class="status ${html(d.status)}">${html(d.status)}</span></td>
     </tr>`).join('');
+}
+
+function rowBar(rows, maxRows) {
+  if (rows == null) return '';
+  return `<div class="bar"><span style="width:${Math.max(2, (rows || 0) / maxRows * 100)}%"></span></div>`;
 }
 
 function coverageLabel(dataset) {
@@ -878,7 +883,7 @@ function renderBackfill(backfill) {
       <td><strong>${html(item.year)}</strong></td>
       <td><span class="status ${statusClass(item.status)}">${html(item.status)}</span></td>
       <td>${fmt.format(item.price_days || 0)}</td>
-      <td>${fmt.format(item.rows || 0)}</td>
+      <td>${item.rows == null ? '--' : fmt.format(item.rows)}</td>
       <td>${html(item.coverage || '--')}</td>
       <td>${html(item.marker || '-')}</td>
     </tr>`).join('') : '<tr><td colspan="6">No backfill status yet</td></tr>';
@@ -976,7 +981,7 @@ function backfillPayload(form, dryRun) {
   };
 }
 refresh();
-setInterval(refresh, 5000);
+setInterval(refresh, 30000);
 """
 
 
@@ -1405,7 +1410,7 @@ def _safe_float(value: Any, default: str) -> str:
 def _dataset_stat(data_root: Path, name: str, spec: Any) -> dict[str, Any]:
     files = [Path(file) for file in glob(spec.glob_path(data_root).as_posix())]
     size = sum(file.stat().st_size for file in files if file.exists())
-    rows = _row_count(files, spec.hive_partitioning) if files else 0
+    rows = _row_count(files, spec.hive_partitioning) if files and _scan_parquet_enabled() else None
     latest = _latest_partition(files)
     coverage = _coverage_for(files, spec.hive_partitioning) if files else {}
     return {
@@ -1422,31 +1427,6 @@ def _dataset_stat(data_root: Path, name: str, spec: Any) -> dict[str, Any]:
 
 def _coverage_for(files: list[Path], hive_partitioning: bool) -> dict[str, str | None]:
     columns = ("date", "dt", "rcept_dt", "snapshot_dt", "request_dt", "fiscal_year")
-    try:
-        scan = pl.scan_parquet(
-            [file.as_posix() for file in files],
-            hive_partitioning=hive_partitioning,
-        )
-        schema = scan.collect_schema()
-        for column in columns:
-            if column not in schema.names():
-                continue
-            row = (
-                scan.select(
-                    pl.col(column).min().alias("coverage_start"),
-                    pl.col(column).max().alias("coverage_end"),
-                )
-                .collect()
-                .row(0)
-            )
-            return {
-                "coverage_field": column,
-                "coverage_start": _format_coverage_value(row[0]),
-                "coverage_end": _format_coverage_value(row[1]),
-            }
-    except Exception:  # noqa: BLE001
-        pass
-
     partitions = _partition_ranges(files)
     for column in columns:
         values = partitions.get(column)
@@ -1456,6 +1436,31 @@ def _coverage_for(files: list[Path], hive_partitioning: bool) -> dict[str, str |
                 "coverage_start": values[0],
                 "coverage_end": values[-1],
             }
+    if _scan_parquet_enabled():
+        try:
+            scan = pl.scan_parquet(
+                [file.as_posix() for file in files],
+                hive_partitioning=hive_partitioning,
+            )
+            schema = scan.collect_schema()
+            for column in columns:
+                if column not in schema.names():
+                    continue
+                row = (
+                    scan.select(
+                        pl.col(column).min().alias("coverage_start"),
+                        pl.col(column).max().alias("coverage_end"),
+                    )
+                    .collect()
+                    .row(0)
+                )
+                return {
+                    "coverage_field": column,
+                    "coverage_start": _format_coverage_value(row[0]),
+                    "coverage_end": _format_coverage_value(row[1]),
+                }
+        except Exception:  # noqa: BLE001
+            pass
     return {"coverage_field": None, "coverage_start": None, "coverage_end": None}
 
 
@@ -1507,7 +1512,7 @@ def _backfill_overview(
             continue
         dates_by_year[partition_date.year].append(partition_date.isoformat())
 
-    rows_by_year = _yearly_price_rows(price_files)
+    rows_by_year = _yearly_price_rows(price_files) if _scan_parquet_enabled() else {}
     rows: list[dict[str, Any]] = []
     for year in years:
         dates = sorted(set(dates_by_year[year]))
@@ -1524,7 +1529,7 @@ def _backfill_overview(
                 "year": year,
                 "status": status,
                 "price_days": len(dates),
-                "rows": rows_by_year.get(year, 0),
+                "rows": rows_by_year.get(year),
                 "coverage": "--" if not dates else f"{dates[0]}..{dates[-1]}",
                 "marker": marker.name if marker.exists() else "-",
             }
@@ -1596,6 +1601,15 @@ def _read_backfill_marker_status(marker: Path) -> str | None:
         return "marker_invalid"
     status = data.get("status")
     return str(status) if status else "complete"
+
+
+def _scan_parquet_enabled() -> bool:
+    return os.environ.get("FINANCE_PI_ADMIN_SCAN_PARQUET", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 def _row_count(files: list[Path], hive_partitioning: bool) -> int:

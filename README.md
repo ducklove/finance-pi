@@ -140,6 +140,10 @@ Clients from loopback or a private LAN address can use the admin without a
 token; public/forwarded clients still need the token for dataset APIs, logs,
 files, and job execution. To pin the token across restarts, set
 `FINANCE_PI_ADMIN_TOKEN` in `.env`.
+For Raspberry Pi stability, the admin overview does not scan Parquet contents by
+default; it uses file and partition metadata. Set `FINANCE_PI_ADMIN_SCAN_PARQUET=1`
+only when you explicitly want live row counts and are comfortable with the extra
+I/O and memory pressure.
 
 Build and publish the repository documentation as HTML:
 

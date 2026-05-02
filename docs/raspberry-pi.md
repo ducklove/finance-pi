@@ -174,6 +174,12 @@ For a stable URL across restarts, put this in `.env`:
 FINANCE_PI_ADMIN_TOKEN=replace-with-a-long-random-token
 ```
 
+The admin overview is intentionally light on Raspberry Pi: it reports file
+counts, size, and partition coverage without scanning Parquet contents. Leave
+`FINANCE_PI_ADMIN_SCAN_PARQUET` unset for normal operation. Set
+`FINANCE_PI_ADMIN_SCAN_PARQUET=1` only for a short diagnostic run when you need
+live row counts.
+
 Direct reachability check:
 
 ```bash

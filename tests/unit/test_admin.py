@@ -14,7 +14,7 @@ from finance_pi.admin.server import (
 from finance_pi.storage import DataLakeLayout, ParquetDatasetWriter
 
 
-def test_admin_overview_reports_dataset_counts(tmp_path) -> None:
+def test_admin_overview_reports_lightweight_dataset_metadata(tmp_path) -> None:
     data_root = tmp_path / "data"
     layout = DataLakeLayout(data_root)
     layout.ensure_base_dirs()
@@ -55,7 +55,7 @@ def test_admin_overview_reports_dataset_counts(tmp_path) -> None:
         "end": "2026-04-28",
     }
     assert gold_prices["files"] == 1
-    assert gold_prices["rows"] == 1
+    assert gold_prices["rows"] is None
     assert gold_prices["coverage_start"] == "2026-04-28"
     assert gold_prices["coverage_end"] == "2026-04-28"
     assert gold_prices["status"] == "ready"
@@ -98,7 +98,7 @@ def test_admin_overview_reports_yearly_backfill_status(tmp_path) -> None:
 
     assert years[2023]["status"] == "partial"
     assert years[2023]["price_days"] == 1
-    assert years[2023]["rows"] == 1
+    assert years[2023]["rows"] is None
     assert years[2023]["coverage"] == "2023-01-02..2023-01-02"
     assert years[2022]["status"] == "complete"
     assert years[2022]["marker"] == "2022.json"
