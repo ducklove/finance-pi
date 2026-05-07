@@ -5,11 +5,9 @@ After=network-online.target
 
 [Service]
 Type=oneshot
-User=pi
-Group=pi
-WorkingDirectory=/opt/finance-pi
-EnvironmentFile=-/opt/finance-pi/.env
-ExecStart=/opt/finance-pi/.venv/bin/python -m finance_pi.cli.app catchup --root /opt/finance-pi --no-strict
+WorkingDirectory=/home/cantabile/Works/finance-pi
+EnvironmentFile=-/home/cantabile/Works/finance-pi/.env
+ExecStart=/home/cantabile/Works/finance-pi/.venv/bin/python -m finance_pi.cli.app catchup --root /home/cantabile/Works/finance-pi --no-strict
 Nice=5
 IOSchedulingClass=best-effort
 IOSchedulingPriority=6

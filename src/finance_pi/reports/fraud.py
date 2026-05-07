@@ -75,8 +75,12 @@ def empty_fraud_report(report_date: date) -> FraudReport:
 
 def build_fraud_report(data_root: Path, report_date: date) -> FraudReport:
     checks: list[ReportCheck] = []
-    universe = _read_optional(data_root / "gold/universe_history/dt=*/part.parquet")
-    prices = _read_optional(data_root / "gold/daily_prices_adj/dt=*/part.parquet")
+    universe = _read_optional(
+        data_root / "gold/universe_history" / f"dt={report_date.isoformat()}" / "part.parquet"
+    )
+    prices = _read_optional(
+        data_root / "gold/daily_prices_adj" / f"dt={report_date.isoformat()}" / "part.parquet"
+    )
 
     if universe is None or universe.is_empty():
         checks.append(ReportCheck("universe", "WARN", "No universe_history rows yet."))

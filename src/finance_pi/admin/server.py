@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
 import subprocess
 import sys
 import threading
+import time
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from glob import glob
@@ -17,11 +19,161 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, quote, urlparse
 
+import duckdb
 import polars as pl
 
 from finance_pi.config import ProjectPaths, load_dotenv
 from finance_pi.docs_site import build_docs_site
 from finance_pi.storage import dataset_registry
+
+DEFAULT_MAX_REQUEST_THREADS = 16
+DEFAULT_MAX_PRICE_QUERIES = 4
+DEFAULT_MAX_PRICE_TICKERS = 500
+DEFAULT_MAX_PRICE_DAYS = 3700
+MACRO_TABLE_COLUMNS = {
+    "cpi": (
+        "date",
+        "country",
+        "series_id",
+        "name",
+        "frequency",
+        "value",
+        "index_base",
+        "yoy_pct",
+        "mom_pct",
+        "source",
+        "updated_at",
+    ),
+    "rates": (
+        "date",
+        "country",
+        "series_id",
+        "name",
+        "frequency",
+        "tenor",
+        "value",
+        "unit",
+        "source",
+        "updated_at",
+    ),
+    "indices": (
+        "date",
+        "country",
+        "series_id",
+        "name",
+        "frequency",
+        "category",
+        "value",
+        "currency",
+        "return_1d",
+        "return_1m",
+        "source",
+        "updated_at",
+    ),
+    "commodities": (
+        "date",
+        "series_id",
+        "name",
+        "commodity",
+        "value",
+        "unit",
+        "currency",
+        "source",
+        "updated_at",
+    ),
+    "fx": (
+        "date",
+        "series_id",
+        "base_currency",
+        "quote_currency",
+        "value",
+        "source",
+        "updated_at",
+    ),
+    "economic_indicators": (
+        "date",
+        "country",
+        "series_id",
+        "name",
+        "category",
+        "frequency",
+        "value",
+        "unit",
+        "source",
+        "updated_at",
+    ),
+}
+BASIC_FUNDAMENTAL_METRICS = {
+    "revenue": ("ifrs-full_Revenue", "ifrs_Revenue"),
+    "operating_profit": ("dart_OperatingIncomeLoss",),
+    "net_income": (
+        "ifrs-full_ProfitLossAttributableToOwnersOfParent",
+        "ifrs_ProfitLossAttributableToOwnersOfParent",
+        "ifrs-full_ProfitLoss",
+        "ifrs_ProfitLoss",
+    ),
+    "assets": ("ifrs-full_Assets", "ifrs_Assets"),
+    "liabilities": ("ifrs-full_Liabilities", "ifrs_Liabilities"),
+    "equity": (
+        "ifrs-full_EquityAttributableToOwnersOfParent",
+        "ifrs_EquityAttributableToOwnersOfParent",
+        "ifrs-full_Equity",
+        "ifrs_Equity",
+    ),
+    "cash_and_equivalents": (
+        "ifrs-full_CashAndCashEquivalents",
+        "ifrs_CashAndCashEquivalents",
+    ),
+    "operating_cash_flow": (
+        "ifrs-full_CashFlowsFromUsedInOperatingActivities",
+        "ifrs_CashFlowsFromUsedInOperatingActivities",
+    ),
+    "dividends_paid": (
+        "ifrs-full_DividendsPaidClassifiedAsFinancingActivities",
+        "ifrs_DividendsPaidClassifiedAsFinancingActivities",
+        "ifrs-full_DividendsPaid",
+        "ifrs_DividendsPaid",
+        "dart_AnnualDividendsPaid",
+    ),
+    "treasury_share_purchase": (
+        "dart_AcquisitionOfTreasuryShares",
+        "ifrs-full_PurchaseOfTreasuryShares",
+        "ifrs_PurchaseOfTreasuryShares",
+    ),
+    "treasury_share_sale": (
+        "ifrs-full_SaleOrIssueOfTreasuryShares",
+        "dart_DispositionOfTreasuryShares",
+    ),
+    "treasury_share_cancellation": ("ifrs-full_CancellationOfTreasuryShares",),
+}
+CAPITAL_ACTION_METRICS = {
+    key: BASIC_FUNDAMENTAL_METRICS[key]
+    for key in (
+        "dividends_paid",
+        "treasury_share_purchase",
+        "treasury_share_sale",
+        "treasury_share_cancellation",
+    )
+}
+DAILY_PRICE_FIELDS = {
+    "open": "open_adj",
+    "high": "high_adj",
+    "low": "low_adj",
+    "close": "close_adj",
+    "return_1d": "return_1d",
+    "volume": "volume",
+    "trading_value": "trading_value",
+    "market_cap": "market_cap",
+    "listed_shares": "listed_shares",
+}
+DEFAULT_DAILY_PRICE_FIELDS = (
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "trading_value",
+)
 
 INDEX_HTML = """<!doctype html>
 <html lang="en">
@@ -1011,16 +1163,27 @@ class AdminJob:
 
 
 class AdminState:
+    overview_cache_seconds = 10.0
+
     def __init__(self, root: Path, token: str | None = None) -> None:
         self.paths = ProjectPaths(root=root)
         self.token = token
         self.jobs: dict[str, AdminJob] = {}
         self.lock = threading.Lock()
+        self._overview_cache: tuple[float, dict[str, Any]] | None = None
+        self._price_query_slots = threading.BoundedSemaphore(_admin_max_price_queries())
 
     def overview(self) -> dict[str, Any]:
+        now = time.monotonic()
+        with self.lock:
+            if self._overview_cache is not None:
+                cached_at, cached = self._overview_cache
+                if now - cached_at < self.overview_cache_seconds:
+                    return cached
+
         data_root = self.paths.data_root
         datasets = [_dataset_stat(data_root, name, spec) for name, spec in dataset_registry.items()]
-        return {
+        overview = {
             "generated_at": datetime.now(UTC).isoformat(),
             "workspace": str(self.paths.root.resolve()),
             "data_root": str(data_root.resolve()),
@@ -1037,11 +1200,192 @@ class AdminState:
             "jobs": self.job_list(),
             "max_price_date": _latest_partition_for(data_root / "gold/daily_prices_adj/dt=*/part.parquet"),
         }
+        with self.lock:
+            self._overview_cache = (now, overview)
+        return overview
 
     def job_list(self) -> list[dict[str, Any]]:
         with self.lock:
             jobs = list(self.jobs.values())
         return [job.to_dict() for job in sorted(jobs, key=lambda item: item.started_at, reverse=True)]
+
+    def close_prices(self, params: dict[str, list[str]]) -> dict[str, Any]:
+        tickers = _ticker_params(params)
+        since = _date_param(params, "since")
+        until = _date_param(params, "until")
+        _validate_price_request(tickers, since, until)
+
+        if len(tickers) > 1:
+            prices = self._run_price_query(tickers, since, until, ("close",))
+            return {
+                "tickers": tickers,
+                "since": since.isoformat(),
+                "until": until.isoformat(),
+                "count": sum(len(rows) for rows in prices.values()),
+                "prices": prices,
+            }
+
+        ticker = tickers[0]
+        rows = self._run_price_query([ticker], since, until, ("close",))[ticker]
+        return {
+            "ticker": ticker,
+            "since": since.isoformat(),
+            "until": until.isoformat(),
+            "count": len(rows),
+            "prices": rows,
+        }
+
+    def daily_prices(self, params: dict[str, list[str]]) -> dict[str, Any]:
+        tickers = _ticker_params(params)
+        since = _date_param(params, "since")
+        until = _date_param(params, "until")
+        _validate_price_request(tickers, since, until)
+        fields = _daily_price_fields(params)
+        prices = self._run_price_query(tickers, since, until, fields)
+        return {
+            "tickers": tickers,
+            "since": since.isoformat(),
+            "until": until.isoformat(),
+            "fields": list(fields),
+            "count": sum(len(rows) for rows in prices.values()),
+            "prices": prices,
+        }
+
+    def basic_fundamentals(self, params: dict[str, list[str]]) -> dict[str, Any]:
+        tickers = _ticker_params(params)
+        as_of = _optional_date_param(params, "as_of") or date.today()
+        fiscal_year = _optional_int_param(params, "fiscal_year")
+        if len(tickers) > _admin_max_price_tickers():
+            raise ValueError(f"too many tickers; max is {_admin_max_price_tickers()}")
+
+        fundamentals = self._run_fundamental_query(tickers, as_of, fiscal_year)
+        return {
+            "tickers": tickers,
+            "as_of": as_of.isoformat(),
+            "fiscal_year": fiscal_year,
+            "metrics": list(BASIC_FUNDAMENTAL_METRICS.keys()),
+            "count": sum(1 for row in fundamentals.values() if row["metrics"]),
+            "fundamentals": fundamentals,
+        }
+
+    def capital_actions(self, params: dict[str, list[str]]) -> dict[str, Any]:
+        tickers = _ticker_params(params)
+        as_of = _optional_date_param(params, "as_of") or date.today()
+        start_year = _optional_int_param(params, "start_year")
+        end_year = _optional_int_param(params, "end_year")
+        if len(tickers) > _admin_max_price_tickers():
+            raise ValueError(f"too many tickers; max is {_admin_max_price_tickers()}")
+        if start_year is not None and end_year is not None and end_year < start_year:
+            raise ValueError("end_year must be on or after start_year")
+
+        actions = self._run_capital_actions_query(tickers, as_of, start_year, end_year)
+        return {
+            "tickers": tickers,
+            "as_of": as_of.isoformat(),
+            "start_year": start_year,
+            "end_year": end_year,
+            "metrics": list(CAPITAL_ACTION_METRICS.keys()),
+            "count": sum(len(rows) for rows in actions.values()),
+            "capital_actions": actions,
+        }
+
+    def cpi(self, params: dict[str, list[str]]) -> dict[str, Any]:
+        return self._macro_payload("cpi", params)
+
+    def rates(self, params: dict[str, list[str]]) -> dict[str, Any]:
+        return self._macro_payload("rates", params)
+
+    def indices(self, params: dict[str, list[str]]) -> dict[str, Any]:
+        return self._macro_payload("indices", params)
+
+    def commodities(self, params: dict[str, list[str]]) -> dict[str, Any]:
+        return self._macro_payload("commodities", params)
+
+    def fx(self, params: dict[str, list[str]]) -> dict[str, Any]:
+        return self._macro_payload("fx", params)
+
+    def economic_indicators(self, params: dict[str, list[str]]) -> dict[str, Any]:
+        return self._macro_payload("economic_indicators", params)
+
+    def _macro_payload(self, table: str, params: dict[str, list[str]]) -> dict[str, Any]:
+        since = _optional_date_param(params, "since")
+        until = _optional_date_param(params, "until")
+        if since is not None and until is not None and until < since:
+            raise ValueError("until must be on or after since")
+        country = _optional_text_param(params, "country")
+        series_id = _optional_text_param(params, "series_id")
+        filters = {
+            "country": country,
+            "series_id": series_id,
+            "commodity": _optional_text_param(params, "commodity"),
+            "base_currency": _optional_text_param(params, "base_currency"),
+            "quote_currency": _optional_text_param(params, "quote_currency"),
+            "category": _optional_text_param(params, "category"),
+            "frequency": _optional_text_param(params, "frequency"),
+        }
+        rows = self._run_macro_query(table, since, until, filters)
+        return {
+            "since": since.isoformat() if since else None,
+            "until": until.isoformat() if until else None,
+            **{key: value for key, value in filters.items() if value is not None},
+            "count": len(rows),
+            table: rows,
+        }
+
+    def _run_price_query(
+        self,
+        tickers: list[str],
+        since: date,
+        until: date,
+        fields: tuple[str, ...],
+    ) -> dict[str, list[dict[str, Any]]]:
+        if not self._price_query_slots.acquire(blocking=False):
+            raise AdminServiceBusy("price query capacity exhausted")
+        try:
+            return _query_daily_prices_batch(self.paths, tickers, since, until, fields)
+        finally:
+            self._price_query_slots.release()
+
+    def _run_fundamental_query(
+        self,
+        tickers: list[str],
+        as_of: date,
+        fiscal_year: int | None,
+    ) -> dict[str, dict[str, Any]]:
+        if not self._price_query_slots.acquire(blocking=False):
+            raise AdminServiceBusy("data query capacity exhausted")
+        try:
+            return _query_basic_fundamentals_batch(self.paths, tickers, as_of, fiscal_year)
+        finally:
+            self._price_query_slots.release()
+
+    def _run_capital_actions_query(
+        self,
+        tickers: list[str],
+        as_of: date,
+        start_year: int | None,
+        end_year: int | None,
+    ) -> dict[str, list[dict[str, Any]]]:
+        if not self._price_query_slots.acquire(blocking=False):
+            raise AdminServiceBusy("data query capacity exhausted")
+        try:
+            return _query_capital_actions_batch(self.paths, tickers, as_of, start_year, end_year)
+        finally:
+            self._price_query_slots.release()
+
+    def _run_macro_query(
+        self,
+        table: str,
+        since: date | None,
+        until: date | None,
+        filters: dict[str, str | None],
+    ) -> list[dict[str, Any]]:
+        if not self._price_query_slots.acquire(blocking=False):
+            raise AdminServiceBusy("data query capacity exhausted")
+        try:
+            return _query_macro_table(self.paths, table, since, until, filters)
+        finally:
+            self._price_query_slots.release()
 
     def start_job(self, payload: dict[str, Any]) -> dict[str, Any]:
         action = str(payload.get("action", ""))
@@ -1058,6 +1402,7 @@ class AdminState:
         )
         with self.lock:
             self.jobs[job.id] = job
+            self._overview_cache = None
         threading.Thread(target=self._run_job, args=(job,), daemon=True).start()
         return job.to_dict()
 
@@ -1108,6 +1453,53 @@ class AdminState:
                 job.ended_at = datetime.now(UTC)
 
 
+class BoundedThreadingHTTPServer(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def __init__(
+        self,
+        server_address: tuple[str, int],
+        handler_class: type[BaseHTTPRequestHandler],
+        max_request_threads: int = DEFAULT_MAX_REQUEST_THREADS,
+    ) -> None:
+        super().__init__(server_address, handler_class)
+        self._request_slots = threading.BoundedSemaphore(max(1, max_request_threads))
+
+    def process_request(self, request: Any, client_address: Any) -> None:
+        if not self._request_slots.acquire(blocking=False):
+            self._reject_overloaded_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self._request_slots.release()
+            raise
+
+    def process_request_thread(self, request: Any, client_address: Any) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._request_slots.release()
+
+    def _reject_overloaded_request(self, request: Any) -> None:
+        try:
+            body = b'{"error":"server overloaded"}'
+            request.sendall(
+                b"HTTP/1.1 503 Service Unavailable\r\n"
+                b"Content-Type: application/json; charset=utf-8\r\n"
+                b"Cache-Control: no-store\r\n"
+                b"Connection: close\r\n"
+                + f"Content-Length: {len(body)}\r\n\r\n".encode("ascii")
+                + body
+            )
+        finally:
+            self.shutdown_request(request)
+
+
+class AdminServiceBusy(RuntimeError):
+    pass
+
+
 def run_admin(
     root: Path,
     host: str = "0.0.0.0",
@@ -1119,12 +1511,14 @@ def run_admin(
     _ensure_docs_built(root)
     state = AdminState(root.resolve(), auth_token)
     handler = _handler_for(state)
-    server = ThreadingHTTPServer((host, port), handler)
+    max_threads = _admin_max_request_threads()
+    server = BoundedThreadingHTTPServer((host, port), handler, max_threads)
     display_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
     print(f"finance-pi admin bind: http://{host}:{port}")
     print(f"finance-pi admin url:  http://{display_host}:{port}/?token={auth_token}")
     print(f"finance-pi local:      http://{display_host}:{port}/ (LAN clients bypass token)")
     print(f"finance-pi health:     http://{display_host}:{port}/api/health")
+    print(f"finance-pi threads:    {max_threads}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -1140,6 +1534,8 @@ def _handler_for(state: AdminState) -> type[BaseHTTPRequestHandler]:
             try:
                 if parsed.path == "/api/health":
                     self._send_json(_health_payload(state))
+                elif parsed.path == "/api/docs":
+                    self._send_json(_api_docs_payload(state))
                 elif parsed.path in {"/doc", "/doc/"}:
                     self._redirect("/docs/")
                 elif parsed.path in {"/docs", "/docs/"}:
@@ -1156,6 +1552,46 @@ def _handler_for(state: AdminState) -> type[BaseHTTPRequestHandler]:
                     if not self._authorized():
                         return
                     self._send_json(state.overview())
+                elif parsed.path == "/api/prices/close":
+                    if not self._authorized():
+                        return
+                    self._send_json(state.close_prices(parse_qs(parsed.query)))
+                elif parsed.path == "/api/prices/daily":
+                    if not self._authorized():
+                        return
+                    self._send_json(state.daily_prices(parse_qs(parsed.query)))
+                elif parsed.path == "/api/fundamentals/basic":
+                    if not self._authorized():
+                        return
+                    self._send_json(state.basic_fundamentals(parse_qs(parsed.query)))
+                elif parsed.path == "/api/fundamentals/capital-actions":
+                    if not self._authorized():
+                        return
+                    self._send_json(state.capital_actions(parse_qs(parsed.query)))
+                elif parsed.path == "/api/macro/cpi":
+                    if not self._authorized():
+                        return
+                    self._send_json(state.cpi(parse_qs(parsed.query)))
+                elif parsed.path == "/api/macro/rates":
+                    if not self._authorized():
+                        return
+                    self._send_json(state.rates(parse_qs(parsed.query)))
+                elif parsed.path == "/api/macro/indices":
+                    if not self._authorized():
+                        return
+                    self._send_json(state.indices(parse_qs(parsed.query)))
+                elif parsed.path == "/api/macro/commodities":
+                    if not self._authorized():
+                        return
+                    self._send_json(state.commodities(parse_qs(parsed.query)))
+                elif parsed.path == "/api/macro/fx":
+                    if not self._authorized():
+                        return
+                    self._send_json(state.fx(parse_qs(parsed.query)))
+                elif parsed.path == "/api/macro/economic-indicators":
+                    if not self._authorized():
+                        return
+                    self._send_json(state.economic_indicators(parse_qs(parsed.query)))
                 elif parsed.path == "/api/jobs":
                     if not self._authorized():
                         return
@@ -1173,6 +1609,13 @@ def _handler_for(state: AdminState) -> type[BaseHTTPRequestHandler]:
                     self._send_json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
             except KeyError:
                 self._send_json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
+            except ValueError as exc:
+                self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+            except AdminServiceBusy as exc:
+                self._send_json(
+                    {"error": str(exc)},
+                    status=HTTPStatus.SERVICE_UNAVAILABLE,
+                )
             except Exception as exc:  # noqa: BLE001
                 self._send_json(
                     {"error": str(exc)},
@@ -1290,6 +1733,789 @@ def _health_payload(state: AdminState) -> dict[str, Any]:
         "data_root": str(state.paths.data_root.resolve()),
         "auth": "local-or-token",
     }
+
+
+def _api_docs_payload(state: AdminState) -> dict[str, Any]:
+    base_url = "/api"
+    return {
+        "service": "finance-pi admin API",
+        "generated_at": datetime.now(UTC).isoformat(),
+        "workspace": str(state.paths.root.resolve()),
+        "auth": {
+            "local_network": "LAN clients are allowed without a token",
+            "token": "Use X-Admin-Token or token query parameter outside local networks",
+        },
+        "limits": {
+            "max_request_threads": _admin_max_request_threads(),
+            "max_price_queries": _admin_max_price_queries(),
+            "max_price_tickers": _admin_max_price_tickers(),
+            "max_price_days": _admin_max_price_days(),
+        },
+        "endpoints": {
+            "health": {
+                "method": "GET",
+                "path": f"{base_url}/health",
+                "description": "Lightweight service health check.",
+            },
+            "close_prices": {
+                "method": "GET",
+                "path": f"{base_url}/prices/close",
+                "description": "Adjusted close prices. Supports one ticker or batched tickers.",
+                "query": {
+                    "ticker": "Single ticker, e.g. 005930 or 5930.",
+                    "tickers": "Comma-separated tickers, e.g. 005930,000660.",
+                    "since": "YYYY-MM-DD inclusive.",
+                    "until": "YYYY-MM-DD inclusive.",
+                },
+                "examples": [
+                    f"{base_url}/prices/close?ticker=005930&since=2026-04-29&until=2026-04-30",
+                    f"{base_url}/prices/close?tickers=005930,000660&since=2026-04-29&until=2026-04-30",
+                ],
+            },
+            "daily_prices": {
+                "method": "GET",
+                "path": f"{base_url}/prices/daily",
+                "description": "Daily adjusted OHLCV rows with optional market fields.",
+                "query": {
+                    "ticker": "Single ticker, e.g. 005930 or 5930.",
+                    "tickers": "Comma-separated tickers, e.g. 005930,000660.",
+                    "since": "YYYY-MM-DD inclusive.",
+                    "until": "YYYY-MM-DD inclusive.",
+                    "fields": "Optional comma-separated subset. Defaults to open,high,low,close,volume,trading_value.",
+                },
+                "fields": {
+                    "default": list(DEFAULT_DAILY_PRICE_FIELDS),
+                    "available": list(DAILY_PRICE_FIELDS.keys()),
+                },
+                "examples": [
+                    f"{base_url}/prices/daily?tickers=005930,000660&since=2026-04-29&until=2026-04-30",
+                    f"{base_url}/prices/daily?ticker=005930&since=2026-04-29&until=2026-04-30&fields=close,volume",
+                ],
+            },
+            "basic_fundamentals": {
+                "method": "GET",
+                "path": f"{base_url}/fundamentals/basic",
+                "description": "Latest available annual basic financial metrics by ticker.",
+                "query": {
+                    "ticker": "Single ticker, e.g. 005930 or 5930.",
+                    "tickers": "Comma-separated tickers, e.g. 005930,000660.",
+                    "as_of": "Optional YYYY-MM-DD point-in-time cutoff. Defaults to today.",
+                    "fiscal_year": "Optional fiscal year filter.",
+                },
+                "metrics": list(BASIC_FUNDAMENTAL_METRICS.keys()),
+                "examples": [
+                    f"{base_url}/fundamentals/basic?tickers=005930,000660",
+                    f"{base_url}/fundamentals/basic?ticker=005930&as_of=2026-04-30&fiscal_year=2025",
+                ],
+            },
+            "capital_actions": {
+                "method": "GET",
+                "path": f"{base_url}/fundamentals/capital-actions",
+                "description": "Annual dividend and treasury-share related financial rows by ticker.",
+                "query": {
+                    "ticker": "Single ticker, e.g. 005930 or 5930.",
+                    "tickers": "Comma-separated tickers, e.g. 005930,000660.",
+                    "as_of": "Optional YYYY-MM-DD point-in-time cutoff. Defaults to today.",
+                    "start_year": "Optional first fiscal year.",
+                    "end_year": "Optional last fiscal year.",
+                },
+                "metrics": list(CAPITAL_ACTION_METRICS.keys()),
+                "examples": [
+                    f"{base_url}/fundamentals/capital-actions?tickers=005930,000660&start_year=2024&end_year=2025",
+                    f"{base_url}/fundamentals/capital-actions?ticker=005930&as_of=2026-04-30",
+                ],
+            },
+            "cpi": {
+                "method": "GET",
+                "path": f"{base_url}/macro/cpi",
+                "description": "Consumer price index observations from macro.cpi.",
+                "query": {
+                    "since": "Optional YYYY-MM-DD inclusive.",
+                    "until": "Optional YYYY-MM-DD inclusive.",
+                    "country": "Optional country code, e.g. KR or US.",
+                    "series_id": "Optional CPI series id.",
+                },
+                "columns": list(MACRO_TABLE_COLUMNS["cpi"]),
+                "examples": [
+                    f"{base_url}/macro/cpi?country=KR&since=2024-01-01",
+                    f"{base_url}/macro/cpi?series_id=KOR_CPI_ALL&since=2024-01-01&until=2024-12-31",
+                ],
+            },
+            "rates": {
+                "method": "GET",
+                "path": f"{base_url}/macro/rates",
+                "description": "Interest-rate observations from macro.rates.",
+                "query": {
+                    "since": "Optional YYYY-MM-DD inclusive.",
+                    "until": "Optional YYYY-MM-DD inclusive.",
+                    "country": "Optional country code, e.g. KR or US.",
+                    "series_id": "Optional rate series id.",
+                },
+                "columns": list(MACRO_TABLE_COLUMNS["rates"]),
+                "examples": [
+                    f"{base_url}/macro/rates?country=KR&since=2024-01-01",
+                    f"{base_url}/macro/rates?series_id=KOR_BASE_RATE",
+                ],
+            },
+            "indices": {
+                "method": "GET",
+                "path": f"{base_url}/macro/indices",
+                "description": "Market and macro index observations from macro.indices.",
+                "query": {
+                    "since": "Optional YYYY-MM-DD inclusive.",
+                    "until": "Optional YYYY-MM-DD inclusive.",
+                    "country": "Optional country code, e.g. KR or US.",
+                    "series_id": "Optional index series id.",
+                },
+                "columns": list(MACRO_TABLE_COLUMNS["indices"]),
+                "examples": [
+                    f"{base_url}/macro/indices?country=KR&since=2024-01-01",
+                    f"{base_url}/macro/indices?series_id=KOSPI",
+                ],
+            },
+            "commodities": {
+                "method": "GET",
+                "path": f"{base_url}/macro/commodities",
+                "description": "Commodity observations such as gold and silver from macro.commodities.",
+                "query": {
+                    "since": "Optional YYYY-MM-DD inclusive.",
+                    "until": "Optional YYYY-MM-DD inclusive.",
+                    "series_id": "Optional commodity series id.",
+                    "commodity": "Optional commodity code, e.g. gold or silver.",
+                },
+                "columns": list(MACRO_TABLE_COLUMNS["commodities"]),
+                "examples": [
+                    f"{base_url}/macro/commodities?commodity=gold&since=2024-01-01",
+                    f"{base_url}/macro/commodities?series_id=GOLD_USD_OZ",
+                ],
+            },
+            "fx": {
+                "method": "GET",
+                "path": f"{base_url}/macro/fx",
+                "description": "Foreign-exchange observations from macro.fx.",
+                "query": {
+                    "since": "Optional YYYY-MM-DD inclusive.",
+                    "until": "Optional YYYY-MM-DD inclusive.",
+                    "series_id": "Optional FX series id.",
+                    "base_currency": "Optional base currency, e.g. USD.",
+                    "quote_currency": "Optional quote currency, e.g. KRW.",
+                },
+                "columns": list(MACRO_TABLE_COLUMNS["fx"]),
+                "examples": [
+                    f"{base_url}/macro/fx?base_currency=USD&quote_currency=KRW&since=2024-01-01",
+                    f"{base_url}/macro/fx?series_id=USD_KRW",
+                ],
+            },
+            "economic_indicators": {
+                "method": "GET",
+                "path": f"{base_url}/macro/economic-indicators",
+                "description": "General FRED macroeconomic observations from macro.economic_indicators.",
+                "query": {
+                    "since": "Optional YYYY-MM-DD inclusive.",
+                    "until": "Optional YYYY-MM-DD inclusive.",
+                    "country": "Optional country code, e.g. US.",
+                    "series_id": "Optional FRED series id, e.g. UNRATE or VIXCLS.",
+                    "category": "Optional category, e.g. labor, growth, risk, credit, inflation.",
+                    "frequency": "Optional frequency code, e.g. D, W, M, Q.",
+                },
+                "columns": list(MACRO_TABLE_COLUMNS["economic_indicators"]),
+                "examples": [
+                    f"{base_url}/macro/economic-indicators?category=labor&since=2024-01-01",
+                    f"{base_url}/macro/economic-indicators?series_id=VIXCLS&since=2024-01-01",
+                ],
+            },
+        },
+    }
+
+
+def _admin_max_request_threads() -> int:
+    return _positive_int_env("FINANCE_PI_ADMIN_MAX_THREADS", DEFAULT_MAX_REQUEST_THREADS)
+
+
+def _admin_max_price_queries() -> int:
+    return _positive_int_env("FINANCE_PI_ADMIN_MAX_PRICE_QUERIES", DEFAULT_MAX_PRICE_QUERIES)
+
+
+def _admin_max_price_tickers() -> int:
+    return _positive_int_env("FINANCE_PI_ADMIN_MAX_PRICE_TICKERS", DEFAULT_MAX_PRICE_TICKERS)
+
+
+def _admin_max_price_days() -> int:
+    return _positive_int_env("FINANCE_PI_ADMIN_MAX_PRICE_DAYS", DEFAULT_MAX_PRICE_DAYS)
+
+
+def _positive_int_env(name: str, default: int) -> int:
+    value = os.environ.get(name, "")
+    if not value:
+        return default
+    try:
+        return max(1, int(value))
+    except ValueError:
+        return default
+
+
+def _single_param(params: dict[str, list[str]], name: str) -> str:
+    value = params.get(name, [""])[0].strip()
+    if not value:
+        raise ValueError(f"{name} is required")
+    return value
+
+
+def _date_param(params: dict[str, list[str]], name: str) -> date:
+    value = _single_param(params, name)
+    try:
+        return date.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be YYYY-MM-DD") from exc
+
+
+def _optional_date_param(params: dict[str, list[str]], name: str) -> date | None:
+    value = params.get(name, [""])[0].strip()
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be YYYY-MM-DD") from exc
+
+
+def _optional_int_param(params: dict[str, list[str]], name: str) -> int | None:
+    value = params.get(name, [""])[0].strip()
+    if not value:
+        return None
+    try:
+        return int(value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer") from exc
+
+
+def _optional_text_param(params: dict[str, list[str]], name: str) -> str | None:
+    value = params.get(name, [""])[0].strip()
+    return value or None
+
+
+def _normalize_ticker_param(value: str) -> str:
+    ticker = value.strip().upper()
+    if not re.fullmatch(r"[0-9A-Z]{1,12}", ticker):
+        raise ValueError("ticker must contain only letters and digits")
+    if ticker.isdigit() and len(ticker) <= 6:
+        return ticker.zfill(6)
+    return ticker
+
+
+def _ticker_params(params: dict[str, list[str]]) -> list[str]:
+    values = params.get("tickers")
+    if values is None:
+        values = params.get("ticker")
+    if not values:
+        raise ValueError("ticker is required")
+
+    tickers: list[str] = []
+    for value in values:
+        for part in value.split(","):
+            part = part.strip()
+            if part:
+                tickers.append(_normalize_ticker_param(part))
+    if not tickers:
+        raise ValueError("ticker is required")
+    return list(dict.fromkeys(tickers))
+
+
+def _daily_price_fields(params: dict[str, list[str]]) -> tuple[str, ...]:
+    values = params.get("fields")
+    if not values:
+        return DEFAULT_DAILY_PRICE_FIELDS
+
+    fields: list[str] = []
+    for value in values:
+        for part in value.split(","):
+            field_name = part.strip()
+            if not field_name:
+                continue
+            if field_name not in DAILY_PRICE_FIELDS:
+                raise ValueError(f"unknown daily price field: {field_name}")
+            fields.append(field_name)
+    return tuple(dict.fromkeys(fields)) or DEFAULT_DAILY_PRICE_FIELDS
+
+
+def _validate_price_request(tickers: list[str], since: date, until: date) -> None:
+    if until < since:
+        raise ValueError("until must be on or after since")
+    if len(tickers) > _admin_max_price_tickers():
+        raise ValueError(f"too many tickers; max is {_admin_max_price_tickers()}")
+    days = (until - since).days + 1
+    if days > _admin_max_price_days():
+        raise ValueError(f"date range is too large; max days is {_admin_max_price_days()}")
+
+
+def _query_daily_prices_batch(
+    paths: ProjectPaths,
+    tickers: list[str],
+    since: date,
+    until: date,
+    fields: tuple[str, ...],
+) -> dict[str, list[dict[str, Any]]]:
+    prices = {ticker: [] for ticker in tickers}
+    if not tickers:
+        return prices
+
+    select_fields = ", ".join(
+        f"{source_column} AS {field_name}"
+        for field_name, source_column in _daily_price_field_columns(fields)
+    )
+    if paths.catalog_path.exists():
+        with duckdb.connect(str(paths.catalog_path), read_only=True) as conn:
+            rows = conn.execute(
+                f"""
+                SELECT ticker, date, {select_fields}
+                FROM analytics.daily_prices
+                WHERE ticker IN ({_sql_placeholders(tickers)})
+                  AND date BETWEEN ? AND ?
+                ORDER BY ticker, date
+                """,
+                [*tickers, since, until],
+            ).fetchall()
+        _append_daily_price_rows(prices, rows, fields)
+        return prices
+
+    price_glob = paths.data_root / "gold/daily_prices_adj/dt=*/part.parquet"
+    master_path = paths.data_root / "gold/security_master.parquet"
+    if not glob(price_glob.as_posix()):
+        return prices
+
+    sql_price_path = _duckdb_path(price_glob)
+    security_ids = [f"S{ticker}" for ticker in tickers]
+    if master_path.exists():
+        sql_master_path = _duckdb_path(master_path)
+        sql = f"""
+            WITH prices AS (
+                SELECT *
+                FROM read_parquet('{sql_price_path}', hive_partitioning = true, union_by_name = true)
+            ),
+            master AS (
+                SELECT *
+                FROM read_parquet('{sql_master_path}', union_by_name = true)
+            )
+            SELECT COALESCE(sm.ticker, regexp_replace(p.security_id, '^S', '')) AS ticker,
+                   p.date,
+                   {select_fields}
+            FROM prices AS p
+            LEFT JOIN master AS sm
+                ON p.security_id = sm.security_id
+            WHERE (sm.ticker IN ({_sql_placeholders(tickers)})
+                   OR p.security_id IN ({_sql_placeholders(security_ids)}))
+              AND p.date BETWEEN ? AND ?
+            ORDER BY sm.ticker, p.security_id, p.date
+        """
+        params: list[Any] = [*tickers, *security_ids, since, until]
+    else:
+        sql = f"""
+            SELECT regexp_replace(security_id, '^S', '') AS ticker,
+                   date,
+                   {select_fields}
+            FROM read_parquet('{sql_price_path}', hive_partitioning = true, union_by_name = true)
+            WHERE security_id IN ({_sql_placeholders(security_ids)})
+              AND date BETWEEN ? AND ?
+            ORDER BY security_id, date
+        """
+        params = [*security_ids, since, until]
+
+    with duckdb.connect(":memory:") as conn:
+        rows = conn.execute(sql, params).fetchall()
+    _append_daily_price_rows(prices, rows, fields)
+    return prices
+
+
+def _daily_price_field_columns(fields: tuple[str, ...]) -> list[tuple[str, str]]:
+    return [(field_name, DAILY_PRICE_FIELDS[field_name]) for field_name in fields]
+
+
+def _append_daily_price_rows(
+    prices: dict[str, list[dict[str, Any]]],
+    rows: list[tuple[Any, ...]],
+    fields: tuple[str, ...],
+) -> None:
+    for row in rows:
+        ticker = row[0]
+        logical_date = row[1]
+        if ticker in prices:
+            prices[ticker].append(
+                {
+                    "date": logical_date.isoformat(),
+                    **{field_name: row[index + 2] for index, field_name in enumerate(fields)},
+                }
+            )
+
+
+def _query_basic_fundamentals_batch(
+    paths: ProjectPaths,
+    tickers: list[str],
+    as_of: date,
+    fiscal_year: int | None,
+) -> dict[str, dict[str, Any]]:
+    result = {
+        ticker: {
+            "ticker": ticker,
+            "as_of": as_of.isoformat(),
+            "fiscal_year": fiscal_year,
+            "metrics": {},
+        }
+        for ticker in tickers
+    }
+    if not tickers:
+        return result
+
+    rows = _query_fundamental_rows(
+        paths,
+        tickers,
+        _basic_fundamental_account_ids(BASIC_FUNDAMENTAL_METRICS),
+        as_of,
+        fiscal_year,
+        fiscal_year,
+    )
+
+    candidates: dict[str, dict[str, list[dict[str, Any]]]] = {
+        ticker: {metric: [] for metric in BASIC_FUNDAMENTAL_METRICS} for ticker in tickers
+    }
+    for row in rows:
+        ticker = row["ticker"]
+        metric = _basic_fundamental_metric(row["account_id"])
+        if ticker in candidates and metric is not None:
+            candidates[ticker][metric].append(row)
+
+    for ticker, metrics in candidates.items():
+        selected: dict[str, dict[str, Any]] = {}
+        selected_years: list[int] = []
+        selected_dates: list[date] = []
+        for metric, rows_for_metric in metrics.items():
+            row = _select_basic_fundamental_row(metric, rows_for_metric)
+            if row is None:
+                continue
+            selected[metric] = _fundamental_metric_payload(row)
+            if row["fiscal_year"] is not None:
+                selected_years.append(row["fiscal_year"])
+            if row["available_date"] is not None:
+                selected_dates.append(row["available_date"])
+        result[ticker]["metrics"] = selected
+        if fiscal_year is None and selected_years:
+            result[ticker]["fiscal_year"] = max(selected_years)
+        if selected_dates:
+            result[ticker]["available_date"] = max(selected_dates).isoformat()
+    return result
+
+
+def _query_capital_actions_batch(
+    paths: ProjectPaths,
+    tickers: list[str],
+    as_of: date,
+    start_year: int | None,
+    end_year: int | None,
+) -> dict[str, list[dict[str, Any]]]:
+    result: dict[str, list[dict[str, Any]]] = {ticker: [] for ticker in tickers}
+    rows = _query_fundamental_rows(
+        paths,
+        tickers,
+        _basic_fundamental_account_ids(CAPITAL_ACTION_METRICS),
+        as_of,
+        start_year,
+        end_year,
+    )
+    by_key: dict[tuple[str, int, str], list[dict[str, Any]]] = {}
+    for row in rows:
+        metric = _basic_fundamental_metric(row["account_id"], CAPITAL_ACTION_METRICS)
+        if metric is None or row["fiscal_year"] is None:
+            continue
+        by_key.setdefault((row["ticker"], row["fiscal_year"], metric), []).append(row)
+
+    grouped: dict[tuple[str, int], dict[str, dict[str, Any]]] = {}
+    for (ticker, fiscal_year, metric), metric_rows in by_key.items():
+        row = _select_basic_fundamental_row(metric, metric_rows, CAPITAL_ACTION_METRICS)
+        if row is None:
+            continue
+        grouped.setdefault((ticker, fiscal_year), {})[metric] = _fundamental_metric_payload(row)
+
+    for (ticker, fiscal_year), metrics in sorted(grouped.items()):
+        if ticker in result:
+            result[ticker].append({"fiscal_year": fiscal_year, "metrics": metrics})
+    return result
+
+
+def _query_fundamental_rows(
+    paths: ProjectPaths,
+    tickers: list[str],
+    account_ids: list[str],
+    as_of: date,
+    start_year: int | None,
+    end_year: int | None,
+) -> list[dict[str, Any]]:
+    if not tickers or not account_ids:
+        return []
+    if paths.catalog_path.exists():
+        return _query_fundamental_rows_catalog(
+            paths,
+            tickers,
+            account_ids,
+            as_of,
+            start_year,
+            end_year,
+        )
+    return _query_fundamental_rows_parquet(
+        paths,
+        tickers,
+        account_ids,
+        as_of,
+        start_year,
+        end_year,
+    )
+
+
+def _fundamental_year_filter(start_year: int | None, end_year: int | None) -> tuple[str, list[int]]:
+    clauses: list[str] = []
+    params: list[int] = []
+    if start_year is not None:
+        clauses.append("AND f.fiscal_year >= ?")
+        params.append(start_year)
+    if end_year is not None:
+        clauses.append("AND f.fiscal_year <= ?")
+        params.append(end_year)
+    return "\n".join(clauses), params
+
+
+def _query_fundamental_rows_catalog(
+    paths: ProjectPaths,
+    tickers: list[str],
+    account_ids: list[str],
+    as_of: date,
+    start_year: int | None,
+    end_year: int | None,
+) -> list[dict[str, Any]]:
+    year_filter, year_params = _fundamental_year_filter(start_year, end_year)
+    params: list[Any] = [*tickers, *account_ids, as_of, *year_params]
+    with duckdb.connect(str(paths.catalog_path), read_only=True) as conn:
+        rows = conn.execute(
+            f"""
+            SELECT
+                sm.ticker,
+                f.security_id,
+                f.corp_code,
+                f.fiscal_year,
+                f.fiscal_period_end,
+                f.available_date,
+                f.report_type,
+                f.account_id,
+                f.account_name,
+                f.amount,
+                f.is_consolidated
+            FROM silver.financials AS f
+            JOIN analytics.securities AS sm
+                ON f.security_id = sm.security_id
+            WHERE sm.ticker IN ({_sql_placeholders(tickers)})
+              AND f.account_id IN ({_sql_placeholders(account_ids)})
+              AND f.available_date <= ?
+              {year_filter}
+            """,
+            params,
+        ).fetchall()
+    return [_fundamental_row_dict(row) for row in rows]
+
+
+def _query_fundamental_rows_parquet(
+    paths: ProjectPaths,
+    tickers: list[str],
+    account_ids: list[str],
+    as_of: date,
+    start_year: int | None,
+    end_year: int | None,
+) -> list[dict[str, Any]]:
+    financial_glob = paths.data_root / "silver/financials/fiscal_year=*/part.parquet"
+    master_path = paths.data_root / "gold/security_master.parquet"
+    if not glob(financial_glob.as_posix()) or not master_path.exists():
+        return []
+
+    year_filter, year_params = _fundamental_year_filter(start_year, end_year)
+    sql_financial_path = _duckdb_path(financial_glob)
+    sql_master_path = _duckdb_path(master_path)
+    params = [*tickers, *account_ids, as_of, *year_params]
+    with duckdb.connect(":memory:") as conn:
+        rows = conn.execute(
+            f"""
+            WITH financials AS (
+                SELECT *
+                FROM read_parquet('{sql_financial_path}', hive_partitioning = true, union_by_name = true)
+            ),
+            master AS (
+                SELECT *
+                FROM read_parquet('{sql_master_path}', union_by_name = true)
+            )
+            SELECT
+                sm.ticker,
+                f.security_id,
+                f.corp_code,
+                f.fiscal_year,
+                f.fiscal_period_end,
+                f.available_date,
+                f.report_type,
+                f.account_id,
+                f.account_name,
+                f.amount,
+                f.is_consolidated
+            FROM financials AS f
+            JOIN master AS sm
+                ON f.security_id = sm.security_id
+            WHERE sm.ticker IN ({_sql_placeholders(tickers)})
+              AND f.account_id IN ({_sql_placeholders(account_ids)})
+              AND f.available_date <= ?
+              {year_filter}
+            """,
+            params,
+        ).fetchall()
+    return [_fundamental_row_dict(row) for row in rows]
+
+
+def _fundamental_row_dict(row: tuple[Any, ...]) -> dict[str, Any]:
+    return {
+        "ticker": row[0],
+        "security_id": row[1],
+        "corp_code": row[2],
+        "fiscal_year": row[3],
+        "fiscal_period_end": row[4],
+        "available_date": row[5],
+        "report_type": row[6],
+        "account_id": row[7],
+        "account_name": row[8],
+        "amount": row[9],
+        "is_consolidated": row[10],
+    }
+
+
+def _fundamental_metric_payload(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "amount": row["amount"],
+        "account_id": row["account_id"],
+        "account_name": row["account_name"],
+        "fiscal_year": row["fiscal_year"],
+        "fiscal_period_end": _iso_or_none(row["fiscal_period_end"]),
+        "available_date": _iso_or_none(row["available_date"]),
+        "report_type": row["report_type"],
+        "is_consolidated": row["is_consolidated"],
+    }
+
+
+def _basic_fundamental_account_ids(metrics: dict[str, tuple[str, ...]]) -> list[str]:
+    return list(dict.fromkeys(account for accounts in metrics.values() for account in accounts))
+
+
+def _basic_fundamental_metric(
+    account_id: str,
+    metrics: dict[str, tuple[str, ...]] = BASIC_FUNDAMENTAL_METRICS,
+) -> str | None:
+    for metric, accounts in metrics.items():
+        if account_id in accounts:
+            return metric
+    return None
+
+
+def _select_basic_fundamental_row(
+    metric: str,
+    rows: list[dict[str, Any]],
+    metrics: dict[str, tuple[str, ...]] = BASIC_FUNDAMENTAL_METRICS,
+) -> dict[str, Any] | None:
+    if not rows:
+        return None
+    rank = {account_id: index for index, account_id in enumerate(metrics[metric])}
+    return sorted(
+        rows,
+        key=lambda row: (
+            row["fiscal_year"] or 0,
+            row["available_date"] or date.min,
+            1 if row["is_consolidated"] else 0,
+            -rank.get(row["account_id"], 999),
+        ),
+        reverse=True,
+    )[0]
+
+
+def _iso_or_none(value: Any) -> str | None:
+    return value.isoformat() if hasattr(value, "isoformat") else None
+
+
+def _query_macro_table(
+    paths: ProjectPaths,
+    table: str,
+    since: date | None,
+    until: date | None,
+    filters: dict[str, str | None],
+) -> list[dict[str, Any]]:
+    if table not in MACRO_TABLE_COLUMNS:
+        raise ValueError(f"unknown macro table: {table}")
+    columns = MACRO_TABLE_COLUMNS[table]
+    where_sql, params = _macro_where_clause(columns, since, until, filters)
+    select_sql = ", ".join(columns)
+    if paths.catalog_path.exists():
+        with duckdb.connect(str(paths.catalog_path), read_only=True) as conn:
+            rows = conn.execute(
+                f"""
+                SELECT {select_sql}
+                FROM macro.{table}
+                {where_sql}
+                ORDER BY date, series_id
+                """,
+                params,
+            ).fetchall()
+        return [_macro_row_dict(columns, row) for row in rows]
+
+    parquet_path = paths.data_root / "macro" / table / "part.parquet"
+    if not parquet_path.exists():
+        return []
+    with duckdb.connect(":memory:") as conn:
+        rows = conn.execute(
+            f"""
+            SELECT {select_sql}
+            FROM read_parquet('{_duckdb_path(parquet_path)}', union_by_name = true)
+            {where_sql}
+            ORDER BY date, series_id
+            """,
+            params,
+        ).fetchall()
+    return [_macro_row_dict(columns, row) for row in rows]
+
+
+def _macro_where_clause(
+    columns: tuple[str, ...],
+    since: date | None,
+    until: date | None,
+    filters: dict[str, str | None],
+) -> tuple[str, list[Any]]:
+    clauses: list[str] = []
+    params: list[Any] = []
+    if since is not None:
+        clauses.append("date >= ?")
+        params.append(since)
+    if until is not None:
+        clauses.append("date <= ?")
+        params.append(until)
+    for key, value in filters.items():
+        if value is not None and key in columns:
+            clauses.append(f"{key} = ?")
+            params.append(value)
+    if not clauses:
+        return "", []
+    return "WHERE " + " AND ".join(clauses), params
+
+
+def _macro_row_dict(columns: tuple[str, ...], row: tuple[Any, ...]) -> dict[str, Any]:
+    return {
+        column: value.isoformat() if hasattr(value, "isoformat") else value
+        for column, value in zip(columns, row, strict=True)
+    }
+
+
+def _sql_placeholders(values: list[str]) -> str:
+    return ", ".join("?" for _ in values)
+
+
+def _duckdb_path(path: Path) -> str:
+    return path.as_posix().replace("'", "''")
 
 
 def _job_command(action: str, payload: dict[str, Any], root: Path) -> tuple[str, list[str]]:

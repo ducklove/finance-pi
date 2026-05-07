@@ -182,6 +182,77 @@ def test_build_all_enriches_kis_prices_with_naver_summary(tmp_path) -> None:
     assert gold.select("listed_shares").item() == 10_000
 
 
+def test_build_all_enriches_prices_with_marcap_market_caps(tmp_path) -> None:
+    layout = DataLakeLayout(tmp_path)
+    layout.ensure_base_dirs()
+    writer = ParquetDatasetWriter()
+
+    writer.write(
+        pl.DataFrame(
+            [
+                {
+                    "date": date(2024, 1, 2),
+                    "ticker": "005930",
+                    "isin": None,
+                    "name": "005930",
+                    "market": "KOSPI",
+                    "open": 100.0,
+                    "high": 110.0,
+                    "low": 90.0,
+                    "close": 100.0,
+                    "volume": 10,
+                    "trading_value": None,
+                    "market_cap": None,
+                    "listed_shares": None,
+                }
+            ]
+        ),
+        layout.partition_path("bronze.kis_daily_raw", date(2024, 1, 2)),
+    )
+    marcap_path = tmp_path / "bronze" / "marcap" / "year=2024" / "part.parquet"
+    marcap_path.parent.mkdir(parents=True)
+    pl.DataFrame(
+        [
+            {
+                "Date": date(2024, 1, 2),
+                "Rank": 1,
+                "Code": "005930",
+                "Name": "삼성전자",
+                "Open": 100,
+                "High": 110,
+                "Low": 90,
+                "Close": 100,
+                "Volume": 10,
+                "Amount": 1000,
+                "Changes": 0,
+                "ChangeCode": "0",
+                "ChagesRatio": 0.0,
+                "Marcap": 1_000_000,
+                "Stocks": 10_000,
+                "MarketId": "STK",
+                "Market": "KOSPI",
+                "Dept": "",
+            }
+        ]
+    ).write_parquet(marcap_path)
+
+    build_all(tmp_path)
+
+    market_caps = pl.read_parquet(
+        tmp_path / "gold" / "daily_market_caps" / "dt=2024-01-02" / "part.parquet"
+    )
+    silver = pl.read_parquet(tmp_path / "silver" / "prices" / "dt=2024-01-02" / "part.parquet")
+    gold = pl.read_parquet(
+        tmp_path / "gold" / "daily_prices_adj" / "dt=2024-01-02" / "part.parquet"
+    )
+    assert market_caps.select("market_cap").item() == 1_000_000
+    assert market_caps.select("listed_shares").item() == 10_000
+    assert silver.select("market_cap").item() == 1_000_000
+    assert silver.select("listed_shares").item() == 10_000
+    assert gold.select("market_cap").item() == 1_000_000
+    assert gold.select("listed_shares").item() == 10_000
+
+
 def test_build_all_marks_named_alphanumeric_preferred_share(tmp_path) -> None:
     layout = DataLakeLayout(tmp_path)
     layout.ensure_base_dirs()

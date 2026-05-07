@@ -169,6 +169,52 @@ def _empty_naver_summary() -> str:
     """
 
 
+def _empty_marcap_raw() -> str:
+    return """
+    SELECT
+        CAST(NULL AS DATE) AS Date,
+        CAST(NULL AS BIGINT) AS Rank,
+        CAST(NULL AS VARCHAR) AS Code,
+        CAST(NULL AS VARCHAR) AS Name,
+        CAST(NULL AS BIGINT) AS Open,
+        CAST(NULL AS BIGINT) AS High,
+        CAST(NULL AS BIGINT) AS Low,
+        CAST(NULL AS BIGINT) AS Close,
+        CAST(NULL AS BIGINT) AS Volume,
+        CAST(NULL AS BIGINT) AS Amount,
+        CAST(NULL AS BIGINT) AS Changes,
+        CAST(NULL AS VARCHAR) AS ChangeCode,
+        CAST(NULL AS DOUBLE) AS ChagesRatio,
+        CAST(NULL AS BIGINT) AS Marcap,
+        CAST(NULL AS BIGINT) AS Stocks,
+        CAST(NULL AS VARCHAR) AS MarketId,
+        CAST(NULL AS VARCHAR) AS Market,
+        CAST(NULL AS VARCHAR) AS Dept
+    WHERE FALSE
+    """
+
+
+def _empty_market_caps() -> str:
+    return """
+    SELECT
+        CAST(NULL AS DATE) AS date,
+        CAST(NULL AS VARCHAR) AS security_id,
+        CAST(NULL AS VARCHAR) AS listing_id,
+        CAST(NULL AS VARCHAR) AS ticker,
+        CAST(NULL AS VARCHAR) AS name,
+        CAST(NULL AS VARCHAR) AS market,
+        CAST(NULL AS BIGINT) AS rank,
+        CAST(NULL AS DOUBLE) AS close,
+        CAST(NULL AS BIGINT) AS trading_value,
+        CAST(NULL AS BIGINT) AS volume,
+        CAST(NULL AS BIGINT) AS market_cap,
+        CAST(NULL AS BIGINT) AS listed_shares,
+        CAST(NULL AS VARCHAR) AS market_cap_source,
+        CAST(NULL AS BOOLEAN) AS is_estimated
+    WHERE FALSE
+    """
+
+
 def _empty_security_master() -> str:
     return """
     SELECT
@@ -207,6 +253,107 @@ def _empty_universe_history() -> str:
     """
 
 
+def _empty_cpi() -> str:
+    return """
+    SELECT
+        CAST(NULL AS DATE) AS date,
+        CAST(NULL AS VARCHAR) AS country,
+        CAST(NULL AS VARCHAR) AS series_id,
+        CAST(NULL AS VARCHAR) AS name,
+        CAST(NULL AS VARCHAR) AS frequency,
+        CAST(NULL AS DOUBLE) AS value,
+        CAST(NULL AS VARCHAR) AS index_base,
+        CAST(NULL AS DOUBLE) AS yoy_pct,
+        CAST(NULL AS DOUBLE) AS mom_pct,
+        CAST(NULL AS VARCHAR) AS source,
+        CAST(NULL AS TIMESTAMP) AS updated_at
+    WHERE FALSE
+    """
+
+
+def _empty_rates() -> str:
+    return """
+    SELECT
+        CAST(NULL AS DATE) AS date,
+        CAST(NULL AS VARCHAR) AS country,
+        CAST(NULL AS VARCHAR) AS series_id,
+        CAST(NULL AS VARCHAR) AS name,
+        CAST(NULL AS VARCHAR) AS frequency,
+        CAST(NULL AS VARCHAR) AS tenor,
+        CAST(NULL AS DOUBLE) AS value,
+        CAST(NULL AS VARCHAR) AS unit,
+        CAST(NULL AS VARCHAR) AS source,
+        CAST(NULL AS TIMESTAMP) AS updated_at
+    WHERE FALSE
+    """
+
+
+def _empty_indices() -> str:
+    return """
+    SELECT
+        CAST(NULL AS DATE) AS date,
+        CAST(NULL AS VARCHAR) AS country,
+        CAST(NULL AS VARCHAR) AS series_id,
+        CAST(NULL AS VARCHAR) AS name,
+        CAST(NULL AS VARCHAR) AS frequency,
+        CAST(NULL AS VARCHAR) AS category,
+        CAST(NULL AS DOUBLE) AS value,
+        CAST(NULL AS VARCHAR) AS currency,
+        CAST(NULL AS DOUBLE) AS return_1d,
+        CAST(NULL AS DOUBLE) AS return_1m,
+        CAST(NULL AS VARCHAR) AS source,
+        CAST(NULL AS TIMESTAMP) AS updated_at
+    WHERE FALSE
+    """
+
+
+def _empty_commodities() -> str:
+    return """
+    SELECT
+        CAST(NULL AS DATE) AS date,
+        CAST(NULL AS VARCHAR) AS series_id,
+        CAST(NULL AS VARCHAR) AS name,
+        CAST(NULL AS VARCHAR) AS commodity,
+        CAST(NULL AS DOUBLE) AS value,
+        CAST(NULL AS VARCHAR) AS unit,
+        CAST(NULL AS VARCHAR) AS currency,
+        CAST(NULL AS VARCHAR) AS source,
+        CAST(NULL AS TIMESTAMP) AS updated_at
+    WHERE FALSE
+    """
+
+
+def _empty_fx() -> str:
+    return """
+    SELECT
+        CAST(NULL AS DATE) AS date,
+        CAST(NULL AS VARCHAR) AS series_id,
+        CAST(NULL AS VARCHAR) AS base_currency,
+        CAST(NULL AS VARCHAR) AS quote_currency,
+        CAST(NULL AS DOUBLE) AS value,
+        CAST(NULL AS VARCHAR) AS source,
+        CAST(NULL AS TIMESTAMP) AS updated_at
+    WHERE FALSE
+    """
+
+
+def _empty_economic_indicators() -> str:
+    return """
+    SELECT
+        CAST(NULL AS DATE) AS date,
+        CAST(NULL AS VARCHAR) AS country,
+        CAST(NULL AS VARCHAR) AS series_id,
+        CAST(NULL AS VARCHAR) AS name,
+        CAST(NULL AS VARCHAR) AS category,
+        CAST(NULL AS VARCHAR) AS frequency,
+        CAST(NULL AS DOUBLE) AS value,
+        CAST(NULL AS VARCHAR) AS unit,
+        CAST(NULL AS VARCHAR) AS source,
+        CAST(NULL AS TIMESTAMP) AS updated_at
+    WHERE FALSE
+    """
+
+
 dataset_registry: dict[str, DatasetSpec] = {
     "bronze.krx_daily_raw": DatasetSpec(
         "bronze.krx_daily_raw",
@@ -231,6 +378,12 @@ dataset_registry: dict[str, DatasetSpec] = {
         "bronze",
         "bronze/naver_summary/dt=*/part.parquet",
         _empty_naver_summary(),
+    ),
+    "bronze.marcap_raw": DatasetSpec(
+        "bronze.marcap_raw",
+        "bronze",
+        "bronze/marcap/year=*/part.parquet",
+        _empty_marcap_raw(),
     ),
     "bronze.dart_filings_raw": DatasetSpec(
         "bronze.dart_filings_raw",
@@ -261,6 +414,12 @@ dataset_registry: dict[str, DatasetSpec] = {
         "silver",
         "silver/prices/dt=*/part.parquet",
         _empty_prices_silver(),
+    ),
+    "silver.market_caps": DatasetSpec(
+        "silver.market_caps",
+        "silver",
+        "silver/market_caps/dt=*/part.parquet",
+        _empty_market_caps(),
     ),
     "silver.financials": DatasetSpec(
         "silver.financials",
@@ -301,6 +460,12 @@ dataset_registry: dict[str, DatasetSpec] = {
         "gold/daily_prices_adj/dt=*/part.parquet",
         _empty_daily_prices_adj(),
     ),
+    "gold.daily_market_caps": DatasetSpec(
+        "gold.daily_market_caps",
+        "gold",
+        "gold/daily_market_caps/dt=*/part.parquet",
+        _empty_market_caps(),
+    ),
     "gold.fundamentals_pit": DatasetSpec(
         "gold.fundamentals_pit",
         "gold",
@@ -321,6 +486,48 @@ dataset_registry: dict[str, DatasetSpec] = {
         "gold",
         "gold/security_master.parquet",
         _empty_security_master(),
+        hive_partitioning=False,
+    ),
+    "macro.cpi": DatasetSpec(
+        "macro.cpi",
+        "macro",
+        "macro/cpi/part.parquet",
+        _empty_cpi(),
+        hive_partitioning=False,
+    ),
+    "macro.rates": DatasetSpec(
+        "macro.rates",
+        "macro",
+        "macro/rates/part.parquet",
+        _empty_rates(),
+        hive_partitioning=False,
+    ),
+    "macro.indices": DatasetSpec(
+        "macro.indices",
+        "macro",
+        "macro/indices/part.parquet",
+        _empty_indices(),
+        hive_partitioning=False,
+    ),
+    "macro.commodities": DatasetSpec(
+        "macro.commodities",
+        "macro",
+        "macro/commodities/part.parquet",
+        _empty_commodities(),
+        hive_partitioning=False,
+    ),
+    "macro.fx": DatasetSpec(
+        "macro.fx",
+        "macro",
+        "macro/fx/part.parquet",
+        _empty_fx(),
+        hive_partitioning=False,
+    ),
+    "macro.economic_indicators": DatasetSpec(
+        "macro.economic_indicators",
+        "macro",
+        "macro/economic_indicators/part.parquet",
+        _empty_economic_indicators(),
         hive_partitioning=False,
     ),
 }

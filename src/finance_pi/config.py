@@ -29,6 +29,7 @@ KNOWN_DOTENV_KEYS = frozenset(
         "NAVER_FINANCE_API_BASE_URL",
         "NAVER_FINANCE_USER_AGENT",
         "FINANCE_PI_ADMIN_TOKEN",
+        "FRED_API_KEY",
     }
 )
 
@@ -81,6 +82,7 @@ class RuntimeSettings:
     naver_finance_base_url: str = "https://finance.naver.com"
     naver_finance_api_base_url: str = "https://api.finance.naver.com"
     naver_finance_user_agent: str = "Mozilla/5.0 finance-pi/0.1"
+    fred_api_key: str | None = None
 
     @classmethod
     def load(cls, root: Path | None = None) -> RuntimeSettings:
@@ -113,6 +115,7 @@ class RuntimeSettings:
             or cls.naver_finance_api_base_url,
             naver_finance_user_agent=_env_first("NAVER_FINANCE_USER_AGENT")
             or cls.naver_finance_user_agent,
+            fred_api_key=_env_first("FRED_API_KEY"),
         )
 
     @property

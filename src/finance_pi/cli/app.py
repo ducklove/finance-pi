@@ -1,13 +1,20 @@
 from __future__ import annotations
 
 import importlib.util
+import csv
+import io
 import json
+import os
 import platform
 import re
+import shutil
+import subprocess
 import sys
 from contextlib import suppress
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from urllib.error import HTTPError, URLError
+from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 import polars as pl
@@ -20,7 +27,7 @@ from finance_pi.config import ProjectPaths, RuntimeSettings, diagnose_dotenv
 from finance_pi.docs_site import build_docs_site
 from finance_pi.factors import ParquetFactorContext, factor_registry
 from finance_pi.http import HttpJsonClient, SourceApiError
-from finance_pi.ingest import IngestOrchestrator
+from finance_pi.ingest import IngestOrchestrator, request_hash
 from finance_pi.reports.data_quality import build_data_quality_report
 from finance_pi.reports.fraud import build_fraud_report
 from finance_pi.sources.kis import (
@@ -44,15 +51,18 @@ from finance_pi.sources.opendart import (
     DartFinancialsBulkAdapter,
     OpenDartClient,
 )
+from finance_pi.sources.schemas import PRICE_SCHEMA
 from finance_pi.storage import CatalogBuilder, DataLakeLayout, dataset_registry
 from finance_pi.storage.parquet import ParquetDatasetWriter
 from finance_pi.transforms import (
     build_all,
     build_all_iter,
+    build_daily_market_caps,
     build_daily_prices_adj,
     build_financials_silver,
     build_fundamentals_pit,
     build_security_master,
+    build_silver_market_caps,
     build_silver_prices,
     build_universe_history,
 )
@@ -74,6 +84,347 @@ app.add_typer(reports_app, name="reports")
 app.add_typer(backtest_app, name="backtest")
 app.add_typer(docs_app, name="docs")
 app.add_typer(backfill_app, name="backfill")
+
+FRED_TIMEOUT_SECONDS = 10
+YAHOO_TIMEOUT_SECONDS = 15
+FRED_SERIES = {
+    "cpi": [
+        {
+            "series_id": "US_CPI_ALL",
+            "fred_id": "CPIAUCSL",
+            "country": "US",
+            "name": "US CPI All Urban Consumers",
+            "frequency": "M",
+            "index_base": "1982-84=100",
+        },
+        {
+            "series_id": "KOR_CPI_ALL",
+            "fred_id": "KORCPIALLMINMEI",
+            "country": "KR",
+            "name": "Korea CPI All Items",
+            "frequency": "M",
+            "index_base": "2015=100",
+        },
+    ],
+    "rates": [
+        {
+            "series_id": "US_FED_FUNDS",
+            "fred_id": "FEDFUNDS",
+            "country": "US",
+            "name": "Federal Funds Effective Rate",
+            "frequency": "M",
+            "tenor": "overnight",
+            "unit": "percent",
+        },
+        {
+            "series_id": "US_TREASURY_10Y",
+            "fred_id": "DGS10",
+            "country": "US",
+            "name": "US Treasury 10-Year Constant Maturity",
+            "frequency": "D",
+            "tenor": "10Y",
+            "unit": "percent",
+        },
+    ],
+}
+FRED_ECONOMIC_SERIES = [
+    {
+        "series_id": "CPILFESL",
+        "fred_id": "CPILFESL",
+        "country": "US",
+        "name": "US Core CPI",
+        "category": "inflation",
+        "frequency": "M",
+        "unit": "index",
+    },
+    {
+        "series_id": "PCEPI",
+        "fred_id": "PCEPI",
+        "country": "US",
+        "name": "US PCE Price Index",
+        "category": "inflation",
+        "frequency": "M",
+        "unit": "index",
+    },
+    {
+        "series_id": "PCEPILFE",
+        "fred_id": "PCEPILFE",
+        "country": "US",
+        "name": "US Core PCE Price Index",
+        "category": "inflation",
+        "frequency": "M",
+        "unit": "index",
+    },
+    {
+        "series_id": "PPIACO",
+        "fred_id": "PPIACO",
+        "country": "US",
+        "name": "US Producer Price Index: All Commodities",
+        "category": "inflation",
+        "frequency": "M",
+        "unit": "index",
+    },
+    {
+        "series_id": "UNRATE",
+        "fred_id": "UNRATE",
+        "country": "US",
+        "name": "US Unemployment Rate",
+        "category": "labor",
+        "frequency": "M",
+        "unit": "percent",
+    },
+    {
+        "series_id": "PAYEMS",
+        "fred_id": "PAYEMS",
+        "country": "US",
+        "name": "US Total Nonfarm Payrolls",
+        "category": "labor",
+        "frequency": "M",
+        "unit": "thousands",
+    },
+    {
+        "series_id": "GDP",
+        "fred_id": "GDP",
+        "country": "US",
+        "name": "US Gross Domestic Product",
+        "category": "growth",
+        "frequency": "Q",
+        "unit": "billions_usd_saar",
+    },
+    {
+        "series_id": "GDPC1",
+        "fred_id": "GDPC1",
+        "country": "US",
+        "name": "US Real Gross Domestic Product",
+        "category": "growth",
+        "frequency": "Q",
+        "unit": "billions_chained_2017_usd_saar",
+    },
+    {
+        "series_id": "INDPRO",
+        "fred_id": "INDPRO",
+        "country": "US",
+        "name": "US Industrial Production Index",
+        "category": "growth",
+        "frequency": "M",
+        "unit": "index",
+    },
+    {
+        "series_id": "RSAFS",
+        "fred_id": "RSAFS",
+        "country": "US",
+        "name": "US Advance Retail Sales",
+        "category": "consumption",
+        "frequency": "M",
+        "unit": "millions_usd",
+    },
+    {
+        "series_id": "M2SL",
+        "fred_id": "M2SL",
+        "country": "US",
+        "name": "US M2 Money Stock",
+        "category": "money",
+        "frequency": "M",
+        "unit": "billions_usd",
+    },
+    {
+        "series_id": "DGS2",
+        "fred_id": "DGS2",
+        "country": "US",
+        "name": "US Treasury 2-Year Constant Maturity",
+        "category": "rates",
+        "frequency": "D",
+        "unit": "percent",
+    },
+    {
+        "series_id": "DGS5",
+        "fred_id": "DGS5",
+        "country": "US",
+        "name": "US Treasury 5-Year Constant Maturity",
+        "category": "rates",
+        "frequency": "D",
+        "unit": "percent",
+    },
+    {
+        "series_id": "DGS30",
+        "fred_id": "DGS30",
+        "country": "US",
+        "name": "US Treasury 30-Year Constant Maturity",
+        "category": "rates",
+        "frequency": "D",
+        "unit": "percent",
+    },
+    {
+        "series_id": "T10Y2Y",
+        "fred_id": "T10Y2Y",
+        "country": "US",
+        "name": "US 10-Year Minus 2-Year Treasury Spread",
+        "category": "rates",
+        "frequency": "D",
+        "unit": "percentage_points",
+    },
+    {
+        "series_id": "T10Y3M",
+        "fred_id": "T10Y3M",
+        "country": "US",
+        "name": "US 10-Year Minus 3-Month Treasury Spread",
+        "category": "rates",
+        "frequency": "D",
+        "unit": "percentage_points",
+    },
+    {
+        "series_id": "SOFR",
+        "fred_id": "SOFR",
+        "country": "US",
+        "name": "Secured Overnight Financing Rate",
+        "category": "rates",
+        "frequency": "D",
+        "unit": "percent",
+    },
+    {
+        "series_id": "BAMLH0A0HYM2",
+        "fred_id": "BAMLH0A0HYM2",
+        "country": "US",
+        "name": "US High Yield Option-Adjusted Spread",
+        "category": "credit",
+        "frequency": "D",
+        "unit": "percent",
+    },
+    {
+        "series_id": "MORTGAGE30US",
+        "fred_id": "MORTGAGE30US",
+        "country": "US",
+        "name": "US 30-Year Fixed Mortgage Rate",
+        "category": "housing",
+        "frequency": "W",
+        "unit": "percent",
+    },
+    {
+        "series_id": "HOUST",
+        "fred_id": "HOUST",
+        "country": "US",
+        "name": "US Housing Starts",
+        "category": "housing",
+        "frequency": "M",
+        "unit": "thousands_saar",
+    },
+    {
+        "series_id": "UMCSENT",
+        "fred_id": "UMCSENT",
+        "country": "US",
+        "name": "University of Michigan Consumer Sentiment",
+        "category": "sentiment",
+        "frequency": "M",
+        "unit": "index",
+    },
+    {
+        "series_id": "DCOILWTICO",
+        "fred_id": "DCOILWTICO",
+        "country": "US",
+        "name": "WTI Crude Oil Price",
+        "category": "commodities",
+        "frequency": "D",
+        "unit": "usd_per_barrel",
+    },
+    {
+        "series_id": "VIXCLS",
+        "fred_id": "VIXCLS",
+        "country": "US",
+        "name": "CBOE Volatility Index: VIX",
+        "category": "risk",
+        "frequency": "D",
+        "unit": "index",
+    },
+    {
+        "series_id": "DTWEXBGS",
+        "fred_id": "DTWEXBGS",
+        "country": "US",
+        "name": "Nominal Broad US Dollar Index",
+        "category": "fx",
+        "frequency": "D",
+        "unit": "index",
+    },
+]
+YAHOO_INDEX_SERIES = [
+    {
+        "series_id": "KOSPI",
+        "symbol": "^KS11",
+        "country": "KR",
+        "name": "KOSPI Composite Index",
+        "category": "equity_index",
+        "currency": "KRW",
+    },
+    {
+        "series_id": "SNP500",
+        "symbol": "^GSPC",
+        "country": "US",
+        "name": "S&P 500 Index",
+        "category": "equity_index",
+        "currency": "USD",
+    },
+    {
+        "series_id": "NASDAQ",
+        "symbol": "^IXIC",
+        "country": "US",
+        "name": "NASDAQ Composite Index",
+        "category": "equity_index",
+        "currency": "USD",
+    },
+]
+YAHOO_RATE_SERIES = [
+    {
+        "series_id": "US_TREASURY_10Y_YAHOO",
+        "symbol": "^TNX",
+        "country": "US",
+        "name": "US Treasury 10-Year Yield",
+        "frequency": "D",
+        "tenor": "10Y",
+        "unit": "percent",
+        "scale": "1",
+    },
+    {
+        "series_id": "US_TREASURY_13W_YAHOO",
+        "symbol": "^IRX",
+        "country": "US",
+        "name": "US Treasury 13-Week Yield",
+        "frequency": "D",
+        "tenor": "13W",
+        "unit": "percent",
+        "scale": "1",
+    },
+]
+YAHOO_COMMODITY_SERIES = [
+    {
+        "series_id": "GOLD_USD_OZ",
+        "symbol": "GC=F",
+        "name": "Gold Futures",
+        "commodity": "gold",
+        "unit": "troy_oz",
+        "currency": "USD",
+    },
+    {
+        "series_id": "SILVER_USD_OZ",
+        "symbol": "SI=F",
+        "name": "Silver Futures",
+        "commodity": "silver",
+        "unit": "troy_oz",
+        "currency": "USD",
+    },
+]
+YAHOO_FX_SERIES = [
+    {
+        "series_id": "USD_KRW",
+        "symbol": "KRW=X",
+        "base_currency": "USD",
+        "quote_currency": "KRW",
+    },
+    {
+        "series_id": "USD_JPY",
+        "symbol": "JPY=X",
+        "base_currency": "USD",
+        "quote_currency": "JPY",
+    },
+]
 
 
 @app.command("doctor")
@@ -202,6 +553,30 @@ def check_admin(
         if "finance-pi Documentation" not in docs_html:
             raise typer.BadParameter("admin /docs/ responded but did not look like docs HTML")
         typer.echo("docs: OK")
+
+
+@app.command("admin-watchdog")
+def admin_watchdog(
+    url: str = typer.Option("http://127.0.0.1:8400", help="Admin base URL"),
+    unit: str = typer.Option("finance-pi-admin.service", help="systemd user unit to restart"),
+    timeout_seconds: float = typer.Option(5.0, min=0.5, help="Health check timeout"),
+    dry_run: bool = typer.Option(False, help="Only report the restart action"),
+) -> None:
+    """Restart the admin user service when the HTTP health check stops responding."""
+
+    base_url = url.rstrip("/")
+    health_url = f"{base_url}/api/health"
+    if _admin_health_ok(health_url, timeout_seconds):
+        typer.echo(f"admin healthy: {health_url}")
+        return
+
+    typer.echo(f"admin unhealthy: {health_url}")
+    command = ["systemctl", "--user", "restart", unit]
+    if dry_run:
+        typer.echo("would run: " + " ".join(command))
+        return
+    subprocess.run(command, check=True)
+    typer.echo(f"restarted: {unit}")
 
 
 @catalog_app.command("build")
@@ -458,10 +833,156 @@ def ingest_naver_summary(
     _print_results(IngestOrchestrator([adapter]).run(parsed, parsed))
 
 
+@ingest_app.command("marcap")
+def ingest_marcap(
+    start_year: int = typer.Option(1995, help="First marcap year to ingest"),
+    end_year: int = typer.Option(2025, help="Last marcap year to ingest"),
+    root: Path = typer.Option(Path("."), help="Workspace root"),
+    force: bool = typer.Option(False, help="Overwrite existing yearly marcap parquet files"),
+) -> None:
+    """Download FinanceData marcap yearly parquet files into Bronze."""
+
+    if start_year < 1995:
+        raise typer.BadParameter("marcap starts at 1995")
+    if end_year < start_year:
+        raise typer.BadParameter("end-year must be greater than or equal to start-year")
+
+    paths = ProjectPaths(root=root)
+    DataLakeLayout(paths.data_root).ensure_base_dirs()
+    base_url = "https://raw.githubusercontent.com/FinanceData/marcap/master/data"
+    for year in range(start_year, end_year + 1):
+        output = paths.data_root / "bronze" / "marcap" / f"year={year}" / "part.parquet"
+        if output.exists() and not force:
+            typer.echo(f"marcap {year}: skip existing {output}")
+            continue
+        output.parent.mkdir(parents=True, exist_ok=True)
+        url = f"{base_url}/marcap-{year}.parquet"
+        request = Request(url, headers={"User-Agent": "finance-pi/0.1"})
+        typer.echo(f"marcap {year}: downloading {url}")
+        with urlopen(request, timeout=120) as response, output.open("wb") as file:
+            shutil.copyfileobj(response, file)
+        typer.echo(f"marcap {year}: wrote {output}")
+
+
+@ingest_app.command("pykrx-market-caps")
+def ingest_pykrx_market_caps(
+    since: str = typer.Option(..., help="Start date as YYYY-MM-DD"),
+    until: str = typer.Option(..., help="End date as YYYY-MM-DD"),
+    root: Path = typer.Option(Path("."), help="Workspace root"),
+    markets: str = typer.Option("KOSPI,KOSDAQ", help="Comma-separated KOSPI,KOSDAQ"),
+    local_price_dates: bool = typer.Option(
+        True,
+        "--local-price-dates/--calendar-days",
+        help="Fetch only dates already present in silver.prices.",
+    ),
+    force: bool = typer.Option(False, help="Overwrite existing bronze KRX partitions"),
+) -> None:
+    """Fetch KRX market-cap rows through pykrx and write them as Bronze KRX source rows."""
+
+    paths = ProjectPaths(root=root)
+    RuntimeSettings.load(paths.root)
+    if not (os.getenv("KRX_ID") and os.getenv("KRX_PW")):
+        raise typer.BadParameter("KRX_ID and KRX_PW are required for pykrx KRX login")
+
+    from pykrx import stock  # noqa: PLC0415
+
+    layout = DataLakeLayout(paths.data_root)
+    layout.ensure_base_dirs()
+    writer = ParquetDatasetWriter()
+    start = _parse_report_date(since)
+    end = _parse_report_date(until)
+    selected_markets = _parse_markets(markets)
+    dates = (
+        _local_price_dates(paths.data_root, start, end)
+        if local_price_dates
+        else _calendar_dates(start, end)
+    )
+    for logical_date in dates:
+        path = layout.partition_path("bronze.krx_daily_raw", logical_date)
+        if path.exists() and not force:
+            typer.echo(f"pykrx {logical_date}: skip existing {path}")
+            continue
+        rows: list[dict[str, object]] = []
+        ymd = logical_date.strftime("%Y%m%d")
+        for market in selected_markets:
+            frame = stock.get_market_cap(ymd, market=market)
+            if frame.empty:
+                continue
+            frame = frame.reset_index(names="ticker")
+            for row in frame.to_dict("records"):
+                rows.append(
+                    {
+                        "date": logical_date,
+                        "ticker": str(row["ticker"]).zfill(6),
+                        "isin": None,
+                        "name": str(row["ticker"]).zfill(6),
+                        "market": market,
+                        "open": None,
+                        "high": None,
+                        "low": None,
+                        "close": _number_or_none(row.get("종가")),
+                        "volume": _number_or_none(row.get("거래량")),
+                        "trading_value": _number_or_none(row.get("거래대금")),
+                        "market_cap": _number_or_none(row.get("시가총액")),
+                        "listed_shares": _number_or_none(row.get("상장주식수")),
+                    }
+                )
+        if not rows:
+            typer.echo(f"pykrx {logical_date}: no rows")
+            continue
+        output = pl.DataFrame(rows).select(
+            [
+                pl.col(column).cast(dtype, strict=False).alias(column)
+                if column in rows[0]
+                else pl.lit(None, dtype=dtype).alias(column)
+                for column, dtype in PRICE_SCHEMA.items()
+            ]
+        )
+        writer.write(
+            output,
+            path,
+            mode="overwrite" if force else "fail",
+            source="pykrx",
+            request_hash=request_hash(
+                "pykrx",
+                "get_market_cap",
+                {"date": logical_date.isoformat(), "markets": selected_markets},
+            ),
+            include_ingest_metadata=True,
+        )
+        typer.echo(f"pykrx {logical_date}: rows={output.height} wrote {path}")
+
+
+@ingest_app.command("macro")
+def ingest_macro(
+    since: str = typer.Option(..., help="Start date as YYYY-MM-DD"),
+    until: str | None = typer.Option(None, help="End date as YYYY-MM-DD. Defaults to today"),
+    root: Path = typer.Option(Path("."), help="Workspace root"),
+) -> None:
+    """Fetch CPI, rates, indices, commodities, and FX macro tables."""
+
+    paths = ProjectPaths(root=root)
+    start = _parse_report_date(since)
+    end = _parse_report_date(until)
+    settings = RuntimeSettings.load(paths.root)
+    failures = _ingest_macro(paths, start, end, settings)
+    for failure in failures:
+        typer.echo(failure)
+    if failures:
+        raise typer.Exit(code=1)
+
+
 @build_app.command("all")
 def build_everything(root: Path = typer.Option(Path("."), help="Workspace root")) -> None:
     for summary in build_all_iter(ProjectPaths(root=root).data_root):
         _print_summary(summary)
+
+
+@build_app.command("market-caps")
+def build_cmd_market_caps(root: Path = typer.Option(Path("."), help="Workspace root")) -> None:
+    data_root = ProjectPaths(root=root).data_root
+    _print_summaries(build_silver_market_caps(data_root))
+    _print_summaries(build_daily_market_caps(data_root))
 
 
 @app.command("bootstrap")
@@ -841,13 +1362,18 @@ def run_daily(
     paths = ProjectPaths(root=root)
     settings = RuntimeSettings.load(paths.root)
     DataLakeLayout(paths.data_root).ensure_base_dirs()
+    failures: list[str] = []
     if ingest:
         failures = _run_daily_ingest(paths, settings, parsed_date)
         for failure in failures:
             typer.echo(failure)
         if strict and failures:
             raise typer.Exit(code=1)
-    summaries = _run_daily_builds(paths.data_root, include_fundamentals_pit)
+    summaries = _run_daily_builds(
+        paths.data_root,
+        include_fundamentals_pit,
+        _previous_weekday(parsed_date),
+    )
     created = CatalogBuilder(paths.data_root, paths.catalog_path).build()
 
     dq_path = paths.data_root / "reports" / "data_quality" / f"{parsed_date.isoformat()}.html"
@@ -863,6 +1389,18 @@ def run_daily(
     typer.echo(f"Views: {len(created)}")
     typer.echo(f"Data quality report: {dq_path}")
     typer.echo(f"Fraud report: {fraud_path}")
+    price_date = _previous_weekday(parsed_date)
+    if not failures or _gold_price_partition_exists(paths.data_root, price_date):
+        _write_daily_marker(
+            paths.data_root,
+            parsed_date,
+            {
+                "report_date": parsed_date.isoformat(),
+                "price_date": price_date.isoformat(),
+                "failures": failures,
+                "gold_price_partition": _gold_price_partition_exists(paths.data_root, price_date),
+            },
+        )
 
 
 @app.command("catchup")
@@ -892,6 +1430,9 @@ def catchup_daily(
     for report_day in dates:
         typer.echo(f"Catch-up daily: {report_day.isoformat()}")
         run_daily(paths.root, report_day.isoformat(), ingest, strict, include_fundamentals_pit)
+        if not _daily_complete(paths.data_root, report_day):
+            typer.echo(f"Catch-up stopped: {report_day.isoformat()} did not complete")
+            return
 
 
 def _parse_report_date(value: str | None) -> date:
@@ -1036,10 +1577,443 @@ def _run_daily_ingest(
             )
         except Exception as exc:  # noqa: BLE001
             failures.append(f"OpenDART financial ingest failed: {exc}")
+    macro_since = _macro_ingest_start(paths.data_root, report_date)
+    for failure in _ingest_macro(paths, macro_since, report_date, settings):
+        typer.echo(failure)
     return failures
 
 
-def _run_daily_builds(data_root: Path, include_fundamentals_pit: bool) -> list:
+def _ingest_macro(
+    paths: ProjectPaths,
+    since: date,
+    until: date,
+    settings: RuntimeSettings | None = None,
+) -> list[str]:
+    DataLakeLayout(paths.data_root).ensure_base_dirs()
+    if settings is None:
+        settings = RuntimeSettings.load(paths.root)
+    failures: list[str] = []
+    macro_frames: dict[str, list[pl.DataFrame]] = {
+        "cpi": [],
+        "rates": [],
+        "commodities": [],
+        "fx": [],
+        "indices": [],
+        "economic_indicators": [],
+    }
+
+    for table, series_list in FRED_SERIES.items():
+        for series in series_list:
+            try:
+                rows = _fetch_fred_rows(series, since, until, table, settings.fred_api_key)
+                if rows:
+                    macro_frames[table].append(pl.DataFrame(rows))
+            except Exception as exc:  # noqa: BLE001
+                failures.append(f"Macro {series['series_id']} ingest failed: {exc}")
+
+    for series in FRED_ECONOMIC_SERIES:
+        try:
+            rows = _fetch_fred_indicator_rows(series, since, until, settings.fred_api_key)
+            if rows:
+                macro_frames["economic_indicators"].append(pl.DataFrame(rows))
+        except Exception as exc:  # noqa: BLE001
+            failures.append(f"Macro {series['series_id']} ingest failed: {exc}")
+
+    for series in YAHOO_INDEX_SERIES:
+        try:
+            rows = _fetch_yahoo_index_rows(series, since, until)
+            if rows:
+                macro_frames["indices"].append(pl.DataFrame(rows))
+        except Exception as exc:  # noqa: BLE001
+            failures.append(f"Macro {series['series_id']} ingest failed: {exc}")
+    for series in YAHOO_RATE_SERIES:
+        try:
+            rows = _fetch_yahoo_rate_rows(series, since, until)
+            if rows:
+                macro_frames["rates"].append(pl.DataFrame(rows))
+        except Exception as exc:  # noqa: BLE001
+            failures.append(f"Macro {series['series_id']} ingest failed: {exc}")
+    for series in YAHOO_COMMODITY_SERIES:
+        try:
+            rows = _fetch_yahoo_commodity_rows(series, since, until)
+            if rows:
+                macro_frames["commodities"].append(pl.DataFrame(rows))
+        except Exception as exc:  # noqa: BLE001
+            failures.append(f"Macro {series['series_id']} ingest failed: {exc}")
+    for series in YAHOO_FX_SERIES:
+        try:
+            rows = _fetch_yahoo_fx_rows(series, since, until)
+            if rows:
+                macro_frames["fx"].append(pl.DataFrame(rows))
+        except Exception as exc:  # noqa: BLE001
+            failures.append(f"Macro {series['series_id']} ingest failed: {exc}")
+
+    for table, frames in macro_frames.items():
+        if not frames:
+            continue
+        frame = pl.concat(frames, how="diagonal_relaxed")
+        _write_macro_table(paths.data_root, table, frame)
+        typer.echo(f"Macro {table}: rows={frame.height}")
+    return failures
+
+
+def _fetch_fred_rows(
+    series: dict[str, str],
+    since: date,
+    until: date,
+    table: str,
+    api_key: str | None = None,
+) -> list[dict[str, object]]:
+    values = _fetch_fred_values(series["fred_id"], since, until, api_key)
+    if table == "cpi":
+        return _cpi_rows(series, values)
+    if table == "rates":
+        return [
+            {
+                "date": logical_date,
+                "country": series["country"],
+                "series_id": series["series_id"],
+                "name": series["name"],
+                "frequency": series["frequency"],
+                "tenor": series["tenor"],
+                "value": value,
+                "unit": series["unit"],
+                "source": "fred",
+                "updated_at": datetime.now(UTC),
+            }
+            for logical_date, value in values
+        ]
+    if table == "commodities":
+        return [
+            {
+                "date": logical_date,
+                "series_id": series["series_id"],
+                "name": series["name"],
+                "commodity": series["commodity"],
+                "value": value,
+                "unit": series["unit"],
+                "currency": series["currency"],
+                "source": "fred",
+                "updated_at": datetime.now(UTC),
+            }
+            for logical_date, value in values
+        ]
+    if table == "fx":
+        return [
+            {
+                "date": logical_date,
+                "series_id": series["series_id"],
+                "base_currency": series["base_currency"],
+                "quote_currency": series["quote_currency"],
+                "value": value,
+                "source": "fred",
+                "updated_at": datetime.now(UTC),
+            }
+            for logical_date, value in values
+        ]
+    raise ValueError(f"unsupported FRED table: {table}")
+
+
+def _fetch_fred_values(
+    fred_id: str,
+    since: date,
+    until: date,
+    api_key: str | None = None,
+) -> list[tuple[date, float]]:
+    if api_key:
+        url = (
+            "https://api.stlouisfed.org/fred/series/observations"
+            f"?series_id={fred_id}"
+            f"&api_key={api_key}"
+            "&file_type=json"
+            f"&observation_start={since.isoformat()}"
+            f"&observation_end={until.isoformat()}"
+        )
+        request = Request(url, headers={"User-Agent": "finance-pi/0.1"})
+        try:
+            with urlopen(request, timeout=FRED_TIMEOUT_SECONDS) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            observations = payload.get("observations")
+            if not isinstance(observations, list):
+                raise ValueError("FRED observations response is malformed")
+            values = []
+            for row in observations:
+                raw_date = row.get("date")
+                raw_value = row.get("value")
+                if not raw_date or not raw_value or raw_value == ".":
+                    continue
+                values.append((date.fromisoformat(raw_date), float(raw_value)))
+            return values
+        except (HTTPError, URLError, TimeoutError):
+            return _fetch_fred_csv_values(fred_id, since, until)
+
+    return _fetch_fred_csv_values(fred_id, since, until)
+
+
+def _fetch_fred_csv_values(fred_id: str, since: date, until: date) -> list[tuple[date, float]]:
+    url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={fred_id}"
+    request = Request(url, headers={"User-Agent": "finance-pi/0.1"})
+    with urlopen(request, timeout=FRED_TIMEOUT_SECONDS) as response:
+        text = response.read().decode("utf-8-sig")
+    reader = csv.DictReader(io.StringIO(text))
+    values = []
+    for row in reader:
+        raw_date = row.get("observation_date") or row.get("DATE")
+        raw_value = row.get(fred_id)
+        if not raw_date or not raw_value or raw_value == ".":
+            continue
+        logical_date = date.fromisoformat(raw_date)
+        if logical_date < since or logical_date > until:
+            continue
+        values.append((logical_date, float(raw_value)))
+    return values
+
+
+def _fetch_fred_indicator_rows(
+    series: dict[str, str],
+    since: date,
+    until: date,
+    api_key: str | None = None,
+) -> list[dict[str, object]]:
+    return [
+        {
+            "date": logical_date,
+            "country": series["country"],
+            "series_id": series["series_id"],
+            "name": series["name"],
+            "category": series["category"],
+            "frequency": series["frequency"],
+            "value": value,
+            "unit": series["unit"],
+            "source": "fred",
+            "updated_at": datetime.now(UTC),
+        }
+        for logical_date, value in _fetch_fred_values(series["fred_id"], since, until, api_key)
+    ]
+
+
+def _cpi_rows(series: dict[str, str], values: list[tuple[date, float]]) -> list[dict[str, object]]:
+    by_date = {logical_date: value for logical_date, value in values}
+    rows: list[dict[str, object]] = []
+    for logical_date, value in values:
+        previous_month = _add_months(logical_date, -1)
+        previous_year = _add_months(logical_date, -12)
+        rows.append(
+            {
+                "date": logical_date,
+                "country": series["country"],
+                "series_id": series["series_id"],
+                "name": series["name"],
+                "frequency": series["frequency"],
+                "value": value,
+                "index_base": series["index_base"],
+                "yoy_pct": _pct_change(value, by_date.get(previous_year)),
+                "mom_pct": _pct_change(value, by_date.get(previous_month)),
+                "source": "fred",
+                "updated_at": datetime.now(UTC),
+            }
+        )
+    return rows
+
+
+def _fetch_yahoo_index_rows(
+    series: dict[str, str],
+    since: date,
+    until: date,
+) -> list[dict[str, object]]:
+    points = _fetch_yahoo_daily_closes(series["symbol"], since, until)
+    rows = []
+    previous_close: float | None = None
+    for logical_date, close in points:
+        rows.append(
+            {
+                "date": logical_date,
+                "country": series["country"],
+                "series_id": series["series_id"],
+                "name": series["name"],
+                "frequency": "D",
+                "category": series["category"],
+                "value": close,
+                "currency": series["currency"],
+                "return_1d": _pct_change(close, previous_close),
+                "return_1m": None,
+                "source": "yahoo",
+                "updated_at": datetime.now(UTC),
+            }
+        )
+        previous_close = close
+    return rows
+
+
+def _fetch_yahoo_commodity_rows(
+    series: dict[str, str],
+    since: date,
+    until: date,
+) -> list[dict[str, object]]:
+    return [
+        {
+            "date": logical_date,
+            "series_id": series["series_id"],
+            "name": series["name"],
+            "commodity": series["commodity"],
+            "value": close,
+            "unit": series["unit"],
+            "currency": series["currency"],
+            "source": "yahoo",
+            "updated_at": datetime.now(UTC),
+        }
+        for logical_date, close in _fetch_yahoo_daily_closes(series["symbol"], since, until)
+    ]
+
+
+def _fetch_yahoo_rate_rows(
+    series: dict[str, str],
+    since: date,
+    until: date,
+) -> list[dict[str, object]]:
+    scale = float(series.get("scale", "1"))
+    return [
+        {
+            "date": logical_date,
+            "country": series["country"],
+            "series_id": series["series_id"],
+            "name": series["name"],
+            "frequency": series["frequency"],
+            "tenor": series["tenor"],
+            "value": close * scale,
+            "unit": series["unit"],
+            "source": "yahoo",
+            "updated_at": datetime.now(UTC),
+        }
+        for logical_date, close in _fetch_yahoo_daily_closes(series["symbol"], since, until)
+    ]
+
+
+def _fetch_yahoo_fx_rows(
+    series: dict[str, str],
+    since: date,
+    until: date,
+) -> list[dict[str, object]]:
+    return [
+        {
+            "date": logical_date,
+            "series_id": series["series_id"],
+            "base_currency": series["base_currency"],
+            "quote_currency": series["quote_currency"],
+            "value": close,
+            "source": "yahoo",
+            "updated_at": datetime.now(UTC),
+        }
+        for logical_date, close in _fetch_yahoo_daily_closes(series["symbol"], since, until)
+    ]
+
+
+def _fetch_yahoo_daily_closes(
+    symbol_value: str,
+    since: date,
+    until: date,
+) -> list[tuple[date, float]]:
+    period1 = int(datetime(since.year, since.month, since.day, tzinfo=UTC).timestamp())
+    end_exclusive = until + timedelta(days=1)
+    period2 = int(
+        datetime(end_exclusive.year, end_exclusive.month, end_exclusive.day, tzinfo=UTC).timestamp()
+    )
+    symbol = quote(symbol_value, safe="")
+    url = (
+        f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+        f"?period1={period1}&period2={period2}&interval=1d"
+    )
+    request = Request(url, headers={"User-Agent": "finance-pi/0.1"})
+    with urlopen(request, timeout=YAHOO_TIMEOUT_SECONDS) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    result = payload["chart"]["result"][0]
+    timestamps = result.get("timestamp") or []
+    closes = result["indicators"]["quote"][0].get("close") or []
+    points = []
+    for timestamp, close in zip(timestamps, closes, strict=False):
+        if close is None:
+            continue
+        logical_date = datetime.fromtimestamp(timestamp, tz=UTC).date()
+        points.append((logical_date, float(close)))
+    return points
+
+
+def _write_macro_table(data_root: Path, table: str, frame: pl.DataFrame) -> Path:
+    layout = DataLakeLayout(data_root)
+    path = layout.singleton_path(f"macro.{table}")
+    existing = pl.read_parquet(path) if path.exists() else None
+    if existing is not None and not existing.is_empty():
+        incoming_ranges = (
+            frame.group_by("series_id")
+            .agg(pl.col("date").min().alias("min_date"), pl.col("date").max().alias("max_date"))
+            .to_dicts()
+        )
+        for row in incoming_ranges:
+            existing = existing.filter(
+                ~(
+                    (pl.col("series_id") == row["series_id"])
+                    & (pl.col("date") >= row["min_date"])
+                    & (pl.col("date") <= row["max_date"])
+                )
+            )
+        frame = pl.concat([existing, frame], how="diagonal_relaxed")
+    frame = frame.sort(["date", "series_id"]).unique(subset=["date", "series_id"], keep="last")
+    return ParquetDatasetWriter().write(frame, path, mode="overwrite")
+
+
+def _macro_ingest_start(data_root: Path, report_date: date) -> date:
+    tables = ("cpi", "rates", "indices", "commodities", "fx", "economic_indicators")
+    latest_values: list[date] = []
+    for table in tables:
+        path = data_root / "macro" / table / "part.parquet"
+        if not path.exists():
+            return date(1990, 1, 1)
+        frame = pl.read_parquet(path, columns=["date"])
+        if frame.is_empty():
+            return date(1990, 1, 1)
+        latest_values.append(frame.select(pl.col("date").max()).item())
+    if not latest_values:
+        return date(1990, 1, 1)
+    # Re-read a trailing window so revised macro releases and CPI YoY/MoM remain correct.
+    return min(latest_values) - timedelta(days=450)
+
+
+def _pct_change(value: float, previous: float | None) -> float | None:
+    if previous in (None, 0):
+        return None
+    return (value / previous - 1.0) * 100.0
+
+
+def _add_months(value: date, months: int) -> date:
+    month_index = value.year * 12 + value.month - 1 + months
+    year = month_index // 12
+    month = month_index % 12 + 1
+    return date(year, month, min(value.day, _last_day_of_month(year, month)))
+
+
+def _last_day_of_month(year: int, month: int) -> int:
+    if month == 12:
+        return 31
+    return (date(year, month + 1, 1) - timedelta(days=1)).day
+
+
+def _run_daily_builds(data_root: Path, include_fundamentals_pit: bool, price_date: date) -> list:
+    summaries = []
+    price_dates = (price_date,)
+    for builder in [
+        build_silver_prices,
+        build_security_master,
+        build_universe_history,
+        build_daily_prices_adj,
+    ]:
+        summaries.extend(builder(data_root, price_dates))
+    summaries.extend(build_financials_silver(data_root))
+    if include_fundamentals_pit:
+        summaries.extend(build_fundamentals_pit(data_root))
+    return summaries
+
+
+def _run_full_builds(data_root: Path, include_fundamentals_pit: bool) -> list:
     builders = [
         build_silver_prices,
         build_security_master,
@@ -1148,7 +2122,7 @@ def _run_yearly_backfill(
         else:
             failures.append("OpenDART financial backfill skipped: OPENDART_API_KEY missing")
 
-    summaries = _run_daily_builds(paths.data_root, include_fundamentals_pit)
+    summaries = _run_full_builds(paths.data_root, include_fundamentals_pit)
     for summary in summaries:
         typer.echo(f"Build: {summary.dataset} rows={summary.rows} files={summary.files}")
     created = CatalogBuilder(paths.data_root, paths.catalog_path).build()
@@ -1186,6 +2160,30 @@ def _write_backfill_marker(data_root: Path, year: int, payload: dict[str, object
             ensure_ascii=False,
             indent=2,
         ),
+        encoding="utf-8",
+    )
+    return marker
+
+
+def _daily_marker_path(data_root: Path, logical_date: date) -> Path:
+    return data_root / "_state" / "daily" / f"{logical_date.isoformat()}.json"
+
+
+def _write_daily_marker(data_root: Path, logical_date: date, payload: dict[str, object]) -> Path:
+    marker = _daily_marker_path(data_root, logical_date)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(
+        json.dumps(
+            {
+                "status": "complete",
+                "completed_at": datetime.now(UTC).isoformat(),
+                **payload,
+            },
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
         encoding="utf-8",
     )
     return marker
@@ -1277,6 +2275,9 @@ def _count_parquet_rows(files: list[Path]) -> int:
 def _catchup_dates(data_root: Path, since: date | None, until: date) -> tuple[date, ...]:
     if since is None:
         latest = _latest_gold_price_date(data_root)
+        latest_marker = _latest_daily_marker_date(data_root)
+        latest_values = [value for value in (latest, latest_marker) if value is not None]
+        latest = max(latest_values) if latest_values else None
         if latest is None:
             raise typer.BadParameter("No gold price data found. Pass --since explicitly.")
         since = latest + timedelta(days=1)
@@ -1294,6 +2295,26 @@ def _latest_gold_price_date(data_root: Path) -> date | None:
             with suppress(ValueError):
                 values.append(date.fromisoformat(part.removeprefix("dt=")))
     return max(values) if values else None
+
+
+def _latest_daily_marker_date(data_root: Path) -> date | None:
+    values: list[date] = []
+    for path in data_root.glob("_state/daily/*.json"):
+        with suppress(ValueError):
+            values.append(date.fromisoformat(path.stem))
+    return max(values) if values else None
+
+
+def _gold_price_partition_exists(data_root: Path, logical_date: date) -> bool:
+    return (
+        data_root / "gold" / "daily_prices_adj" / f"dt={logical_date.isoformat()}" / "part.parquet"
+    ).exists()
+
+
+def _daily_complete(data_root: Path, logical_date: date) -> bool:
+    return _gold_price_partition_exists(data_root, logical_date) or _daily_marker_path(
+        data_root, logical_date
+    ).exists()
 
 
 def _dart_financial_requests(
@@ -1465,6 +2486,41 @@ def _parse_markets(value: str) -> tuple[str, ...]:
     return markets
 
 
+def _local_price_dates(data_root: Path, start: date, end: date) -> list[date]:
+    dates: list[date] = []
+    for path in data_root.glob("silver/prices/dt=*/part.parquet"):
+        for part in path.parts:
+            if part.startswith("dt="):
+                with suppress(ValueError):
+                    logical_date = date.fromisoformat(part.removeprefix("dt="))
+                    if start <= logical_date <= end:
+                        dates.append(logical_date)
+    return sorted(set(dates))
+
+
+def _calendar_dates(start: date, end: date) -> list[date]:
+    dates: list[date] = []
+    current = start
+    while current <= end:
+        if current.weekday() < 5:
+            dates.append(current)
+        current += timedelta(days=1)
+    return dates
+
+
+def _number_or_none(value: object) -> int | None:
+    if value is None:
+        return None
+    try:
+        if isinstance(value, str):
+            value = value.replace(",", "").strip()
+            if not value:
+                return None
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
 def _parse_price_source(value: str) -> str:
     source = value.strip().lower()
     if source not in {"naver", "kis", "both"}:
@@ -1556,6 +2612,18 @@ def _http_get_text(url: str, token: str | None = None) -> str:
             return response.read().decode("utf-8")
     except Exception as exc:  # noqa: BLE001
         raise typer.BadParameter(f"admin is not reachable at {url}: {exc}") from exc
+
+
+def _admin_health_ok(url: str, timeout_seconds: float) -> bool:
+    request = Request(url)
+    try:
+        with urlopen(request, timeout=timeout_seconds) as response:
+            if response.status != 200:
+                return False
+            payload = json.loads(response.read().decode("utf-8"))
+    except Exception:  # noqa: BLE001
+        return False
+    return isinstance(payload, dict) and payload.get("status") == "ok"
 
 
 def _kis_error_message(exc: Exception) -> str:

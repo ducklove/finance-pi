@@ -17,18 +17,27 @@ class DataLakeLayout:
             "bronze/kis_daily",
             "bronze/naver_daily",
             "bronze/naver_summary",
+            "bronze/marcap",
             "bronze/dart_filings",
             "bronze/dart_financials",
             "bronze/dart_company",
             "bronze/pre2010",
             "silver/prices",
+            "silver/market_caps",
             "silver/financials",
             "silver/filings",
             "silver/corporate_actions",
             "silver/security_identity",
             "gold/daily_prices_adj",
+            "gold/daily_market_caps",
             "gold/fundamentals_pit",
             "gold/universe_history",
+            "macro/cpi",
+            "macro/rates",
+            "macro/indices",
+            "macro/commodities",
+            "macro/fx",
+            "macro/economic_indicators",
             "catalog",
             "_cache",
             "reports/data_quality",
@@ -70,6 +79,8 @@ class DataLakeLayout:
                 )
             case "silver.prices":
                 return self.root / "silver" / "prices" / f"dt={dt}" / "part.parquet"
+            case "silver.market_caps":
+                return self.root / "silver" / "market_caps" / f"dt={dt}" / "part.parquet"
             case "silver.filings":
                 return self.root / "silver" / "filings" / f"dt={dt}" / "part.parquet"
             case "silver.financials":
@@ -84,6 +95,8 @@ class DataLakeLayout:
                 return self.root / "silver" / "corporate_actions" / f"dt={dt}" / "part.parquet"
             case "gold.daily_prices_adj":
                 return self.root / "gold" / "daily_prices_adj" / f"dt={dt}" / "part.parquet"
+            case "gold.daily_market_caps":
+                return self.root / "gold" / "daily_market_caps" / f"dt={dt}" / "part.parquet"
             case "gold.fundamentals_pit":
                 return self.root / "gold" / "fundamentals_pit" / f"dt={dt}" / "part.parquet"
             case "gold.universe_history":
@@ -97,5 +110,17 @@ class DataLakeLayout:
                 return self.root / "silver" / "security_identity" / "part.parquet"
             case "gold.security_master":
                 return self.root / "gold" / "security_master.parquet"
+            case "macro.cpi":
+                return self.root / "macro" / "cpi" / "part.parquet"
+            case "macro.rates":
+                return self.root / "macro" / "rates" / "part.parquet"
+            case "macro.indices":
+                return self.root / "macro" / "indices" / "part.parquet"
+            case "macro.commodities":
+                return self.root / "macro" / "commodities" / "part.parquet"
+            case "macro.fx":
+                return self.root / "macro" / "fx" / "part.parquet"
+            case "macro.economic_indicators":
+                return self.root / "macro" / "economic_indicators" / "part.parquet"
             case _:
                 raise ValueError(f"{dataset} is not a singleton dataset")

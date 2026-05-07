@@ -90,7 +90,9 @@ def build_data_quality_report(data_root: Path, report_date: date) -> DataQuality
         )
     )
 
-    prices = _read_optional(data_root / "silver/prices/dt=*/part.parquet")
+    prices = _read_optional(
+        data_root / "silver/prices" / f"dt={report_date.isoformat()}" / "part.parquet"
+    )
     if prices is None or prices.is_empty():
         checks.append(ReportCheck("silver_prices", "WARN", "No silver price rows yet."))
         return DataQualityReport(report_date, tuple(checks))
@@ -104,8 +106,9 @@ def build_data_quality_report(data_root: Path, report_date: date) -> DataQuality
         )
     )
 
+    jump_prices = _with_previous_prices(data_root, prices, report_date)
     jumps = (
-        prices.sort(["security_id", "date"])
+        jump_prices.sort(["security_id", "date"])
         .with_columns(pl.col("close").pct_change().over("security_id").alias("return_1d"))
         .filter((pl.col("date") == report_date) & (pl.col("return_1d").abs() > 0.30))
     )
@@ -147,10 +150,42 @@ def _krx_kis_mismatch(prices: pl.DataFrame, report_date: date) -> int | None:
     )
     if day.filter(pl.col("price_source") == "kis").is_empty():
         return None
-    pivot = day.pivot(index="ticker", on="price_source", values="close", aggregate_function="first")
+    pivot = day.pivot(
+        index="ticker",
+        on="price_source",
+        values="close",
+        aggregate_function="first",
+    )
     if "krx" not in pivot.columns or "kis" not in pivot.columns:
         return None
     return pivot.filter(((pl.col("krx") - pl.col("kis")).abs() / pl.col("krx")) > 0.001).height
+
+
+def _with_previous_prices(data_root: Path, prices: pl.DataFrame, report_date: date) -> pl.DataFrame:
+    previous = _previous_price_frame(data_root, report_date)
+    if previous is None or previous.is_empty():
+        return prices
+    return pl.concat([previous.select(prices.columns), prices], how="diagonal_relaxed")
+
+
+def _previous_price_frame(data_root: Path, report_date: date) -> pl.DataFrame | None:
+    from glob import glob
+
+    candidates: list[tuple[date, Path]] = []
+    for name in glob((data_root / "silver/prices/dt=*/part.parquet").as_posix()):
+        path = Path(name)
+        for part in path.parts:
+            if part.startswith("dt="):
+                try:
+                    logical_date = date.fromisoformat(part.removeprefix("dt="))
+                except ValueError:
+                    continue
+                if logical_date < report_date:
+                    candidates.append((logical_date, path))
+    if not candidates:
+        return None
+    _, path = max(candidates, key=lambda item: item[0])
+    return pl.read_parquet(path, hive_partitioning=True)
 
 
 def _read_optional(pattern: Path) -> pl.DataFrame | None:

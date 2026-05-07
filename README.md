@@ -43,6 +43,7 @@ python -m finance_pi.cli.app ingest kis --ticker 005930 --since 2026-04-01 --unt
 
 # Deterministic transforms
 python -m finance_pi.cli.app build all --root .
+python -m finance_pi.cli.app build market-caps --root .
 python -m finance_pi.cli.app catalog build --root .
 
 # Research outputs
@@ -153,6 +154,34 @@ python -m finance_pi.cli.app docs build --root .
 
 The generated site is written to `data/docs_site/` and is served by the admin at
 `/docs/`.
+
+## Data Access
+
+Build the DuckDB catalog after ingest/build jobs:
+
+```bash
+python -m finance_pi.cli.app catalog build --root .
+```
+
+The catalog exposes medallion-layer views such as `silver.prices`,
+`gold.daily_prices_adj`, and `gold.daily_market_caps`. It also publishes
+analysis-friendly aliases:
+
+- `analytics.daily_prices`
+- `analytics.daily_market_caps`
+- `analytics.universe`
+- `analytics.securities`
+- `metadata.datasets`
+
+Example:
+
+```sql
+SELECT date, ticker, name, market_cap
+FROM analytics.daily_market_caps
+WHERE market = 'KOSPI'
+ORDER BY date DESC, market_cap DESC
+LIMIT 20;
+```
 
 ## Current Scope
 
