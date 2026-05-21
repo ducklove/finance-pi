@@ -9,8 +9,9 @@ import subprocess
 import sys
 import threading
 import time
+from copy import deepcopy
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from glob import glob
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -1163,7 +1164,9 @@ class AdminJob:
 
 
 class AdminState:
-    overview_cache_seconds = 10.0
+    overview_cache_seconds = 120.0
+    price_cache_seconds = 60.0
+    price_cache_max_entries = 512
 
     def __init__(self, root: Path, token: str | None = None) -> None:
         self.paths = ProjectPaths(root=root)
@@ -1171,6 +1174,10 @@ class AdminState:
         self.jobs: dict[str, AdminJob] = {}
         self.lock = threading.Lock()
         self._overview_cache: tuple[float, dict[str, Any]] | None = None
+        self._price_cache: dict[
+            tuple[Any, ...],
+            tuple[float, dict[str, list[dict[str, Any]]]],
+        ] = {}
         self._price_query_slots = threading.BoundedSemaphore(_admin_max_price_queries())
 
     def overview(self) -> dict[str, Any]:
@@ -1198,7 +1205,7 @@ class AdminState:
             "backtests": _backtest_runs(data_root),
             "backfill": _backfill_overview(data_root),
             "jobs": self.job_list(),
-            "max_price_date": _latest_partition_for(data_root / "gold/daily_prices_adj/dt=*/part.parquet"),
+            "max_price_date": _latest_price_date_from_datasets(datasets),
         }
         with self.lock:
             self._overview_cache = (now, overview)
@@ -1339,12 +1346,27 @@ class AdminState:
         until: date,
         fields: tuple[str, ...],
     ) -> dict[str, list[dict[str, Any]]]:
+        cache_key = (tuple(tickers), since, until, fields)
+        now = time.monotonic()
+        with self.lock:
+            cached_item = self._price_cache.get(cache_key)
+            if cached_item is not None:
+                cached_at, cached = cached_item
+                if now - cached_at < self.price_cache_seconds:
+                    return deepcopy(cached)
+
         if not self._price_query_slots.acquire(blocking=False):
             raise AdminServiceBusy("price query capacity exhausted")
         try:
-            return _query_daily_prices_batch(self.paths, tickers, since, until, fields)
+            result = _query_daily_prices_batch(self.paths, tickers, since, until, fields)
         finally:
             self._price_query_slots.release()
+        with self.lock:
+            self._price_cache[cache_key] = (time.monotonic(), deepcopy(result))
+            if len(self._price_cache) > self.price_cache_max_entries:
+                oldest_key = min(self._price_cache, key=lambda key: self._price_cache[key][0])
+                self._price_cache.pop(oldest_key, None)
+        return result
 
     def _run_fundamental_query(
         self,
@@ -2063,6 +2085,12 @@ def _query_daily_prices_batch(
         f"{source_column} AS {field_name}"
         for field_name, source_column in _daily_price_field_columns(fields)
     )
+    price_files = _daily_price_partition_files(paths.data_root, since, until)
+    if price_files:
+        rows = _query_daily_price_partition_files(price_files, tickers, since, until, fields)
+        _append_daily_price_rows(prices, rows, fields)
+        return prices
+
     if paths.catalog_path.exists():
         with duckdb.connect(str(paths.catalog_path), read_only=True) as conn:
             rows = conn.execute(
@@ -2124,6 +2152,49 @@ def _query_daily_prices_batch(
         rows = conn.execute(sql, params).fetchall()
     _append_daily_price_rows(prices, rows, fields)
     return prices
+
+
+def _daily_price_partition_files(data_root: Path, since: date, until: date) -> list[Path]:
+    files: list[Path] = []
+    current = since
+    while current <= until:
+        path = data_root / "gold" / "daily_prices_adj" / f"dt={current.isoformat()}" / "part.parquet"
+        if path.exists():
+            files.append(path)
+        current += timedelta(days=1)
+    return files
+
+
+def _query_daily_price_partition_files(
+    price_files: list[Path],
+    tickers: list[str],
+    since: date,
+    until: date,
+    fields: tuple[str, ...],
+) -> list[tuple[Any, ...]]:
+    security_ids = [f"S{ticker}" for ticker in tickers]
+    frame = (
+        pl.scan_parquet(
+            [path.as_posix() for path in price_files],
+            hive_partitioning=True,
+        )
+        .filter(
+            pl.col("security_id").is_in(security_ids)
+            & (pl.col("date").cast(pl.Date, strict=False) >= since)
+            & (pl.col("date").cast(pl.Date, strict=False) <= until)
+        )
+        .select(
+            pl.col("security_id").str.replace(r"^S", "").alias("ticker"),
+            pl.col("date"),
+            *[
+                pl.col(source_column).alias(field_name)
+                for field_name, source_column in _daily_price_field_columns(fields)
+            ],
+        )
+        .sort("ticker", "date")
+        .collect()
+    )
+    return list(frame.iter_rows())
 
 
 def _daily_price_field_columns(fields: tuple[str, ...]) -> list[tuple[str, str]]:
@@ -2634,8 +2705,9 @@ def _safe_float(value: Any, default: str) -> str:
 
 
 def _dataset_stat(data_root: Path, name: str, spec: Any) -> dict[str, Any]:
-    files = [Path(file) for file in glob(spec.glob_path(data_root).as_posix())]
-    size = sum(file.stat().st_size for file in files if file.exists())
+    file_stats = _dataset_file_stats(data_root, spec)
+    files = [path for path, _size in file_stats]
+    size = sum(file_size for _path, file_size in file_stats)
     rows = _row_count(files, spec.hive_partitioning) if files and _scan_parquet_enabled() else None
     latest = _latest_partition(files)
     coverage = _coverage_for(files, spec.hive_partitioning) if files else {}
@@ -2649,6 +2721,65 @@ def _dataset_stat(data_root: Path, name: str, spec: Any) -> dict[str, Any]:
         **coverage,
         "status": "ready" if files else "empty",
     }
+
+
+def _latest_price_date_from_datasets(datasets: list[dict[str, Any]]) -> str | None:
+    dataset = next((item for item in datasets if item["name"] == "gold.daily_prices_adj"), None)
+    latest = dataset.get("latest_partition") if dataset else None
+    if not isinstance(latest, str) or "=" not in latest:
+        return None
+    return latest.split("=", maxsplit=1)[1]
+
+
+def _dataset_file_stats(data_root: Path, spec: Any) -> list[tuple[Path, int]]:
+    relative_glob = getattr(spec, "relative_glob", "")
+    files = _partitioned_part_file_stats(data_root, relative_glob)
+    if files is not None:
+        return files
+    result: list[tuple[Path, int]] = []
+    for file in glob(spec.glob_path(data_root).as_posix()):
+        path = Path(file)
+        try:
+            result.append((path, path.stat().st_size))
+        except OSError:
+            continue
+    return result
+
+
+def _partitioned_part_file_stats(data_root: Path, relative_glob: str) -> list[tuple[Path, int]] | None:
+    parts = relative_glob.split("/")
+    if not parts or parts[-1] != "part.parquet" or not any("*" in part for part in parts):
+        return None
+
+    results: list[tuple[Path, int]] = []
+
+    def visit(directory: Path, index: int) -> None:
+        if index == len(parts) - 1:
+            path = directory / parts[index]
+            try:
+                results.append((path, path.stat().st_size))
+            except OSError:
+                pass
+            return
+
+        part = parts[index]
+        if "*" not in part:
+            visit(directory / part, index + 1)
+            return
+
+        prefix, suffix = part.split("*", maxsplit=1)
+        try:
+            entries = list(os.scandir(directory))
+        except OSError:
+            return
+        for entry in entries:
+            if not entry.is_dir(follow_symlinks=False):
+                continue
+            if entry.name.startswith(prefix) and entry.name.endswith(suffix):
+                visit(Path(entry.path), index + 1)
+
+    visit(data_root, 0)
+    return results
 
 
 def _coverage_for(files: list[Path], hive_partitioning: bool) -> dict[str, str | None]:
@@ -2727,10 +2858,11 @@ def _backfill_overview(
     end_year: int = 1990,
 ) -> dict[str, Any]:
     years = tuple(range(max(start_year, end_year), min(start_year, end_year) - 1, -1))
-    price_files = [
-        Path(file)
-        for file in glob((data_root / "gold/daily_prices_adj/dt=*/part.parquet").as_posix())
-    ]
+    price_file_stats = _partitioned_part_file_stats(
+        data_root,
+        "gold/daily_prices_adj/dt=*/part.parquet",
+    )
+    price_files = [path for path, _size in price_file_stats or []]
     dates_by_year: dict[int, list[str]] = {year: [] for year in years}
     for file in price_files:
         partition_date = _partition_date(file, "dt")
