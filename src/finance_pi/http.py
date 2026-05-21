@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import threading
+from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
@@ -20,6 +21,13 @@ class HttpJsonClient:
     base_url: str
     default_headers: dict[str, str] | None = None
     timeout: float = 30.0
+    _client: httpx.Client | None = field(default=None, init=False, repr=False, compare=False)
+    _client_lock: threading.Lock = field(
+        default_factory=threading.Lock,
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     @retry(
         reraise=True,
@@ -34,13 +42,11 @@ class HttpJsonClient:
         params: dict[str, Any] | None = None,
         headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
-        with httpx.Client(base_url=self.base_url, timeout=self.timeout) as client:
-            response = client.get(path, params=params, headers=self._headers(headers))
-            _raise_for_status(self.source, response)
-            data = response.json()
-            if not isinstance(data, dict):
-                raise SourceApiError(self.source, "expected JSON object", payload=data)
-            return data
+        response = self._request("GET", path, params=params, headers=headers)
+        data = response.json()
+        if not isinstance(data, dict):
+            raise SourceApiError(self.source, "expected JSON object", payload=data)
+        return data
 
     @retry(
         reraise=True,
@@ -55,10 +61,7 @@ class HttpJsonClient:
         params: dict[str, Any] | None = None,
         headers: dict[str, str] | None = None,
     ) -> bytes:
-        with httpx.Client(base_url=self.base_url, timeout=self.timeout) as client:
-            response = client.get(path, params=params, headers=self._headers(headers))
-            _raise_for_status(self.source, response)
-            return response.content
+        return self._request("GET", path, params=params, headers=headers).content
 
     @retry(
         reraise=True,
@@ -73,10 +76,7 @@ class HttpJsonClient:
         params: dict[str, Any] | None = None,
         headers: dict[str, str] | None = None,
     ) -> str:
-        with httpx.Client(base_url=self.base_url, timeout=self.timeout) as client:
-            response = client.get(path, params=params, headers=self._headers(headers))
-            _raise_for_status(self.source, response)
-            return response.text
+        return self._request("GET", path, params=params, headers=headers).text
 
     @retry(
         reraise=True,
@@ -91,13 +91,55 @@ class HttpJsonClient:
         json: dict[str, Any],
         headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
-        with httpx.Client(base_url=self.base_url, timeout=self.timeout) as client:
-            response = client.post(path, json=json, headers=self._headers(headers))
-            _raise_for_status(self.source, response)
-            data = response.json()
-            if not isinstance(data, dict):
-                raise SourceApiError(self.source, "expected JSON object", payload=data)
-            return data
+        response = self._request("POST", path, json=json, headers=headers)
+        data = response.json()
+        if not isinstance(data, dict):
+            raise SourceApiError(self.source, "expected JSON object", payload=data)
+        return data
+
+    def close(self) -> None:
+        with self._client_lock:
+            client = self._client
+            object.__setattr__(self, "_client", None)
+        if client is not None:
+            client.close()
+
+    def __enter__(self) -> HttpJsonClient:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.close()
+
+    def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        json: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> httpx.Response:
+        client = self._shared_client()
+        response = client.request(
+            method,
+            path,
+            params=params,
+            json=json,
+            headers=self._headers(headers),
+        )
+        _raise_for_status(self.source, response)
+        return response
+
+    def _shared_client(self) -> httpx.Client:
+        client = self._client
+        if client is not None and not client.is_closed:
+            return client
+        with self._client_lock:
+            client = self._client
+            if client is None or client.is_closed:
+                client = httpx.Client(base_url=self.base_url, timeout=self.timeout)
+                object.__setattr__(self, "_client", client)
+            return client
 
     def _headers(self, headers: dict[str, str] | None) -> dict[str, str]:
         merged = dict(self.default_headers or {})

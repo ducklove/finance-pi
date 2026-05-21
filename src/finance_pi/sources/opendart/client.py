@@ -132,6 +132,82 @@ class OpenDartClient:
             rows.append(DartFinancialRow.model_validate(row).model_dump(mode="json"))
         return rows
 
+    def fetch_dividend_matters(
+        self,
+        corp_code: str,
+        bsns_year: int,
+        reprt_code: str = "11011",
+    ) -> list[dict[str, Any]]:
+        payload = self.http.get_json(
+            "/api/alotMatter.json",
+            params={
+                "crtfc_key": self.api_key,
+                "corp_code": corp_code,
+                "bsns_year": str(bsns_year),
+                "reprt_code": reprt_code,
+            },
+        )
+        status = str(payload.get("status", "000"))
+        if status == "013":
+            return []
+        if status != "000":
+            raise SourceApiError("opendart", str(payload.get("message", status)), payload=payload)
+        return [
+            {
+                "rcept_no": item.get("rcept_no"),
+                "corp_code": item.get("corp_code") or corp_code,
+                "corp_name": item.get("corp_name"),
+                "se": item.get("se"),
+                "stock_knd": _empty_to_none(item.get("stock_knd")),
+                "thstrm": item.get("thstrm"),
+                "frmtrm": item.get("frmtrm"),
+                "lwfr": item.get("lwfr"),
+                "stlm_dt": _dart_date_dash(item.get("stlm_dt")) if item.get("stlm_dt") else None,
+            }
+            for item in payload.get("list", [])
+        ]
+
+    def fetch_stock_total_quantity(
+        self,
+        corp_code: str,
+        bsns_year: int,
+        reprt_code: str = "11011",
+    ) -> list[dict[str, Any]]:
+        payload = self.http.get_json(
+            "/api/stockTotqySttus.json",
+            params={
+                "crtfc_key": self.api_key,
+                "corp_code": corp_code,
+                "bsns_year": str(bsns_year),
+                "reprt_code": reprt_code,
+            },
+        )
+        status = str(payload.get("status", "000"))
+        if status == "013":
+            return []
+        if status != "000":
+            raise SourceApiError("opendart", str(payload.get("message", status)), payload=payload)
+        return [
+            {
+                "rcept_no": item.get("rcept_no"),
+                "corp_code": item.get("corp_code") or corp_code,
+                "corp_name": item.get("corp_name"),
+                "se": item.get("se"),
+                "isu_stock_totqy": item.get("isu_stock_totqy"),
+                "now_to_isu_stock_totqy": item.get("now_to_isu_stock_totqy"),
+                "now_to_dcrs_stock_totqy": item.get("now_to_dcrs_stock_totqy"),
+                "redc": item.get("redc"),
+                "profit_incnr": item.get("profit_incnr"),
+                "rdmstk_repy": item.get("rdmstk_repy"),
+                "etc": item.get("etc"),
+                "istc_totqy": item.get("istc_totqy"),
+                "tesstk_co": item.get("tesstk_co"),
+                "distb_stock_co": item.get("distb_stock_co"),
+                "stlm_dt": _dart_date_dash(item.get("stlm_dt")) if item.get("stlm_dt") else None,
+            }
+            for item in payload.get("list", [])
+        ]
+
 
 def _xml_text(item: ET.Element, tag: str) -> str | None:
     found = item.find(tag)
@@ -145,6 +221,11 @@ def _empty_to_none(value: Any) -> Any:
 def _dart_date(value: Any) -> date:
     text = str(value)
     return date(int(text[:4]), int(text[4:6]), int(text[6:8]))
+
+
+def _dart_date_dash(value: Any) -> date:
+    text = str(value)
+    return date.fromisoformat(text)
 
 
 def _period_end(bsns_year: int, reprt_code: str) -> date:

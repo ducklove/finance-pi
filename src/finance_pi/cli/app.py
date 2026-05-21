@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import importlib.util
 import csv
+import importlib.util
 import io
 import json
 import os
@@ -10,9 +10,12 @@ import re
 import shutil
 import subprocess
 import sys
+from concurrent import futures
 from contextlib import suppress
 from datetime import UTC, date, datetime, timedelta
+from glob import glob
 from pathlib import Path
+from time import sleep
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
@@ -55,6 +58,7 @@ from finance_pi.sources.schemas import PRICE_SCHEMA
 from finance_pi.storage import CatalogBuilder, DataLakeLayout, dataset_registry
 from finance_pi.storage.parquet import ParquetDatasetWriter
 from finance_pi.transforms import (
+    BuildSummary,
     build_all,
     build_all_iter,
     build_daily_market_caps,
@@ -355,7 +359,23 @@ YAHOO_INDEX_SERIES = [
         "currency": "KRW",
     },
     {
+        "series_id": "KOSDAQ",
+        "symbol": "^KQ11",
+        "country": "KR",
+        "name": "KOSDAQ Composite Index",
+        "category": "equity_index",
+        "currency": "KRW",
+    },
+    {
         "series_id": "SNP500",
+        "symbol": "^GSPC",
+        "country": "US",
+        "name": "S&P 500 Index",
+        "category": "equity_index",
+        "currency": "USD",
+    },
+    {
+        "series_id": "SP500",
         "symbol": "^GSPC",
         "country": "US",
         "name": "S&P 500 Index",
@@ -738,6 +758,63 @@ def ingest_dart_financials_bulk(
         sleep_seconds=sleep_seconds,
     )
     _run_and_print([adapter], start, end)
+
+
+@ingest_app.command("dart-dividends")
+def ingest_dart_dividends(
+    since: str = typer.Option(..., help="Start filing date as YYYY-MM-DD"),
+    until: str = typer.Option(..., help="End filing date as YYYY-MM-DD"),
+    root: Path = typer.Option(Path("."), help="Workspace root"),
+    tickers: str | None = typer.Option(None, help="Optional comma-separated tickers"),
+    corp_limit: int | None = typer.Option(None, help="Limit unique corp_code count for smoke runs"),
+    sleep_seconds: float = typer.Option(0.05, help="Sleep between OpenDART dividend calls"),
+) -> None:
+    """Fetch per-share dividend rows from OpenDART alotMatter into silver.dividends."""
+
+    paths = ProjectPaths(root=root)
+    settings = RuntimeSettings.load(paths.root)
+    start = _parse_report_date(since)
+    end = _parse_report_date(until)
+    selected_tickers = _parse_ticker_list(tickers) if tickers else None
+    requests = _dart_dividend_requests(paths, start, end, selected_tickers, corp_limit)
+    typer.echo(f"OpenDART dividend requests: {len(requests)} from filings {since}..{until}")
+    rows = _fetch_dart_dividend_rows(paths, _opendart_client(settings), requests, sleep_seconds)
+    summaries = _write_dividend_rows(paths.data_root, rows)
+    _print_summaries(summaries)
+
+
+@ingest_app.command("dart-share-counts")
+def ingest_dart_share_counts(
+    since: str = typer.Option(..., help="Start filing date as YYYY-MM-DD"),
+    until: str = typer.Option(..., help="End filing date as YYYY-MM-DD"),
+    root: Path = typer.Option(Path("."), help="Workspace root"),
+    tickers: str | None = typer.Option(None, help="Optional comma-separated tickers"),
+    report_codes: str = typer.Option(
+        "11013,11012,11014,11011",
+        help="Comma-separated DART report codes",
+    ),
+    corp_limit: int | None = typer.Option(None, help="Limit unique corp_code count for smoke runs"),
+    sleep_seconds: float = typer.Option(0.05, help="Sleep between OpenDART stockTotqySttus calls"),
+) -> None:
+    """Fetch issued, treasury, and outstanding share counts from OpenDART."""
+
+    paths = ProjectPaths(root=root)
+    settings = RuntimeSettings.load(paths.root)
+    start = _parse_report_date(since)
+    end = _parse_report_date(until)
+    selected_tickers = _parse_ticker_list(tickers) if tickers else None
+    requests = _dart_share_count_requests(
+        paths,
+        start,
+        end,
+        selected_tickers,
+        _parse_report_codes(report_codes),
+        corp_limit,
+    )
+    typer.echo(f"OpenDART share-count requests: {len(requests)} from filings {since}..{until}")
+    rows = _fetch_dart_share_count_rows(paths, _opendart_client(settings), requests, sleep_seconds)
+    summaries = _write_share_count_rows(paths.data_root, rows)
+    _print_summaries(summaries)
 
 
 @ingest_app.command("kis")
@@ -1577,6 +1654,29 @@ def _run_daily_ingest(
             )
         except Exception as exc:  # noqa: BLE001
             failures.append(f"OpenDART financial ingest failed: {exc}")
+        try:
+            ingest_dart_dividends(
+                filing_start.isoformat(),
+                report_date.isoformat(),
+                paths.root,
+                None,
+                None,
+                0.05,
+            )
+        except Exception as exc:  # noqa: BLE001
+            failures.append(f"OpenDART dividend ingest failed: {exc}")
+        try:
+            ingest_dart_share_counts(
+                filing_start.isoformat(),
+                report_date.isoformat(),
+                paths.root,
+                None,
+                "11013,11012,11014,11011",
+                None,
+                0.05,
+            )
+        except Exception as exc:  # noqa: BLE001
+            failures.append(f"OpenDART share-count ingest failed: {exc}")
     macro_since = _macro_ingest_start(paths.data_root, report_date)
     for failure in _ingest_macro(paths, macro_since, report_date, settings):
         typer.echo(failure)
@@ -1958,6 +2058,8 @@ def _write_macro_table(data_root: Path, table: str, frame: pl.DataFrame) -> Path
             )
         frame = pl.concat([existing, frame], how="diagonal_relaxed")
     frame = frame.sort(["date", "series_id"]).unique(subset=["date", "series_id"], keep="last")
+    if table == "indices" and "return_1m" in frame.columns:
+        frame = frame.with_columns(pl.col("return_1m").cast(pl.Float64, strict=False))
     return ParquetDatasetWriter().write(frame, path, mode="overwrite")
 
 
@@ -2391,6 +2493,410 @@ def _dart_financial_requests(
     )
 
 
+def _dart_dividend_requests(
+    paths: ProjectPaths,
+    since: date,
+    until: date,
+    tickers: tuple[str, ...] | None = None,
+    corp_limit: int | None = None,
+) -> tuple[dict[str, object], ...]:
+    requests = _dart_financial_requests(paths, since, until, ("11011",), None)
+    if tickers is not None:
+        ticker_set = set(tickers)
+        requests = tuple(
+            request
+            for request in requests
+            if str(request.get("stock_code", "")).zfill(6) in ticker_set
+        )
+    if corp_limit is not None:
+        corps = sorted({str(request["corp_code"]) for request in requests})[:corp_limit]
+        requests = tuple(request for request in requests if str(request["corp_code"]) in corps)
+    return requests
+
+
+def _dart_share_count_requests(
+    paths: ProjectPaths,
+    since: date,
+    until: date,
+    tickers: set[str] | None,
+    report_codes: tuple[str, ...],
+    corp_limit: int | None,
+) -> tuple[dict[str, object], ...]:
+    requests = _dart_financial_requests(paths, since, until, report_codes, None)
+    if tickers:
+        ticker_set = set(tickers)
+        requests = tuple(
+            request
+            for request in requests
+            if str(request.get("stock_code", "")).zfill(6) in ticker_set
+        )
+    if corp_limit is not None:
+        corps = sorted({str(request["corp_code"]) for request in requests})[:corp_limit]
+        requests = tuple(request for request in requests if str(request["corp_code"]) in corps)
+    return requests
+
+
+def _fetch_dart_dividend_rows(
+    paths: ProjectPaths,
+    client: OpenDartClient,
+    requests: tuple[dict[str, object], ...],
+    sleep_seconds: float,
+) -> list[dict[str, object]]:
+    mapping = _dividend_security_mapping(paths.data_root)
+    rows: list[dict[str, object]] = []
+    for index, request in enumerate(requests, start=1):
+        corp_code = str(request["corp_code"])
+        bsns_year = int(request["bsns_year"])
+        report_code = str(request["report_code"])
+        available_date = _coerce_date(request["available_date"])
+        raw_rows = client.fetch_dividend_matters(corp_code, bsns_year, report_code)
+        rows.extend(
+            _normalize_dart_dividend_rows(
+                raw_rows,
+                bsns_year,
+                report_code,
+                available_date,
+                mapping,
+            )
+        )
+        if sleep_seconds > 0 and index < len(requests):
+            sleep(sleep_seconds)
+    return rows
+
+
+def _fetch_dart_share_count_rows(
+    paths: ProjectPaths,
+    client: OpenDartClient,
+    requests: tuple[dict[str, object], ...],
+    sleep_seconds: float,
+) -> list[dict[str, object]]:
+    if sleep_seconds <= 0 and len(requests) > 1:
+        return _fetch_dart_share_count_rows_parallel(client, requests)
+
+    rows: list[dict[str, object]] = []
+    for index, request in enumerate(requests, start=1):
+        corp_code = str(request["corp_code"])
+        bsns_year = int(request["bsns_year"])
+        report_code = str(request["report_code"])
+        available_date = _coerce_date(request["available_date"])
+        raw_rows = client.fetch_stock_total_quantity(corp_code, bsns_year, report_code)
+        rows.extend(
+            _normalize_dart_share_count_rows(
+                raw_rows,
+                bsns_year,
+                report_code,
+                available_date,
+            )
+        )
+        if sleep_seconds > 0 and index < len(requests):
+            sleep(sleep_seconds)
+    return rows
+
+
+def _fetch_dart_share_count_rows_parallel(
+    client: OpenDartClient,
+    requests: tuple[dict[str, object], ...],
+    max_workers: int = 4,
+) -> list[dict[str, object]]:
+    def fetch_one(request: dict[str, object]) -> list[dict[str, object]]:
+        corp_code = str(request["corp_code"])
+        bsns_year = int(request["bsns_year"])
+        report_code = str(request["report_code"])
+        available_date = _coerce_date(request["available_date"])
+        raw_rows = client.fetch_stock_total_quantity(corp_code, bsns_year, report_code)
+        return _normalize_dart_share_count_rows(raw_rows, bsns_year, report_code, available_date)
+
+    rows: list[dict[str, object]] = []
+    with futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+        submitted = {pool.submit(fetch_one, request): request for request in requests}
+        failures = 0
+        for future in futures.as_completed(submitted):
+            request = submitted[future]
+            try:
+                rows.extend(future.result())
+            except Exception as exc:  # noqa: BLE001
+                failures += 1
+                typer.echo(
+                    "OpenDART share-count request failed: "
+                    f"corp_code={request.get('corp_code')} "
+                    f"bsns_year={request.get('bsns_year')} "
+                    f"report_code={request.get('report_code')} "
+                    f"error={exc}",
+                    err=True,
+                )
+        if failures:
+            typer.echo(f"OpenDART share-count failures: {failures}", err=True)
+    return rows
+
+
+def _normalize_dart_dividend_rows(
+    raw_rows: list[dict[str, object]],
+    bsns_year: int,
+    report_code: str,
+    available_date: date,
+    mapping: dict[tuple[str, str], dict[str, str]],
+) -> list[dict[str, object]]:
+    by_key: dict[tuple[str, str | None, int, str | None], dict[str, object]] = {}
+    for row in raw_rows:
+        metric = _dividend_metric(str(row.get("se") or ""))
+        if metric is None:
+            continue
+        stock_kind = _clean_text(row.get("stock_knd"))
+        share_class = _share_class_from_stock_kind(stock_kind)
+        if share_class is None:
+            continue
+        corp_code = str(row.get("corp_code") or "")
+        corp_name = _clean_text(row.get("corp_name"))
+        source_rcept_no = _clean_text(row.get("rcept_no"))
+        for column, fiscal_year in [
+            ("thstrm", bsns_year),
+            ("frmtrm", bsns_year - 1),
+            ("lwfr", bsns_year - 2),
+        ]:
+            value = _float_or_none(row.get(column))
+            if value is None:
+                continue
+            key = (corp_code, stock_kind, fiscal_year, source_rcept_no)
+            out = by_key.setdefault(
+                key,
+                {
+                    "fiscal_year": fiscal_year,
+                    "fiscal_period_end": date(fiscal_year, 12, 31),
+                    "rcept_dt": available_date,
+                    "available_date": available_date,
+                    "corp_code": corp_code,
+                    "corp_name": corp_name,
+                    "security_id": None,
+                    "ticker": None,
+                    "share_class": share_class,
+                    "stock_kind": stock_kind,
+                    "cash_dividend_per_share": None,
+                    "stock_dividend_per_share": None,
+                    "cash_dividend_yield_pct": None,
+                    "currency": "KRW",
+                    "source_rcept_no": source_rcept_no,
+                    "report_type": report_code,
+                    "source": "opendart.alotMatter",
+                    "is_estimated": False,
+                },
+            )
+            out[metric] = value
+            matched = mapping.get((corp_code, share_class))
+            if matched is not None:
+                out["security_id"] = matched["security_id"]
+                out["ticker"] = matched["ticker"]
+    return list(by_key.values())
+
+
+def _normalize_dart_share_count_rows(
+    raw_rows: list[dict[str, object]],
+    bsns_year: int,
+    report_code: str,
+    available_date: date,
+) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for row in raw_rows:
+        stock_kind = _clean_text(row.get("se"))
+        if stock_kind in (None, "합계", "비고"):
+            continue
+        fiscal_period_end = (
+            _coerce_date(row.get("stlm_dt")) if row.get("stlm_dt") else date(bsns_year, 12, 31)
+        )
+        rows.append(
+            {
+                "fiscal_year": bsns_year,
+                "fiscal_period_end": fiscal_period_end,
+                "rcept_dt": available_date,
+                "available_date": available_date,
+                "corp_code": str(row.get("corp_code") or ""),
+                "corp_name": _clean_text(row.get("corp_name")),
+                "share_class": _share_class_from_stock_kind(stock_kind),
+                "stock_kind": stock_kind,
+                "authorized_shares": _int_or_none(row.get("isu_stock_totqy")),
+                "cumulative_issued_shares": _int_or_none(row.get("now_to_isu_stock_totqy")),
+                "cumulative_decreased_shares": _int_or_none(row.get("now_to_dcrs_stock_totqy")),
+                "capital_reduction_shares": _int_or_none(row.get("redc")),
+                "profit_retirement_shares": _int_or_none(row.get("profit_incnr")),
+                "redemption_shares": _int_or_none(row.get("rdmstk_repy")),
+                "other_decrease_shares": _int_or_none(row.get("etc")),
+                "issued_shares": _int_or_none(row.get("istc_totqy")),
+                "treasury_shares": _int_or_none(row.get("tesstk_co")),
+                "outstanding_shares": _int_or_none(row.get("distb_stock_co")),
+                "source_rcept_no": _clean_text(row.get("rcept_no")),
+                "report_type": report_code,
+                "source": "opendart.stockTotqySttus",
+                "is_estimated": False,
+            }
+        )
+    return rows
+
+
+def _write_dividend_rows(data_root: Path, rows: list[dict[str, object]]) -> list[BuildSummary]:
+    if not rows:
+        return [BuildSummary("silver.dividends", 0, 0)]
+    frame = pl.DataFrame(rows, infer_schema_length=None).with_columns(
+        pl.col("fiscal_year").cast(pl.Int32, strict=False),
+        pl.col("fiscal_period_end").cast(pl.Date, strict=False),
+        pl.col("rcept_dt").cast(pl.Date, strict=False),
+        pl.col("available_date").cast(pl.Date, strict=False),
+        pl.col("cash_dividend_per_share").cast(pl.Float64, strict=False),
+        pl.col("stock_dividend_per_share").cast(pl.Float64, strict=False),
+        pl.col("cash_dividend_yield_pct").cast(pl.Float64, strict=False),
+        pl.col("is_estimated").cast(pl.Boolean, strict=False),
+    )
+    existing = _read_optional_parquet(data_root / "silver/dividends/fiscal_year=*/part.parquet")
+    if existing is not None and not existing.is_empty():
+        incoming_years = frame["fiscal_year"].drop_nulls().unique().to_list()
+        existing = existing.filter(~pl.col("fiscal_year").is_in(incoming_years))
+        frame = pl.concat([existing, frame], how="diagonal_relaxed")
+    frame = frame.sort(["fiscal_year", "corp_code", "share_class", "stock_kind", "available_date"])
+    frame = frame.unique(
+        subset=["fiscal_year", "corp_code", "stock_kind", "source_rcept_no"],
+        keep="last",
+    )
+    layout = DataLakeLayout(data_root)
+    writer = ParquetDatasetWriter()
+    files = 0
+    rows = 0
+    for fiscal_year in sorted(set(frame["fiscal_year"].drop_nulls().to_list())):
+        partition = frame.filter(pl.col("fiscal_year") == fiscal_year).drop("fiscal_year")
+        path = layout.partition_path("silver.dividends", date(int(fiscal_year), 12, 31))
+        writer.write(partition, path, mode="overwrite")
+        files += 1
+        rows += partition.height
+    return [BuildSummary("silver.dividends", rows, files)]
+
+
+def _write_share_count_rows(data_root: Path, rows: list[dict[str, object]]) -> list[BuildSummary]:
+    if not rows:
+        return [BuildSummary("silver.share_counts", 0, 0)]
+    frame = pl.DataFrame(rows, infer_schema_length=None).with_columns(
+        pl.col("fiscal_year").cast(pl.Int32, strict=False),
+        pl.col("fiscal_period_end").cast(pl.Date, strict=False),
+        pl.col("rcept_dt").cast(pl.Date, strict=False),
+        pl.col("available_date").cast(pl.Date, strict=False),
+        pl.col("authorized_shares").cast(pl.Float64, strict=False),
+        pl.col("cumulative_issued_shares").cast(pl.Float64, strict=False),
+        pl.col("cumulative_decreased_shares").cast(pl.Float64, strict=False),
+        pl.col("capital_reduction_shares").cast(pl.Float64, strict=False),
+        pl.col("profit_retirement_shares").cast(pl.Float64, strict=False),
+        pl.col("redemption_shares").cast(pl.Float64, strict=False),
+        pl.col("other_decrease_shares").cast(pl.Float64, strict=False),
+        pl.col("issued_shares").cast(pl.Float64, strict=False),
+        pl.col("treasury_shares").cast(pl.Float64, strict=False),
+        pl.col("outstanding_shares").cast(pl.Float64, strict=False),
+        pl.col("is_estimated").cast(pl.Boolean, strict=False),
+    )
+    existing = _read_optional_parquet(data_root / "silver/share_counts/fiscal_year=*/part.parquet")
+    if existing is not None and not existing.is_empty():
+        frame = pl.concat([existing, frame], how="diagonal_relaxed")
+    frame = frame.unique(
+        subset=["fiscal_year", "corp_code", "stock_kind", "source_rcept_no", "report_type"],
+        keep="last",
+    )
+    frame = frame.sort(["fiscal_year", "corp_code", "stock_kind", "available_date"])
+    layout = DataLakeLayout(data_root)
+    writer = ParquetDatasetWriter()
+    files = 0
+    rows_written = 0
+    for fiscal_year in sorted(set(frame["fiscal_year"].drop_nulls().to_list())):
+        partition = frame.filter(pl.col("fiscal_year") == fiscal_year).drop("fiscal_year")
+        path = layout.partition_path("silver.share_counts", date(int(fiscal_year), 12, 31))
+        writer.write(partition, path, mode="overwrite")
+        files += 1
+        rows_written += partition.height
+    return [BuildSummary("silver.share_counts", rows_written, files)]
+
+
+def _dividend_security_mapping(data_root: Path) -> dict[tuple[str, str], dict[str, str]]:
+    master = _read_optional_parquet(data_root / "gold/security_master.parquet")
+    if master is None or master.is_empty():
+        return {}
+    frame = master.select("corp_code", "name", "share_class", "security_id", "ticker")
+    result: dict[tuple[str, str], dict[str, str]] = {}
+    direct = frame.drop_nulls(["corp_code", "share_class", "security_id", "ticker"])
+    counts = direct.group_by(["corp_code", "share_class"]).agg(pl.len().alias("n")).to_dicts()
+    unique_keys = {(row["corp_code"], row["share_class"]) for row in counts if row["n"] == 1}
+    for row in direct.to_dicts():
+        key = (row["corp_code"], row["share_class"])
+        if key in unique_keys:
+            result[key] = {"security_id": row["security_id"], "ticker": row["ticker"]}
+    preferred = frame.filter(
+        pl.col("corp_code").is_null()
+        & (pl.col("share_class") == "preferred")
+        & pl.col("name").is_not_null()
+        & pl.col("security_id").is_not_null()
+        & pl.col("ticker").is_not_null()
+    )
+    for common in direct.filter(pl.col("share_class") == "common").to_dicts():
+        corp_code = common["corp_code"]
+        corp_name = str(common.get("name") or "")
+        if not corp_code or not corp_name or (corp_code, "preferred") in result:
+            continue
+        candidates = preferred.filter(pl.col("name").str.starts_with(corp_name)).to_dicts()
+        if len(candidates) == 1:
+            row = candidates[0]
+            result[(corp_code, "preferred")] = {
+                "security_id": row["security_id"],
+                "ticker": row["ticker"],
+            }
+    return result
+
+
+def _read_optional_parquet(pattern: Path) -> pl.DataFrame | None:
+    files = sorted(Path(path) for path in glob(pattern.as_posix()))
+    if not files:
+        return None
+    return _read_parquet_files_relaxed(files)
+
+
+def _dividend_metric(label: str) -> str | None:
+    normalized = re.sub(r"\s+", "", label)
+    if "주당현금배당금" in normalized:
+        return "cash_dividend_per_share"
+    if "주당주식배당" in normalized:
+        return "stock_dividend_per_share"
+    if "현금배당수익률" in normalized:
+        return "cash_dividend_yield_pct"
+    return None
+
+
+def _share_class_from_stock_kind(stock_kind: str | None) -> str | None:
+    if not stock_kind:
+        return None
+    if "보통" in stock_kind:
+        return "common"
+    if "우선" in stock_kind:
+        return "preferred"
+    return None
+
+
+def _clean_text(value: object) -> str | None:
+    if value in (None, "", " ", "-"):
+        return None
+    return str(value).strip()
+
+
+def _float_or_none(value: object) -> float | None:
+    if value in (None, "", " ", "-"):
+        return None
+    try:
+        return float(str(value).replace(",", "").strip())
+    except ValueError:
+        return None
+
+
+def _int_or_none(value: object) -> int | None:
+    parsed = _float_or_none(value)
+    return int(parsed) if parsed is not None else None
+
+
+def _coerce_date(value: object) -> date:
+    if isinstance(value, date):
+        return value
+    return date.fromisoformat(str(value))
+
+
 def _read_parquet_files_relaxed(files: list[Path]) -> pl.DataFrame:
     try:
         return pl.read_parquet([path.as_posix() for path in files], hive_partitioning=True)
@@ -2474,6 +2980,15 @@ def _normalize_ticker_value(value: object) -> str | None:
     if len(text) != 6 or not text.isalnum():
         return None
     return text
+
+
+def _parse_ticker_list(value: str) -> tuple[str, ...]:
+    tickers = []
+    for item in value.split(","):
+        ticker = _normalize_ticker_value(item)
+        if ticker is not None:
+            tickers.append(ticker)
+    return tuple(dict.fromkeys(tickers))
 
 
 def _parse_markets(value: str) -> tuple[str, ...]:

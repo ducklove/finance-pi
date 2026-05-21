@@ -244,15 +244,22 @@ class DartFinancialsBulkAdapter:
             report_code = str(request["report_code"])
             available_date = _coerce_date(request["available_date"])
             try:
-                rows.extend(
-                    self.client.fetch_financials(
+                fetched = self.client.fetch_financials(
+                    corp_code,
+                    bsns_year,
+                    report_code,
+                    available_date=available_date,
+                    fs_div=self.fs_div,
+                )
+                if not fetched and self.fs_div.upper() == "CFS":
+                    fetched = self.client.fetch_financials(
                         corp_code,
                         bsns_year,
                         report_code,
                         available_date=available_date,
-                        fs_div=self.fs_div,
+                        fs_div="OFS",
                     )
-                )
+                rows.extend(fetched)
             except Exception as exc:  # noqa: BLE001
                 failures.append(f"{corp_code}/{bsns_year}/{report_code}:{exc}")
             if self.sleep_seconds > 0 and index < len(requests):

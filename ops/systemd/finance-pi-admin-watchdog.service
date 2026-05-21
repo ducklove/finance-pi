@@ -1,0 +1,9 @@
+[Unit]
+Description=finance-pi admin HTTP watchdog
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/cantabile/Works/finance-pi
+EnvironmentFile=-/home/cantabile/Works/finance-pi/.env
+ExecStart=/home/cantabile/Works/finance-pi/.venv/bin/python -m finance_pi.cli.app admin-watchdog --url http://127.0.0.1:8400 --unit finance-pi-admin.service --timeout-seconds 5

@@ -1,0 +1,17 @@
+[Unit]
+Description=finance-pi web admin
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/cantabile/Works/finance-pi
+EnvironmentFile=-/home/cantabile/Works/finance-pi/.env
+ExecStart=/home/cantabile/Works/finance-pi/.venv/bin/python -m finance_pi.cli.app admin --root /home/cantabile/Works/finance-pi --host 0.0.0.0 --port 8400
+Restart=always
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=20
+
+[Install]
+WantedBy=default.target

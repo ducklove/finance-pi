@@ -62,12 +62,12 @@ def build_silver_prices(
                 prices = _enrich_prices_with_naver(prices, naver_summary)
             if market_caps is not None:
                 prices = _enrich_prices_with_market_caps(prices, market_caps)
+            prices = _deduplicate_price_candidates(prices)
             frames.append(prices)
     if not frames:
         return [BuildSummary("silver.prices", 0, 0)]
 
-    prices = pl.concat(frames, how="diagonal_relaxed").sort(["date", "ticker", "price_source"])
-    prices = prices.unique(subset=["date", "ticker"], keep="first")
+    prices = _select_preferred_price_sources(pl.concat(frames, how="diagonal_relaxed"))
     return _write_by_date(data_root, "silver.prices", prices, "date")
 
 
@@ -168,6 +168,7 @@ def build_daily_prices_adj(
         prices = _with_previous_gold_close(data_root, prices, selected_dates)
         if prices.is_empty():
             return [BuildSummary("gold.daily_prices_adj", 0, 0)]
+    prices = _apply_price_adjustment_factors(data_root, prices)
     adjusted = (
         prices.sort(["security_id", "date"])
         .with_columns(
@@ -175,7 +176,13 @@ def build_daily_prices_adj(
             pl.col("high").alias("high_adj"),
             pl.col("low").alias("low_adj"),
             pl.col("close").alias("close_adj"),
-            pl.col("close").pct_change().over("security_id").alias("return_1d"),
+            pl.when(
+                (pl.col("volume").fill_null(0) > 0)
+                & (pl.col("volume").shift(1).over("security_id").fill_null(0) > 0)
+            )
+            .then(pl.col("close").pct_change().over("security_id"))
+            .otherwise(None)
+            .alias("return_1d"),
         )
         .select(
             [
@@ -235,9 +242,7 @@ def build_financials_silver(data_root: Path) -> list[BuildSummary]:
     master = _read_optional(data_root / "gold/security_master.parquet")
     if master is not None and not master.is_empty() and "corp_code" in financials.columns:
         financials = (
-            financials.drop("security_id")
-            if "security_id" in financials.columns
-            else financials
+            financials.drop("security_id") if "security_id" in financials.columns else financials
         ).join(
             master.select("corp_code", "security_id").drop_nulls("corp_code").unique(),
             on="corp_code",
@@ -248,6 +253,7 @@ def build_financials_silver(data_root: Path) -> list[BuildSummary]:
             financials,
             ["fiscal_period_end", "event_date", "rcept_dt", "available_date"],
         )
+        .pipe(_normalize_financial_account_ids)
         .select(
             [
                 "security_id",
@@ -272,6 +278,27 @@ def build_financials_silver(data_root: Path) -> list[BuildSummary]:
         financials,
         "fiscal_year",
         financials["fiscal_year"].to_list(),
+    )
+
+
+def _normalize_financial_account_ids(financials: pl.DataFrame) -> pl.DataFrame:
+    normalized_name = (
+        pl.col("account_name")
+        .cast(pl.String)
+        .str.replace_all(r"\s+", "")
+        .str.replace(r"\(단위[:：]?원\)$", "")
+    )
+    return financials.with_columns(
+        pl.when(normalized_name == "자산총계")
+        .then(pl.lit("ifrs-full_Assets"))
+        .when(normalized_name == "부채총계")
+        .then(pl.lit("ifrs-full_Liabilities"))
+        .when(normalized_name == "자본총계")
+        .then(pl.lit("ifrs-full_Equity"))
+        .when(normalized_name.is_in(["기본주당이익(손실)", "기본주당손익"]))
+        .then(pl.lit("ifrs-full_BasicEarningsLossPerShare"))
+        .otherwise(pl.col("account_id"))
+        .alias("account_id")
     )
 
 
@@ -371,6 +398,153 @@ def _normalize_price_frame(frame: pl.DataFrame, source: str) -> pl.DataFrame:
     )
 
 
+def _deduplicate_price_candidates(prices: pl.DataFrame) -> pl.DataFrame:
+    if prices.height > 1_000_000:
+        return _deduplicate_large_price_candidates(prices)
+
+    duplicate_keys = (
+        prices.group_by(["date", "ticker"])
+        .agg(pl.len().alias("_candidate_count"))
+        .filter(pl.col("_candidate_count") > 1)
+        .select("date", "ticker")
+    )
+    if duplicate_keys.is_empty():
+        return prices.sort(["date", "ticker", "price_source"])
+
+    singletons = prices.join(duplicate_keys, on=["date", "ticker"], how="anti")
+    duplicates = (
+        prices.join(duplicate_keys, on=["date", "ticker"], how="semi")
+        .with_row_index("_candidate_id")
+        .with_columns(_price_source_priority_expr().alias("_source_priority"))
+    )
+
+    duplicate_tickers = duplicates.select("ticker").unique()
+    anchors = (
+        singletons.join(duplicate_tickers, on="ticker", how="semi")
+        .select(
+            "ticker",
+            pl.col("date").alias("_anchor_date"),
+            pl.col("close").alias("_anchor_close"),
+        )
+        .sort(["ticker", "_anchor_date"])
+    )
+    if anchors.is_empty():
+        selected = duplicates.sort(["date", "ticker", "_source_priority", "price_source"])
+    else:
+        duplicate_keys = duplicates.select("_candidate_id", "ticker", "date", "close").sort(
+            ["ticker", "date"]
+        )
+        previous = duplicate_keys.join_asof(
+            anchors,
+            left_on="date",
+            right_on="_anchor_date",
+            by="ticker",
+            strategy="backward",
+        ).select("_candidate_id", pl.col("_anchor_close").alias("_previous_close"))
+        following = duplicate_keys.join_asof(
+            anchors,
+            left_on="date",
+            right_on="_anchor_date",
+            by="ticker",
+            strategy="forward",
+        ).select("_candidate_id", pl.col("_anchor_close").alias("_following_close"))
+        selected = (
+            duplicates.join(previous, on="_candidate_id", how="left")
+            .join(following, on="_candidate_id", how="left")
+            .with_columns(
+                _continuity_penalty("close", "_previous_close").alias("_previous_penalty"),
+                _continuity_penalty("close", "_following_close").alias("_following_penalty"),
+            )
+            .with_columns(
+                pl.sum_horizontal(
+                    pl.col("_previous_penalty").fill_null(0.0),
+                    pl.col("_following_penalty").fill_null(0.0),
+                ).alias("_continuity_score"),
+                (
+                    pl.col("_previous_penalty").is_not_null().cast(pl.Int8)
+                    + pl.col("_following_penalty").is_not_null().cast(pl.Int8)
+                ).alias("_anchor_count"),
+            )
+            .sort(
+                ["date", "ticker", "_anchor_count", "_continuity_score", "_source_priority"],
+                descending=[False, False, True, False, False],
+            )
+        )
+
+    selected = selected.unique(subset=["date", "ticker"], keep="first")
+    return (
+        pl.concat([singletons, selected], how="diagonal_relaxed")
+        .drop(
+            [
+                column
+                for column in [
+                    "_candidate_count",
+                    "_source_priority",
+                    "_candidate_id",
+                    "_previous_close",
+                    "_following_close",
+                    "_previous_penalty",
+                    "_following_penalty",
+                    "_continuity_score",
+                    "_anchor_count",
+                ]
+                if column in selected.columns or column in singletons.columns
+            ]
+        )
+        .sort(["date", "ticker", "price_source"])
+    )
+
+
+def _deduplicate_large_price_candidates(prices: pl.DataFrame) -> pl.DataFrame:
+    return (
+        prices.with_columns(_price_source_priority_expr().alias("_source_priority"))
+        .sort(
+            ["date", "ticker", "close", "_source_priority", "price_source"],
+            descending=[False, False, True, False, False],
+        )
+        .unique(subset=["date", "ticker"], keep="first")
+        .drop("_source_priority")
+        .sort(["date", "ticker", "price_source"])
+    )
+
+
+def _select_preferred_price_sources(prices: pl.DataFrame) -> pl.DataFrame:
+    return (
+        prices.with_columns(_price_source_priority_expr().alias("_source_priority"))
+        .sort(["date", "ticker", "_source_priority", "price_source"])
+        .unique(subset=["date", "ticker"], keep="first")
+        .drop("_source_priority")
+        .sort(["date", "ticker", "price_source"])
+    )
+
+
+def _price_source_priority_expr() -> pl.Expr:
+    return (
+        pl.when(pl.col("price_source") == "krx")
+        .then(0)
+        .when(pl.col("price_source") == "kis")
+        .then(1)
+        .when(pl.col("price_source") == "naver")
+        .then(2)
+        .when(pl.col("price_source") == "pre2010")
+        .then(3)
+        .otherwise(9)
+    )
+
+
+def _continuity_penalty(close_column: str, anchor_column: str) -> pl.Expr:
+    return (
+        pl.when(
+            pl.col(close_column).is_not_null()
+            & pl.col(anchor_column).is_not_null()
+            & (pl.col(close_column) > 0)
+            & (pl.col(anchor_column) > 0)
+        )
+        .then((pl.col(close_column) / pl.col(anchor_column)).log().abs())
+        .otherwise(None)
+    )
+
+
 def _normalize_marcap_frame(frame: pl.DataFrame) -> pl.DataFrame:
     return (
         _cast_dates(frame, ["Date"])
@@ -464,8 +638,9 @@ def _read_price_source_dates(
             Path(file)
             for value in dates
             for file in glob(
-                (data_root / f"bronze/pre2010/source=*/dt={value.isoformat()}/part.parquet")
-                .as_posix()
+                (
+                    data_root / f"bronze/pre2010/source=*/dt={value.isoformat()}/part.parquet"
+                ).as_posix()
             )
         ]
         return _read_existing_paths(paths)
@@ -600,9 +775,10 @@ def _security_master_from_prices(
         pl.concat_str([pl.lit("S"), pl.col("ticker")]).alias("security_id"),
         pl.concat_str([pl.lit("L"), pl.col("ticker")]).alias("listing_id"),
         pl.lit(None, dtype=pl.String).alias("isin"),
-        pl.when(_preferred_expr()).then(pl.lit("preferred")).otherwise(pl.lit("common")).alias(
-            "share_class"
-        ),
+        pl.when(_preferred_expr())
+        .then(pl.lit("preferred"))
+        .otherwise(pl.lit("common"))
+        .alias("share_class"),
         pl.when(pl.col("name").str.contains("스팩|SPAC", literal=False))
         .then(pl.lit("spac_pre"))
         .otherwise(pl.lit("equity"))
@@ -665,6 +841,60 @@ def _merge_security_master(data_root: Path, updates: pl.DataFrame) -> pl.DataFra
         how="anti",
     )
     return pl.concat([unchanged, adjusted_updates], how="diagonal_relaxed").sort("ticker")
+
+
+def _apply_price_adjustment_factors(data_root: Path, prices: pl.DataFrame) -> pl.DataFrame:
+    actions = _read_optional(data_root / "silver/corporate_actions/dt=*/part.parquet")
+    if actions is None or actions.is_empty():
+        return prices
+
+    # adjustment_factor is a price multiplier applied to rows before effective_date.
+    # For example, a 2-for-1 split uses 0.5, while a 1-for-21 reverse split uses 21
+    # when the source prices are still raw.
+    actions = (
+        _cast_dates(actions, ["effective_date"])
+        .filter(
+            pl.col("security_id").is_not_null()
+            & pl.col("effective_date").is_not_null()
+            & pl.col("adjustment_factor").is_not_null()
+            & (pl.col("adjustment_factor") > 0)
+        )
+        .select(
+            "security_id",
+            "effective_date",
+            pl.col("adjustment_factor").cast(pl.Float64),
+        )
+    )
+    if actions.is_empty():
+        return prices
+
+    factors = (
+        prices.with_row_index("_price_row")
+        .select("_price_row", "date", "security_id")
+        .join(actions, on="security_id", how="left")
+        .with_columns(
+            pl.when(pl.col("date") < pl.col("effective_date"))
+            .then(pl.col("adjustment_factor"))
+            .otherwise(1.0)
+            .alias("_factor")
+        )
+        .group_by("_price_row")
+        .agg(pl.col("_factor").product().alias("_price_adjustment_factor"))
+    )
+    return (
+        prices.with_row_index("_price_row")
+        .join(factors, on="_price_row", how="left")
+        .with_columns(
+            pl.coalesce(["_price_adjustment_factor", pl.lit(1.0)]).alias("_price_adjustment_factor")
+        )
+        .with_columns(
+            (pl.col("open") * pl.col("_price_adjustment_factor")).alias("open"),
+            (pl.col("high") * pl.col("_price_adjustment_factor")).alias("high"),
+            (pl.col("low") * pl.col("_price_adjustment_factor")).alias("low"),
+            (pl.col("close") * pl.col("_price_adjustment_factor")).alias("close"),
+        )
+        .drop("_price_row", "_price_adjustment_factor")
+    )
 
 
 def _with_previous_gold_close(
@@ -840,8 +1070,9 @@ def _write_by_partition(
         partition = frame.filter(pl.col(partition_column) == value)
         if partition.is_empty():
             continue
-        if dataset == "silver.financials":
-            path = data_root / "silver" / "financials" / f"fiscal_year={value}" / "part.parquet"
+        if dataset in {"silver.financials", "silver.dividends"}:
+            name = dataset.split(".", maxsplit=1)[1]
+            path = data_root / "silver" / name / f"fiscal_year={value}" / "part.parquet"
             partition = partition.drop(partition_column)
         else:
             path = layout.partition_path(dataset, value)

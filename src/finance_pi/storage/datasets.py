@@ -337,6 +337,60 @@ def _empty_fx() -> str:
     """
 
 
+def _empty_dividends() -> str:
+    return """
+    SELECT
+        CAST(NULL AS INTEGER) AS fiscal_year,
+        CAST(NULL AS DATE) AS fiscal_period_end,
+        CAST(NULL AS DATE) AS rcept_dt,
+        CAST(NULL AS DATE) AS available_date,
+        CAST(NULL AS VARCHAR) AS corp_code,
+        CAST(NULL AS VARCHAR) AS corp_name,
+        CAST(NULL AS VARCHAR) AS security_id,
+        CAST(NULL AS VARCHAR) AS ticker,
+        CAST(NULL AS VARCHAR) AS share_class,
+        CAST(NULL AS VARCHAR) AS stock_kind,
+        CAST(NULL AS DOUBLE) AS cash_dividend_per_share,
+        CAST(NULL AS DOUBLE) AS stock_dividend_per_share,
+        CAST(NULL AS DOUBLE) AS cash_dividend_yield_pct,
+        CAST(NULL AS VARCHAR) AS currency,
+        CAST(NULL AS VARCHAR) AS source_rcept_no,
+        CAST(NULL AS VARCHAR) AS report_type,
+        CAST(NULL AS VARCHAR) AS source,
+        CAST(NULL AS BOOLEAN) AS is_estimated
+    WHERE FALSE
+    """
+
+
+def _empty_share_counts() -> str:
+    return """
+    SELECT
+        CAST(NULL AS INTEGER) AS fiscal_year,
+        CAST(NULL AS DATE) AS fiscal_period_end,
+        CAST(NULL AS DATE) AS rcept_dt,
+        CAST(NULL AS DATE) AS available_date,
+        CAST(NULL AS VARCHAR) AS corp_code,
+        CAST(NULL AS VARCHAR) AS corp_name,
+        CAST(NULL AS VARCHAR) AS share_class,
+        CAST(NULL AS VARCHAR) AS stock_kind,
+        CAST(NULL AS DOUBLE) AS authorized_shares,
+        CAST(NULL AS DOUBLE) AS cumulative_issued_shares,
+        CAST(NULL AS DOUBLE) AS cumulative_decreased_shares,
+        CAST(NULL AS DOUBLE) AS capital_reduction_shares,
+        CAST(NULL AS DOUBLE) AS profit_retirement_shares,
+        CAST(NULL AS DOUBLE) AS redemption_shares,
+        CAST(NULL AS DOUBLE) AS other_decrease_shares,
+        CAST(NULL AS DOUBLE) AS issued_shares,
+        CAST(NULL AS DOUBLE) AS treasury_shares,
+        CAST(NULL AS DOUBLE) AS outstanding_shares,
+        CAST(NULL AS VARCHAR) AS source_rcept_no,
+        CAST(NULL AS VARCHAR) AS report_type,
+        CAST(NULL AS VARCHAR) AS source,
+        CAST(NULL AS BOOLEAN) AS is_estimated
+    WHERE FALSE
+    """
+
+
 def _empty_economic_indicators() -> str:
     return """
     SELECT
@@ -446,6 +500,18 @@ dataset_registry: dict[str, DatasetSpec] = {
             CAST(NULL AS VARCHAR) AS source_rcept_no
         WHERE FALSE
         """,
+    ),
+    "silver.dividends": DatasetSpec(
+        "silver.dividends",
+        "silver",
+        "silver/dividends/fiscal_year=*/part.parquet",
+        _empty_dividends(),
+    ),
+    "silver.share_counts": DatasetSpec(
+        "silver.share_counts",
+        "silver",
+        "silver/share_counts/fiscal_year=*/part.parquet",
+        _empty_share_counts(),
     ),
     "silver.security_identity": DatasetSpec(
         "silver.security_identity",

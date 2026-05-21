@@ -105,6 +105,9 @@ def test_daily_ingest_internal_calls_pass_concrete_defaults(tmp_path, monkeypatc
     monkeypatch.setattr(cli_app, "ingest_kis_universe", record("kis_universe"))
     monkeypatch.setattr(cli_app, "ingest_dart_filings", record("dart_filings"))
     monkeypatch.setattr(cli_app, "ingest_dart_financials_bulk", record("dart_financials_bulk"))
+    monkeypatch.setattr(cli_app, "ingest_dart_dividends", record("dart_dividends"))
+    monkeypatch.setattr(cli_app, "ingest_dart_share_counts", record("dart_share_counts"))
+
     def record_macro(*args: object) -> list[str]:
         calls["macro"] = args
         return []
@@ -128,6 +131,16 @@ def test_daily_ingest_internal_calls_pass_concrete_defaults(tmp_path, monkeypatc
         50,
     )
     assert calls["dart_filings"] == ("2026-04-29", "2026-04-30", tmp_path, 7)
+    assert calls["dart_dividends"] == ("2026-04-29", "2026-04-30", tmp_path, None, None, 0.05)
+    assert calls["dart_share_counts"] == (
+        "2026-04-29",
+        "2026-04-30",
+        tmp_path,
+        None,
+        "11013,11012,11014,11011",
+        None,
+        0.05,
+    )
     assert calls["macro"][:3] == (ProjectPaths(tmp_path), date(1990, 1, 1), date(2026, 4, 30))
 
 

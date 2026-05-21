@@ -27,6 +27,8 @@ class DataLakeLayout:
             "silver/financials",
             "silver/filings",
             "silver/corporate_actions",
+            "silver/dividends",
+            "silver/share_counts",
             "silver/security_identity",
             "gold/daily_prices_adj",
             "gold/daily_market_caps",
@@ -93,6 +95,22 @@ class DataLakeLayout:
                 )
             case "silver.corporate_actions":
                 return self.root / "silver" / "corporate_actions" / f"dt={dt}" / "part.parquet"
+            case "silver.dividends":
+                return (
+                    self.root
+                    / "silver"
+                    / "dividends"
+                    / f"fiscal_year={dt[:4]}"
+                    / "part.parquet"
+                )
+            case "silver.share_counts":
+                return (
+                    self.root
+                    / "silver"
+                    / "share_counts"
+                    / f"fiscal_year={dt[:4]}"
+                    / "part.parquet"
+                )
             case "gold.daily_prices_adj":
                 return self.root / "gold" / "daily_prices_adj" / f"dt={dt}" / "part.parquet"
             case "gold.daily_market_caps":

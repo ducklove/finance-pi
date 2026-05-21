@@ -146,6 +146,35 @@ default; it uses file and partition metadata. Set `FINANCE_PI_ADMIN_SCAN_PARQUET
 only when you explicitly want live row counts and are comfortable with the extra
 I/O and memory pressure.
 
+The admin API exposes point-in-time data under `/api/`. The fundamentals endpoint
+returns selected statement metrics plus per-share values when enough data is
+available:
+
+```bash
+curl "http://127.0.0.1:8400/api/fundamentals/basic?ticker=005930&as_of=2026-05-10"
+```
+
+`/api/fundamentals/basic` includes a `per_share` object with:
+
+- `bps`: latest balance-sheet equity divided by the issuer-level DART
+  outstanding-share denominator.
+- `eps_annual`: reported annual basic EPS when available, otherwise latest
+  annual net income divided by the share denominator.
+- `eps_ttm`: reported basic EPS when the latest row is annual. For interim rows,
+  it is computed as latest cumulative interim net income plus prior-year annual
+  net income minus prior-year matching interim net income, divided by the share
+  denominator.
+- `eps_forward`: forward EPS placeholder. It returns `value: null` and
+  `available: false` until a forward earnings estimate source is added.
+
+The share denominator uses OpenDART `stockTotqySttus` rows: `distb_stock_co` is
+the denominator, `tesstk_co` is retained per share class, and
+`treasury_shares_excluded` is `true`. Common and preferred rows for the same
+issuer (`corp_code`) are summed. If a DART share-count row is not available for
+the point-in-time cutoff, BPS falls back to issuer-level listed shares from
+`gold.daily_prices_adj`; those fallback rows set `treasury_shares_excluded` to
+`false`.
+
 Build and publish the repository documentation as HTML:
 
 ```bash

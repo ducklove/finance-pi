@@ -9,8 +9,10 @@ import subprocess
 import sys
 import threading
 import time
+from contextlib import suppress
+from copy import deepcopy
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from glob import glob
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -27,9 +29,11 @@ from finance_pi.docs_site import build_docs_site
 from finance_pi.storage import dataset_registry
 
 DEFAULT_MAX_REQUEST_THREADS = 16
+DEFAULT_MAX_ADMIN_JOBS = 1
 DEFAULT_MAX_PRICE_QUERIES = 4
 DEFAULT_MAX_PRICE_TICKERS = 500
 DEFAULT_MAX_PRICE_DAYS = 3700
+DEFAULT_PRICE_QUERY_WAIT_SECONDS = 15.0
 MACRO_TABLE_COLUMNS = {
     "cpi": (
         "date",
@@ -145,6 +149,12 @@ BASIC_FUNDAMENTAL_METRICS = {
         "dart_DispositionOfTreasuryShares",
     ),
     "treasury_share_cancellation": ("ifrs-full_CancellationOfTreasuryShares",),
+}
+DIRECT_EPS_METRICS = {
+    "eps_basic": (
+        "ifrs-full_BasicEarningsLossPerShare",
+        "ifrs_BasicEarningsLossPerShare",
+    ),
 }
 CAPITAL_ACTION_METRICS = {
     key: BASIC_FUNDAMENTAL_METRICS[key]
@@ -1163,7 +1173,9 @@ class AdminJob:
 
 
 class AdminState:
-    overview_cache_seconds = 10.0
+    overview_cache_seconds = 120.0
+    price_cache_seconds = 60.0
+    price_cache_max_entries = 512
 
     def __init__(self, root: Path, token: str | None = None) -> None:
         self.paths = ProjectPaths(root=root)
@@ -1171,6 +1183,11 @@ class AdminState:
         self.jobs: dict[str, AdminJob] = {}
         self.lock = threading.Lock()
         self._overview_cache: tuple[float, dict[str, Any]] | None = None
+        self._price_cache: dict[
+            tuple[Any, ...],
+            tuple[float, dict[str, list[dict[str, Any]]]],
+        ] = {}
+        self._job_slots = threading.BoundedSemaphore(_admin_max_jobs())
         self._price_query_slots = threading.BoundedSemaphore(_admin_max_price_queries())
 
     def overview(self) -> dict[str, Any]:
@@ -1198,7 +1215,7 @@ class AdminState:
             "backtests": _backtest_runs(data_root),
             "backfill": _backfill_overview(data_root),
             "jobs": self.job_list(),
-            "max_price_date": _latest_partition_for(data_root / "gold/daily_prices_adj/dt=*/part.parquet"),
+            "max_price_date": _latest_price_date_from_datasets(datasets),
         }
         with self.lock:
             self._overview_cache = (now, overview)
@@ -1289,6 +1306,25 @@ class AdminState:
             "capital_actions": actions,
         }
 
+    def dividends(self, params: dict[str, list[str]]) -> dict[str, Any]:
+        tickers = _ticker_params(params)
+        as_of = _optional_date_param(params, "as_of") or date.today()
+        start_year = _optional_int_param(params, "start_year")
+        end_year = _optional_int_param(params, "end_year")
+        if len(tickers) > _admin_max_price_tickers():
+            raise ValueError(f"too many tickers; max is {_admin_max_price_tickers()}")
+        if start_year is not None and end_year is not None and end_year < start_year:
+            raise ValueError("end_year must be on or after start_year")
+        dividends = self._run_dividend_query(tickers, as_of, start_year, end_year)
+        return {
+            "tickers": tickers,
+            "as_of": as_of.isoformat(),
+            "start_year": start_year,
+            "end_year": end_year,
+            "count": sum(len(rows) for rows in dividends.values()),
+            "dividends": dividends,
+        }
+
     def cpi(self, params: dict[str, list[str]]) -> dict[str, Any]:
         return self._macro_payload("cpi", params)
 
@@ -1339,12 +1375,26 @@ class AdminState:
         until: date,
         fields: tuple[str, ...],
     ) -> dict[str, list[dict[str, Any]]]:
-        if not self._price_query_slots.acquire(blocking=False):
-            raise AdminServiceBusy("price query capacity exhausted")
+        cache_key = (tuple(tickers), since, until, fields)
+        now = time.monotonic()
+        with self.lock:
+            cached_item = self._price_cache.get(cache_key)
+            if cached_item is not None:
+                cached_at, cached = cached_item
+                if now - cached_at < self.price_cache_seconds:
+                    return deepcopy(cached)
+
+        self._acquire_data_query_slot("price", tickers, since, until)
         try:
-            return _query_daily_prices_batch(self.paths, tickers, since, until, fields)
+            result = _query_daily_prices_batch(self.paths, tickers, since, until, fields)
         finally:
             self._price_query_slots.release()
+        with self.lock:
+            self._price_cache[cache_key] = (time.monotonic(), deepcopy(result))
+            if len(self._price_cache) > self.price_cache_max_entries:
+                oldest_key = min(self._price_cache, key=lambda key: self._price_cache[key][0])
+                self._price_cache.pop(oldest_key, None)
+        return result
 
     def _run_fundamental_query(
         self,
@@ -1352,8 +1402,7 @@ class AdminState:
         as_of: date,
         fiscal_year: int | None,
     ) -> dict[str, dict[str, Any]]:
-        if not self._price_query_slots.acquire(blocking=False):
-            raise AdminServiceBusy("data query capacity exhausted")
+        self._acquire_data_query_slot("fundamentals", tickers, as_of, fiscal_year)
         try:
             return _query_basic_fundamentals_batch(self.paths, tickers, as_of, fiscal_year)
         finally:
@@ -1366,10 +1415,22 @@ class AdminState:
         start_year: int | None,
         end_year: int | None,
     ) -> dict[str, list[dict[str, Any]]]:
-        if not self._price_query_slots.acquire(blocking=False):
-            raise AdminServiceBusy("data query capacity exhausted")
+        self._acquire_data_query_slot("capital_actions", tickers, start_year, end_year)
         try:
             return _query_capital_actions_batch(self.paths, tickers, as_of, start_year, end_year)
+        finally:
+            self._price_query_slots.release()
+
+    def _run_dividend_query(
+        self,
+        tickers: list[str],
+        as_of: date,
+        start_year: int | None,
+        end_year: int | None,
+    ) -> dict[str, list[dict[str, Any]]]:
+        self._acquire_data_query_slot("dividends", tickers, start_year, end_year)
+        try:
+            return _query_dividends_batch(self.paths, tickers, as_of, start_year, end_year)
         finally:
             self._price_query_slots.release()
 
@@ -1380,16 +1441,35 @@ class AdminState:
         until: date | None,
         filters: dict[str, str | None],
     ) -> list[dict[str, Any]]:
-        if not self._price_query_slots.acquire(blocking=False):
-            raise AdminServiceBusy("data query capacity exhausted")
+        self._acquire_data_query_slot("macro", [], since, until)
         try:
             return _query_macro_table(self.paths, table, since, until, filters)
         finally:
             self._price_query_slots.release()
 
+    def _acquire_data_query_slot(
+        self,
+        query_type: str,
+        tickers: list[str],
+        start: Any,
+        end: Any,
+    ) -> None:
+        wait_seconds = _admin_price_query_wait_seconds()
+        if self._price_query_slots.acquire(timeout=wait_seconds):
+            return
+        print(
+            "finance-pi admin 503: data query queue timeout "
+            f"type={query_type} wait_seconds={wait_seconds} "
+            f"tickers={len(tickers)} start={start} end={end}",
+            file=sys.stderr,
+        )
+        raise AdminServiceBusy("data query queue timeout")
+
     def start_job(self, payload: dict[str, Any]) -> dict[str, Any]:
         action = str(payload.get("action", ""))
         label, command = _job_command(action, payload, self.paths.root)
+        if not self._job_slots.acquire(blocking=False):
+            raise AdminServiceBusy("admin job already running")
         job_id = datetime.now(UTC).strftime("%Y%m%d%H%M%S%f")
         log_dir = self.paths.data_root / "admin" / "jobs"
         log_dir.mkdir(parents=True, exist_ok=True)
@@ -1403,7 +1483,11 @@ class AdminState:
         with self.lock:
             self.jobs[job.id] = job
             self._overview_cache = None
-        threading.Thread(target=self._run_job, args=(job,), daemon=True).start()
+        try:
+            threading.Thread(target=self._run_job, args=(job,), daemon=True).start()
+        except Exception:
+            self._job_slots.release()
+            raise
         return job.to_dict()
 
     def job_log(self, job_id: str) -> dict[str, Any]:
@@ -1451,6 +1535,8 @@ class AdminState:
             with self.lock:
                 job.status = "failed"
                 job.ended_at = datetime.now(UTC)
+        finally:
+            self._job_slots.release()
 
 
 class BoundedThreadingHTTPServer(ThreadingHTTPServer):
@@ -1530,6 +1616,7 @@ def run_admin(
 def _handler_for(state: AdminState) -> type[BaseHTTPRequestHandler]:
     class AdminHandler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802
+            self._request_started_at = time.monotonic()
             parsed = urlparse(self.path)
             try:
                 if parsed.path == "/api/health":
@@ -1568,6 +1655,10 @@ def _handler_for(state: AdminState) -> type[BaseHTTPRequestHandler]:
                     if not self._authorized():
                         return
                     self._send_json(state.capital_actions(parse_qs(parsed.query)))
+                elif parsed.path == "/api/fundamentals/dividends":
+                    if not self._authorized():
+                        return
+                    self._send_json(state.dividends(parse_qs(parsed.query)))
                 elif parsed.path == "/api/macro/cpi":
                     if not self._authorized():
                         return
@@ -1616,6 +1707,8 @@ def _handler_for(state: AdminState) -> type[BaseHTTPRequestHandler]:
                     {"error": str(exc)},
                     status=HTTPStatus.SERVICE_UNAVAILABLE,
                 )
+            except (BrokenPipeError, ConnectionResetError):
+                self._log_client_disconnect()
             except Exception as exc:  # noqa: BLE001
                 self._send_json(
                     {"error": str(exc)},
@@ -1623,6 +1716,7 @@ def _handler_for(state: AdminState) -> type[BaseHTTPRequestHandler]:
                 )
 
         def do_POST(self) -> None:  # noqa: N802
+            self._request_started_at = time.monotonic()
             if self.path != "/api/jobs":
                 self._send_json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
                 return
@@ -1632,6 +1726,8 @@ def _handler_for(state: AdminState) -> type[BaseHTTPRequestHandler]:
                 length = int(self.headers.get("Content-Length", "0"))
                 payload = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
                 self._send_json(state.start_job(payload), status=HTTPStatus.CREATED)
+            except (BrokenPipeError, ConnectionResetError):
+                self._log_client_disconnect()
             except Exception as exc:  # noqa: BLE001
                 self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
 
@@ -1707,6 +1803,27 @@ def _handler_for(state: AdminState) -> type[BaseHTTPRequestHandler]:
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
             self.wfile.write(payload)
+            self._log_access(status, len(payload))
+
+        def _log_access(self, status: HTTPStatus, size: int) -> None:
+            duration_ms = int((time.monotonic() - self._request_started_at) * 1000)
+            print(
+                "finance-pi admin access: "
+                f"client={self.client_address[0]} method={self.command} "
+                f"status={int(status)} duration_ms={duration_ms} bytes={size} "
+                f"path={_redact_admin_request_target(self.path)}",
+                file=sys.stderr,
+            )
+
+        def _log_client_disconnect(self) -> None:
+            duration_ms = int((time.monotonic() - self._request_started_at) * 1000)
+            print(
+                "finance-pi admin client disconnected: "
+                f"client={self.client_address[0]} method={self.command} "
+                f"duration_ms={duration_ms} "
+                f"path={_redact_admin_request_target(self.path)}",
+                file=sys.stderr,
+            )
 
     return AdminHandler
 
@@ -1723,6 +1840,10 @@ def _is_local_admin_client(host: str) -> bool:
     if getattr(address, "ipv4_mapped", None) is not None:
         address = address.ipv4_mapped
     return address.is_loopback or address.is_private or address.is_link_local
+
+
+def _redact_admin_request_target(target: str) -> str:
+    return re.sub(r"([?&]token=)[^&]+", r"\1<redacted>", target)
 
 
 def _health_payload(state: AdminState) -> dict[str, Any]:
@@ -1747,7 +1868,9 @@ def _api_docs_payload(state: AdminState) -> dict[str, Any]:
         },
         "limits": {
             "max_request_threads": _admin_max_request_threads(),
+            "max_admin_jobs": _admin_max_jobs(),
             "max_price_queries": _admin_max_price_queries(),
+            "price_query_wait_seconds": _admin_price_query_wait_seconds(),
             "max_price_tickers": _admin_max_price_tickers(),
             "max_price_days": _admin_max_price_days(),
         },
@@ -1795,7 +1918,7 @@ def _api_docs_payload(state: AdminState) -> dict[str, Any]:
             "basic_fundamentals": {
                 "method": "GET",
                 "path": f"{base_url}/fundamentals/basic",
-                "description": "Latest available annual basic financial metrics by ticker.",
+                "description": "Latest available annual basic financial metrics by ticker, with per-share BPS/EPS values when DART share-denominator data is available.",
                 "query": {
                     "ticker": "Single ticker, e.g. 005930 or 5930.",
                     "tickers": "Comma-separated tickers, e.g. 005930,000660.",
@@ -1803,6 +1926,21 @@ def _api_docs_payload(state: AdminState) -> dict[str, Any]:
                     "fiscal_year": "Optional fiscal year filter.",
                 },
                 "metrics": list(BASIC_FUNDAMENTAL_METRICS.keys()),
+                "per_share": {
+                    "object": "Returned per ticker as fundamentals.<ticker>.per_share when denominator data is available.",
+                    "fields": {
+                        "bps": "Latest balance-sheet equity divided by issuer-level DART outstanding shares when available.",
+                        "eps_annual": "Latest annual net income divided by issuer-level DART outstanding shares when available.",
+                        "eps_ttm": "Trailing-twelve-month net income divided by issuer-level DART outstanding shares when available. Annual latest rows equal eps_annual; interim latest rows use latest cumulative + prior annual - prior matching interim.",
+                        "eps_forward": "Forward EPS placeholder. value is null and available is false until a forward earnings estimate source is added.",
+                    },
+                    "denominator": {
+                        "share_basis": "dart_distributed_shares",
+                        "issuer_key": "corp_code",
+                        "preferred_shares": "Included by summing DART common/preferred rows for the same issuer.",
+                        "treasury_shares": "DART stock total quantity rows are preferred; when available, shares are distb_stock_co and treasury_shares_excluded is true.",
+                    },
+                },
                 "examples": [
                     f"{base_url}/fundamentals/basic?tickers=005930,000660",
                     f"{base_url}/fundamentals/basic?ticker=005930&as_of=2026-04-30&fiscal_year=2025",
@@ -1823,6 +1961,22 @@ def _api_docs_payload(state: AdminState) -> dict[str, Any]:
                 "examples": [
                     f"{base_url}/fundamentals/capital-actions?tickers=005930,000660&start_year=2024&end_year=2025",
                     f"{base_url}/fundamentals/capital-actions?ticker=005930&as_of=2026-04-30",
+                ],
+            },
+            "dividends": {
+                "method": "GET",
+                "path": f"{base_url}/fundamentals/dividends",
+                "description": "Per-share dividend rows by listed security, including common/preferred stock distinctions when OpenDART can map them unambiguously.",
+                "query": {
+                    "ticker": "Single ticker, e.g. 005930 or 005935.",
+                    "tickers": "Comma-separated tickers, e.g. 005930,005935.",
+                    "as_of": "Optional YYYY-MM-DD point-in-time cutoff. Defaults to today.",
+                    "start_year": "Optional first fiscal year.",
+                    "end_year": "Optional last fiscal year.",
+                },
+                "examples": [
+                    f"{base_url}/fundamentals/dividends?tickers=005930,005935&start_year=2022&end_year=2024",
+                    f"{base_url}/fundamentals/dividends?ticker=005935&as_of=2026-04-30",
                 ],
             },
             "cpi": {
@@ -1932,8 +2086,19 @@ def _admin_max_request_threads() -> int:
     return _positive_int_env("FINANCE_PI_ADMIN_MAX_THREADS", DEFAULT_MAX_REQUEST_THREADS)
 
 
+def _admin_max_jobs() -> int:
+    return _positive_int_env("FINANCE_PI_ADMIN_MAX_JOBS", DEFAULT_MAX_ADMIN_JOBS)
+
+
 def _admin_max_price_queries() -> int:
     return _positive_int_env("FINANCE_PI_ADMIN_MAX_PRICE_QUERIES", DEFAULT_MAX_PRICE_QUERIES)
+
+
+def _admin_price_query_wait_seconds() -> float:
+    return _nonnegative_float_env(
+        "FINANCE_PI_ADMIN_PRICE_QUERY_WAIT_SECONDS",
+        DEFAULT_PRICE_QUERY_WAIT_SECONDS,
+    )
 
 
 def _admin_max_price_tickers() -> int:
@@ -1950,6 +2115,16 @@ def _positive_int_env(name: str, default: int) -> int:
         return default
     try:
         return max(1, int(value))
+    except ValueError:
+        return default
+
+
+def _nonnegative_float_env(name: str, default: float) -> float:
+    value = os.environ.get(name, "")
+    if not value:
+        return default
+    try:
+        return max(0.0, float(value))
     except ValueError:
         return default
 
@@ -2063,6 +2238,12 @@ def _query_daily_prices_batch(
         f"{source_column} AS {field_name}"
         for field_name, source_column in _daily_price_field_columns(fields)
     )
+    price_files = _daily_price_partition_files(paths.data_root, since, until)
+    if price_files:
+        rows = _query_daily_price_partition_files(price_files, tickers, since, until, fields)
+        _append_daily_price_rows(prices, rows, fields)
+        return prices
+
     if paths.catalog_path.exists():
         with duckdb.connect(str(paths.catalog_path), read_only=True) as conn:
             rows = conn.execute(
@@ -2124,6 +2305,49 @@ def _query_daily_prices_batch(
         rows = conn.execute(sql, params).fetchall()
     _append_daily_price_rows(prices, rows, fields)
     return prices
+
+
+def _daily_price_partition_files(data_root: Path, since: date, until: date) -> list[Path]:
+    files: list[Path] = []
+    current = since
+    while current <= until:
+        path = data_root / "gold" / "daily_prices_adj" / f"dt={current.isoformat()}" / "part.parquet"
+        if path.exists():
+            files.append(path)
+        current += timedelta(days=1)
+    return files
+
+
+def _query_daily_price_partition_files(
+    price_files: list[Path],
+    tickers: list[str],
+    since: date,
+    until: date,
+    fields: tuple[str, ...],
+) -> list[tuple[Any, ...]]:
+    security_ids = [f"S{ticker}" for ticker in tickers]
+    frame = (
+        pl.scan_parquet(
+            [path.as_posix() for path in price_files],
+            hive_partitioning=True,
+        )
+        .filter(
+            pl.col("security_id").is_in(security_ids)
+            & (pl.col("date").cast(pl.Date, strict=False) >= since)
+            & (pl.col("date").cast(pl.Date, strict=False) <= until)
+        )
+        .select(
+            pl.col("security_id").str.replace(r"^S", "").alias("ticker"),
+            pl.col("date"),
+            *[
+                pl.col(source_column).alias(field_name)
+                for field_name, source_column in _daily_price_field_columns(fields)
+            ],
+        )
+        .sort("ticker", "date")
+        .collect()
+    )
+    return list(frame.iter_rows())
 
 
 def _daily_price_field_columns(fields: tuple[str, ...]) -> list[tuple[str, str]]:
@@ -2196,12 +2420,75 @@ def _query_basic_fundamentals_batch(
                 selected_years.append(row["fiscal_year"])
             if row["available_date"] is not None:
                 selected_dates.append(row["available_date"])
+        _sanitize_selected_equity_metric(selected)
         result[ticker]["metrics"] = selected
         if fiscal_year is None and selected_years:
             result[ticker]["fiscal_year"] = max(selected_years)
         if selected_dates:
             result[ticker]["available_date"] = max(selected_dates).isoformat()
+    _attach_per_share_metrics(paths, result, as_of)
     return result
+
+
+def _sanitize_selected_equity_metric(selected: dict[str, dict[str, Any]]) -> None:
+    assets = selected.get("assets")
+    liabilities = selected.get("liabilities")
+    if assets is None or liabilities is None:
+        return
+    assets_amount = assets.get("amount")
+    liabilities_amount = liabilities.get("amount")
+    if not isinstance(assets_amount, int | float) or not isinstance(liabilities_amount, int | float):
+        return
+    derived_amount = assets_amount - liabilities_amount
+    if derived_amount <= 0:
+        return
+
+    equity = selected.get("equity")
+    if equity is None:
+        selected["equity"] = _derived_equity_payload(assets, liabilities, derived_amount)
+        return
+
+    account_id = str(equity.get("account_id") or "")
+    if "EquityAttributableToOwnersOfParent" in account_id:
+        return
+
+    equity_amount = equity.get("amount")
+    if not isinstance(equity_amount, int | float):
+        selected["equity"] = _derived_equity_payload(assets, liabilities, derived_amount)
+        return
+    relative_gap = abs(equity_amount - derived_amount) / max(abs(derived_amount), 1.0)
+    if relative_gap > 0.05:
+        selected["equity"] = _derived_equity_payload(assets, liabilities, derived_amount, equity)
+
+
+def _derived_equity_payload(
+    assets: dict[str, Any],
+    liabilities: dict[str, Any],
+    amount: float,
+    replaced: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload = {
+        "amount": amount,
+        "account_id": "derived_AssetsMinusLiabilities",
+        "account_name": "assets minus liabilities",
+        "fiscal_year": assets.get("fiscal_year"),
+        "fiscal_period_end": assets.get("fiscal_period_end"),
+        "available_date": _max_present(values=(assets.get("available_date"), liabilities.get("available_date"))),
+        "report_type": assets.get("report_type"),
+        "is_consolidated": assets.get("is_consolidated"),
+        "derived_from": ["assets", "liabilities"],
+        "quality_note": "equity derived from assets minus liabilities",
+    }
+    if replaced is not None:
+        payload["replaced_account_id"] = replaced.get("account_id")
+        payload["replaced_account_name"] = replaced.get("account_name")
+        payload["replaced_amount"] = replaced.get("amount")
+    return payload
+
+
+def _max_present(values: tuple[Any, ...]) -> Any:
+    present = [value for value in values if value is not None]
+    return max(present) if present else None
 
 
 def _query_capital_actions_batch(
@@ -2238,6 +2525,850 @@ def _query_capital_actions_batch(
         if ticker in result:
             result[ticker].append({"fiscal_year": fiscal_year, "metrics": metrics})
     return result
+
+
+def _attach_per_share_metrics(
+    paths: ProjectPaths,
+    fundamentals: dict[str, dict[str, Any]],
+    as_of: date,
+) -> None:
+    cutoffs: dict[str, date] = {}
+    for ticker, payload in fundamentals.items():
+        metrics = payload.get("metrics", {})
+        dates = [
+            _parse_iso_date(metric.get("fiscal_period_end"))
+            for metric_name, metric in metrics.items()
+            if metric_name in {"net_income", "equity"}
+        ]
+        dates = [value for value in dates if value is not None]
+        if dates:
+            cutoffs[ticker] = max(dates)
+    if not cutoffs:
+        return
+
+    denominators = _query_share_denominators(paths, cutoffs, as_of)
+    eps_numerators = _query_eps_numerators(paths, list(cutoffs), as_of)
+    direct_eps = _query_direct_eps_metrics(paths, list(cutoffs), as_of)
+    for ticker, payload in fundamentals.items():
+        metrics = payload.get("metrics", {})
+        denominator = denominators.get(ticker)
+        per_share: dict[str, Any] = {}
+        eps = eps_numerators.get(ticker, {})
+        direct = direct_eps.get(ticker, {})
+        if denominator and denominator["shares"]:
+            if "equity" in metrics:
+                per_share["bps"] = _per_share_payload(
+                    metrics["equity"],
+                    denominator,
+                    "equity",
+                )
+            if eps.get("annual") is not None:
+                per_share["eps_annual"] = _per_share_payload(
+                    eps["annual"],
+                    denominator,
+                    "net_income_annual",
+                )
+            if eps.get("ttm") is not None:
+                per_share["eps_ttm"] = _per_share_payload(
+                    eps["ttm"],
+                    denominator,
+                    "net_income_ttm",
+                )
+            else:
+                per_share["eps_ttm"] = _unavailable_per_share_payload(
+                    denominator,
+                    "net_income_ttm",
+                    eps.get("ttm_reason", "ttm source rows unavailable"),
+                )
+            per_share["eps_forward"] = _unavailable_per_share_payload(
+                denominator,
+                "net_income_forward",
+                "forward earnings estimates are not available in the local dataset",
+            )
+        elif "equity" in metrics:
+            per_share["bps"] = _unavailable_denominator_per_share_payload(
+                metrics["equity"],
+                "equity",
+                "share denominator is not available as of the equity fiscal period",
+            )
+        if direct.get("annual") is not None:
+            per_share["eps_annual"] = _direct_per_share_payload(
+                direct["annual"],
+                "basic_eps_annual",
+            )
+        if direct.get("ttm") is not None:
+            per_share["eps_ttm"] = _direct_per_share_payload(
+                direct["ttm"],
+                "basic_eps_ttm",
+            )
+        if per_share:
+            payload["per_share"] = per_share
+
+
+def _per_share_payload(
+    metric: dict[str, Any],
+    denominator: dict[str, Any],
+    numerator_metric: str,
+) -> dict[str, Any]:
+    shares = denominator["shares"]
+    value = metric["amount"] / shares if shares else None
+    return {
+        "value": value,
+        "numerator_metric": numerator_metric,
+        "numerator_amount": metric["amount"],
+        "shares": shares,
+        "share_date": denominator["share_date"],
+        "share_basis": denominator["share_basis"],
+        "includes_preferred": denominator["includes_preferred"],
+        "treasury_shares_excluded": denominator["treasury_shares_excluded"],
+        "components": denominator["components"],
+    }
+
+
+def _unavailable_per_share_payload(
+    denominator: dict[str, Any],
+    numerator_metric: str,
+    reason: str,
+) -> dict[str, Any]:
+    return {
+        "value": None,
+        "numerator_metric": numerator_metric,
+        "numerator_amount": None,
+        "shares": denominator["shares"],
+        "share_date": denominator["share_date"],
+        "share_basis": denominator["share_basis"],
+        "includes_preferred": denominator["includes_preferred"],
+        "treasury_shares_excluded": denominator["treasury_shares_excluded"],
+        "components": denominator["components"],
+        "available": False,
+        "reason": reason,
+    }
+
+
+def _unavailable_denominator_per_share_payload(
+    metric: dict[str, Any],
+    numerator_metric: str,
+    reason: str,
+) -> dict[str, Any]:
+    return {
+        "value": None,
+        "numerator_metric": numerator_metric,
+        "numerator_amount": metric["amount"],
+        "shares": None,
+        "share_date": None,
+        "share_basis": None,
+        "includes_preferred": None,
+        "treasury_shares_excluded": None,
+        "components": [],
+        "available": False,
+        "reason": reason,
+    }
+
+
+def _direct_per_share_payload(metric: dict[str, Any], numerator_metric: str) -> dict[str, Any]:
+    return {
+        "value": metric["amount"],
+        "numerator_metric": numerator_metric,
+        "numerator_amount": metric["amount"],
+        "shares": None,
+        "share_date": metric["fiscal_period_end"],
+        "share_basis": "reported_basic_eps",
+        "includes_preferred": None,
+        "treasury_shares_excluded": True,
+        "components": [],
+        "source_account_id": metric["account_id"],
+        "source_account_name": metric["account_name"],
+        "available": True,
+    }
+
+
+def _query_direct_eps_metrics(
+    paths: ProjectPaths,
+    tickers: list[str],
+    as_of: date,
+) -> dict[str, dict[str, Any]]:
+    rows = _query_fundamental_rows(
+        paths,
+        tickers,
+        _basic_fundamental_account_ids(DIRECT_EPS_METRICS),
+        as_of,
+        None,
+        None,
+    )
+    by_ticker: dict[str, list[dict[str, Any]]] = {ticker: [] for ticker in tickers}
+    for row in rows:
+        if row["ticker"] in by_ticker:
+            by_ticker[row["ticker"]].append(row)
+
+    result: dict[str, dict[str, Any]] = {}
+    for ticker, ticker_rows in by_ticker.items():
+        annual = _select_direct_eps_annual_row(ticker_rows)
+        latest = _select_basic_fundamental_row("eps_basic", ticker_rows, DIRECT_EPS_METRICS)
+        ttm = annual if latest is not None and latest["report_type"] == "11011" else None
+        result[ticker] = {
+            "annual": _eps_metric_payload(annual, "reported_annual") if annual else None,
+            "ttm": _eps_metric_payload(ttm, "reported_ttm") if ttm else None,
+        }
+    return result
+
+
+def _select_direct_eps_annual_row(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    annual_rows = [row for row in rows if row["report_type"] == "11011"]
+    return _select_basic_fundamental_row("eps_basic", annual_rows, DIRECT_EPS_METRICS)
+
+
+def _query_eps_numerators(
+    paths: ProjectPaths,
+    tickers: list[str],
+    as_of: date,
+) -> dict[str, dict[str, Any]]:
+    rows = _query_fundamental_rows(
+        paths,
+        tickers,
+        _basic_fundamental_account_ids({"net_income": BASIC_FUNDAMENTAL_METRICS["net_income"]}),
+        as_of,
+        None,
+        None,
+    )
+    by_ticker: dict[str, list[dict[str, Any]]] = {ticker: [] for ticker in tickers}
+    for row in rows:
+        if row["ticker"] in by_ticker:
+            by_ticker[row["ticker"]].append(row)
+
+    result: dict[str, dict[str, Any]] = {}
+    for ticker, ticker_rows in by_ticker.items():
+        annual = _select_eps_annual_row(ticker_rows)
+        ttm, reason = _select_eps_ttm_row(ticker_rows)
+        result[ticker] = {
+            "annual": _eps_metric_payload(annual, "annual") if annual else None,
+            "ttm": _eps_metric_payload(ttm, "ttm") if ttm else None,
+            "ttm_reason": reason,
+        }
+    return result
+
+
+def _select_eps_annual_row(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    annual_rows = [row for row in rows if row["report_type"] == "11011"]
+    return _select_basic_fundamental_row("net_income", annual_rows)
+
+
+def _select_eps_ttm_row(rows: list[dict[str, Any]]) -> tuple[dict[str, Any] | None, str | None]:
+    latest = _select_basic_fundamental_row("net_income", rows)
+    if latest is None:
+        return None, "net income rows unavailable"
+    if latest["report_type"] == "11011":
+        return latest, None
+
+    period_end = latest["fiscal_period_end"]
+    fiscal_year = latest["fiscal_year"]
+    if not isinstance(period_end, date) or fiscal_year is None:
+        return None, "latest net income row lacks fiscal period metadata"
+
+    prior_annual = _select_matching_eps_row(rows, fiscal_year - 1, 12, "11011")
+    prior_same_period = _select_matching_eps_row(
+        rows,
+        fiscal_year - 1,
+        period_end.month,
+        latest["report_type"],
+    )
+    if prior_annual is None or prior_same_period is None:
+        return None, "prior-year annual or matching interim row unavailable"
+
+    ttm = dict(latest)
+    ttm["amount"] = latest["amount"] + prior_annual["amount"] - prior_same_period["amount"]
+    ttm["account_name"] = "TTM net income"
+    return ttm, None
+
+
+def _select_matching_eps_row(
+    rows: list[dict[str, Any]],
+    fiscal_year: int,
+    fiscal_period_month: int,
+    report_type: str,
+) -> dict[str, Any] | None:
+    matches = [
+        row
+        for row in rows
+        if row["fiscal_year"] == fiscal_year
+        and row["report_type"] == report_type
+        and isinstance(row["fiscal_period_end"], date)
+        and row["fiscal_period_end"].month == fiscal_period_month
+    ]
+    return _select_basic_fundamental_row("net_income", matches)
+
+
+def _eps_metric_payload(row: dict[str, Any], basis: str) -> dict[str, Any]:
+    payload = _fundamental_metric_payload(row)
+    payload["basis"] = basis
+    return payload
+
+
+def _query_share_denominators(
+    paths: ProjectPaths,
+    cutoffs: dict[str, date],
+    as_of: date,
+) -> dict[str, dict[str, Any]]:
+    if not cutoffs:
+        return {}
+    return _query_dart_share_denominators(paths, cutoffs, as_of)
+
+
+def _query_dart_share_denominators(
+    paths: ProjectPaths,
+    cutoffs: dict[str, date],
+    as_of: date,
+) -> dict[str, dict[str, Any]]:
+    ticker_to_corp = _query_ticker_corp_codes(paths, list(cutoffs))
+    if not ticker_to_corp:
+        return {}
+    result = _query_dart_share_denominators_dataset(paths, cutoffs, as_of, ticker_to_corp)
+    missing = {ticker: cutoff for ticker, cutoff in cutoffs.items() if ticker not in result}
+    if not missing:
+        return result
+    rows_by_corp = _load_cached_dart_stock_total_rows(paths.data_root)
+    for ticker, cutoff in missing.items():
+        corp_code = ticker_to_corp.get(ticker)
+        if not corp_code:
+            continue
+        candidates = [
+            row
+            for row in rows_by_corp.get(corp_code, [])
+            if row.get("stock_date") is not None and row["stock_date"] <= cutoff
+        ]
+        denominator = _dart_share_denominator_from_rows(candidates)
+        if denominator is not None:
+            result[ticker] = denominator
+    return result
+
+
+def _query_dart_share_denominators_dataset(
+    paths: ProjectPaths,
+    cutoffs: dict[str, date],
+    as_of: date,
+    ticker_to_corp: dict[str, str],
+) -> dict[str, dict[str, Any]]:
+    if paths.catalog_path.exists():
+        return _query_dart_share_denominators_dataset_catalog(paths, cutoffs, as_of, ticker_to_corp)
+    return _query_dart_share_denominators_dataset_parquet(paths, cutoffs, as_of, ticker_to_corp)
+
+
+def _query_dart_share_denominators_dataset_catalog(
+    paths: ProjectPaths,
+    cutoffs: dict[str, date],
+    as_of: date,
+    ticker_to_corp: dict[str, str],
+) -> dict[str, dict[str, Any]]:
+    result: dict[str, dict[str, Any]] = {}
+    with duckdb.connect(str(paths.catalog_path), read_only=True) as conn:
+        for ticker, cutoff in cutoffs.items():
+            corp_code = ticker_to_corp.get(ticker)
+            if not corp_code:
+                continue
+            rows = conn.execute(
+                """
+                WITH latest_period AS (
+                    SELECT max(fiscal_period_end) AS fiscal_period_end
+                    FROM silver.share_counts
+                    WHERE corp_code = ?
+                      AND fiscal_period_end <= ?
+                      AND available_date <= ?
+                )
+                SELECT
+                    stock_kind,
+                    share_class,
+                    fiscal_period_end,
+                    issued_shares,
+                    treasury_shares,
+                    outstanding_shares,
+                    source_rcept_no
+                FROM silver.share_counts
+                WHERE corp_code = ?
+                  AND fiscal_period_end = (SELECT fiscal_period_end FROM latest_period)
+                  AND available_date <= ?
+                """,
+                [corp_code, cutoff, as_of, corp_code, as_of],
+            ).fetchall()
+            denominator = _dart_share_denominator_from_dataset_rows(rows)
+            if denominator is not None:
+                result[ticker] = denominator
+    return result
+
+
+def _query_dart_share_denominators_dataset_parquet(
+    paths: ProjectPaths,
+    cutoffs: dict[str, date],
+    as_of: date,
+    ticker_to_corp: dict[str, str],
+) -> dict[str, dict[str, Any]]:
+    share_glob = paths.data_root / "silver/share_counts/fiscal_year=*/part.parquet"
+    if not glob(share_glob.as_posix()):
+        return {}
+    result: dict[str, dict[str, Any]] = {}
+    with duckdb.connect(":memory:") as conn:
+        for ticker, cutoff in cutoffs.items():
+            corp_code = ticker_to_corp.get(ticker)
+            if not corp_code:
+                continue
+            rows = conn.execute(
+                f"""
+                WITH share_counts AS (
+                    SELECT *
+                    FROM read_parquet('{_duckdb_path(share_glob)}', hive_partitioning = true, union_by_name = true)
+                ),
+                latest_period AS (
+                    SELECT max(fiscal_period_end) AS fiscal_period_end
+                    FROM share_counts
+                    WHERE corp_code = ?
+                      AND fiscal_period_end <= ?
+                      AND available_date <= ?
+                )
+                SELECT
+                    stock_kind,
+                    share_class,
+                    fiscal_period_end,
+                    issued_shares,
+                    treasury_shares,
+                    outstanding_shares,
+                    source_rcept_no
+                FROM share_counts
+                WHERE corp_code = ?
+                  AND fiscal_period_end = (SELECT fiscal_period_end FROM latest_period)
+                  AND available_date <= ?
+                """,
+                [corp_code, cutoff, as_of, corp_code, as_of],
+            ).fetchall()
+            denominator = _dart_share_denominator_from_dataset_rows(rows)
+            if denominator is not None:
+                result[ticker] = denominator
+    return result
+
+
+def _query_ticker_corp_codes(paths: ProjectPaths, tickers: list[str]) -> dict[str, str]:
+    if not tickers:
+        return {}
+    result: dict[str, str] = {}
+    if paths.catalog_path.exists():
+        with duckdb.connect(str(paths.catalog_path), read_only=True) as conn:
+            for ticker, corp_code in conn.execute(
+                """
+                SELECT ticker, corp_code
+                FROM analytics.securities
+                WHERE ticker IN (SELECT unnest(?))
+                  AND corp_code IS NOT NULL
+                """,
+                [tickers],
+            ).fetchall():
+                result[str(ticker).zfill(6)] = str(corp_code)
+        return result
+
+    master_path = paths.data_root / "gold/security_master.parquet"
+    if not master_path.exists():
+        return result
+    with duckdb.connect(":memory:") as conn:
+        for ticker, corp_code in conn.execute(
+            f"""
+            SELECT ticker, corp_code
+            FROM read_parquet('{_duckdb_path(master_path)}', union_by_name = true)
+            WHERE ticker IN (SELECT unnest(?))
+              AND corp_code IS NOT NULL
+            """,
+            [tickers],
+        ).fetchall():
+            result[str(ticker).zfill(6)] = str(corp_code)
+    return result
+
+
+def _load_cached_dart_stock_total_rows(data_root: Path) -> dict[str, list[dict[str, Any]]]:
+    cache_glob = data_root / "_cache/opendart_listed_investments_*/stockTotqySttus_*_*.json"
+    rows_by_corp: dict[str, list[dict[str, Any]]] = {}
+    for path in glob(cache_glob.as_posix()):
+        try:
+            payload = json.loads(Path(path).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        for row in payload.get("list") or []:
+            if not isinstance(row, dict):
+                continue
+            corp_code = str(row.get("corp_code") or "")
+            if not corp_code:
+                continue
+            out = dict(row)
+            out["stock_date"] = _parse_iso_date(row.get("stlm_dt"))
+            rows_by_corp.setdefault(corp_code, []).append(out)
+    return rows_by_corp
+
+
+def _dart_share_denominator_from_rows(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    dated_rows = [row for row in rows if row.get("stock_date") is not None]
+    if not dated_rows:
+        return None
+    latest_date = max(row["stock_date"] for row in dated_rows)
+    latest_rows = [row for row in dated_rows if row["stock_date"] == latest_date]
+    components: list[dict[str, Any]] = []
+    for row in latest_rows:
+        stock_kind = str(row.get("se") or "")
+        if stock_kind in {"합계", "비고"}:
+            continue
+        outstanding = _int_or_none(row.get("distb_stock_co"))
+        if outstanding is None or outstanding <= 0:
+            continue
+        issued = _int_or_none(row.get("istc_totqy"))
+        treasury = _int_or_none(row.get("tesstk_co"))
+        components.append(
+            {
+                "stock_kind": stock_kind,
+                "share_class": _share_class_from_stock_kind(stock_kind),
+                "share_date": latest_date.isoformat(),
+                "issued_shares": issued,
+                "treasury_shares": treasury,
+                "outstanding_shares": outstanding,
+                "source_rcept_no": row.get("rcept_no"),
+                "source": "opendart.stockTotqySttus",
+            }
+        )
+    shares = sum(row["outstanding_shares"] or 0 for row in components)
+    if shares <= 0:
+        return None
+    return {
+        "shares": shares,
+        "share_date": latest_date.isoformat(),
+        "share_basis": "dart_distributed_shares",
+        "includes_preferred": any(row["share_class"] == "preferred" for row in components),
+        "treasury_shares_excluded": True,
+        "components": components,
+    }
+
+
+def _dart_share_denominator_from_dataset_rows(rows: list[tuple[Any, ...]]) -> dict[str, Any] | None:
+    components: list[dict[str, Any]] = []
+    for row in rows:
+        if row[0] in {"합계", "비고"}:
+            continue
+        outstanding = row[5]
+        if outstanding is None or outstanding <= 0:
+            continue
+        components.append(
+            {
+                "stock_kind": row[0],
+                "share_class": row[1],
+                "share_date": _iso_or_none(row[2]),
+                "issued_shares": row[3],
+                "treasury_shares": row[4],
+                "outstanding_shares": outstanding,
+                "source_rcept_no": row[6],
+                "source": "opendart.stockTotqySttus",
+            }
+        )
+    shares = sum(row["outstanding_shares"] or 0 for row in components)
+    if shares <= 0:
+        return None
+    share_dates = [row["share_date"] for row in components if row["share_date"]]
+    return {
+        "shares": shares,
+        "share_date": max(share_dates) if share_dates else None,
+        "share_basis": "dart_distributed_shares",
+        "includes_preferred": any(row["share_class"] == "preferred" for row in components),
+        "treasury_shares_excluded": True,
+        "components": components,
+    }
+
+
+def _query_share_denominators_catalog(
+    paths: ProjectPaths,
+    cutoffs: dict[str, date],
+) -> dict[str, dict[str, Any]]:
+    result: dict[str, dict[str, Any]] = {}
+    with duckdb.connect(str(paths.catalog_path), read_only=True) as conn:
+        for ticker, cutoff in cutoffs.items():
+            rows = conn.execute(
+                """
+                WITH requested AS (
+                    SELECT COALESCE(corp_code, security_id) AS issuer_key
+                    FROM analytics.securities
+                    WHERE ticker = ?
+                    LIMIT 1
+                ),
+                issuer_securities AS (
+                    SELECT
+                        sm.security_id,
+                        sm.ticker,
+                        sm.share_class,
+                        sm.security_type
+                    FROM analytics.securities AS sm
+                    JOIN requested AS r
+                        ON COALESCE(sm.corp_code, sm.security_id) = r.issuer_key
+                    WHERE sm.security_type = 'equity'
+                ),
+                ranked AS (
+                    SELECT
+                        s.ticker,
+                        s.security_id,
+                        s.share_class,
+                        p.date,
+                        p.listed_shares,
+                        row_number() OVER (
+                            PARTITION BY s.security_id
+                            ORDER BY p.date DESC
+                        ) AS rn
+                    FROM issuer_securities AS s
+                    JOIN analytics.daily_prices AS p
+                        ON p.security_id = s.security_id
+                    WHERE p.date <= ?
+                      AND p.listed_shares IS NOT NULL
+                      AND p.listed_shares > 0
+                )
+                SELECT ticker, security_id, share_class, date, listed_shares
+                FROM ranked
+                WHERE rn = 1
+                ORDER BY ticker
+                """,
+                [ticker, cutoff],
+            ).fetchall()
+            denominator = _share_denominator_from_rows(rows)
+            if denominator is not None:
+                result[ticker] = denominator
+    return result
+
+
+def _query_share_denominators_parquet(
+    paths: ProjectPaths,
+    cutoffs: dict[str, date],
+) -> dict[str, dict[str, Any]]:
+    master_path = paths.data_root / "gold/security_master.parquet"
+    price_glob = paths.data_root / "gold/daily_prices_adj/dt=*/part.parquet"
+    if not master_path.exists() or not glob(price_glob.as_posix()):
+        return {}
+    result: dict[str, dict[str, Any]] = {}
+    with duckdb.connect(":memory:") as conn:
+        for ticker, cutoff in cutoffs.items():
+            rows = conn.execute(
+                f"""
+                WITH master AS (
+                    SELECT *
+                    FROM read_parquet('{_duckdb_path(master_path)}', union_by_name = true)
+                ),
+                requested AS (
+                    SELECT COALESCE(corp_code, security_id) AS issuer_key
+                    FROM master
+                    WHERE ticker = ?
+                    LIMIT 1
+                ),
+                issuer_securities AS (
+                    SELECT
+                        sm.security_id,
+                        sm.ticker,
+                        sm.share_class,
+                        sm.security_type
+                    FROM master AS sm
+                    JOIN requested AS r
+                        ON COALESCE(sm.corp_code, sm.security_id) = r.issuer_key
+                    WHERE sm.security_type = 'equity'
+                ),
+                prices AS (
+                    SELECT *
+                    FROM read_parquet('{_duckdb_path(price_glob)}', hive_partitioning = true, union_by_name = true)
+                ),
+                ranked AS (
+                    SELECT
+                        s.ticker,
+                        s.security_id,
+                        s.share_class,
+                        p.date,
+                        p.listed_shares,
+                        row_number() OVER (
+                            PARTITION BY s.security_id
+                            ORDER BY p.date DESC
+                        ) AS rn
+                    FROM issuer_securities AS s
+                    JOIN prices AS p
+                        ON p.security_id = s.security_id
+                    WHERE p.date <= ?
+                      AND p.listed_shares IS NOT NULL
+                      AND p.listed_shares > 0
+                )
+                SELECT ticker, security_id, share_class, date, listed_shares
+                FROM ranked
+                WHERE rn = 1
+                ORDER BY ticker
+                """,
+                [ticker, cutoff],
+            ).fetchall()
+            denominator = _share_denominator_from_rows(rows)
+            if denominator is not None:
+                result[ticker] = denominator
+    return result
+
+
+def _share_denominator_from_rows(rows: list[tuple[Any, ...]]) -> dict[str, Any] | None:
+    components = [
+        {
+            "ticker": row[0],
+            "security_id": row[1],
+            "share_class": row[2],
+            "share_date": _iso_or_none(row[3]),
+            "listed_shares": row[4],
+        }
+        for row in rows
+    ]
+    shares = sum(row["listed_shares"] or 0 for row in components)
+    if shares <= 0:
+        return None
+    share_dates = [row["share_date"] for row in components if row["share_date"]]
+    return {
+        "shares": shares,
+        "share_date": max(share_dates) if share_dates else None,
+        "share_basis": "issuer_listed_shares_sum",
+        "includes_preferred": any(row["share_class"] == "preferred" for row in components),
+        "treasury_shares_excluded": False,
+        "components": components,
+    }
+
+
+def _query_dividends_batch(
+    paths: ProjectPaths,
+    tickers: list[str],
+    as_of: date,
+    start_year: int | None,
+    end_year: int | None,
+) -> dict[str, list[dict[str, Any]]]:
+    result: dict[str, list[dict[str, Any]]] = {ticker: [] for ticker in tickers}
+    if not tickers:
+        return result
+    rows = (
+        _query_dividend_rows_catalog(paths, tickers, as_of, start_year, end_year)
+        if paths.catalog_path.exists()
+        else _query_dividend_rows_parquet(paths, tickers, as_of, start_year, end_year)
+    )
+    for row in rows:
+        ticker = row.get("ticker")
+        if ticker in result:
+            result[ticker].append(row)
+    return result
+
+
+def _dividend_year_filter(
+    start_year: int | None,
+    end_year: int | None,
+) -> tuple[str, list[int]]:
+    clauses: list[str] = []
+    params: list[int] = []
+    if start_year is not None:
+        clauses.append("AND d.fiscal_year >= ?")
+        params.append(start_year)
+    if end_year is not None:
+        clauses.append("AND d.fiscal_year <= ?")
+        params.append(end_year)
+    return "\n".join(clauses), params
+
+
+def _query_dividend_rows_catalog(
+    paths: ProjectPaths,
+    tickers: list[str],
+    as_of: date,
+    start_year: int | None,
+    end_year: int | None,
+) -> list[dict[str, Any]]:
+    year_filter, year_params = _dividend_year_filter(start_year, end_year)
+    params: list[Any] = [*tickers, as_of, *year_params]
+    with duckdb.connect(str(paths.catalog_path), read_only=True) as conn:
+        rows = conn.execute(
+            f"""
+            SELECT
+                d.fiscal_year,
+                d.fiscal_period_end,
+                d.rcept_dt,
+                d.available_date,
+                d.corp_code,
+                d.corp_name,
+                d.security_id,
+                d.ticker,
+                d.share_class,
+                d.stock_kind,
+                d.cash_dividend_per_share,
+                d.stock_dividend_per_share,
+                d.cash_dividend_yield_pct,
+                d.currency,
+                d.source_rcept_no,
+                d.report_type,
+                d.source,
+                d.is_estimated
+            FROM silver.dividends AS d
+            WHERE d.ticker IN ({_sql_placeholders(tickers)})
+              AND d.available_date <= ?
+              {year_filter}
+            ORDER BY d.ticker, d.fiscal_year, d.share_class, d.stock_kind
+            """,
+            params,
+        ).fetchall()
+    return [_dividend_row_dict(row) for row in rows]
+
+
+def _query_dividend_rows_parquet(
+    paths: ProjectPaths,
+    tickers: list[str],
+    as_of: date,
+    start_year: int | None,
+    end_year: int | None,
+) -> list[dict[str, Any]]:
+    dividends_glob = paths.data_root / "silver/dividends/fiscal_year=*/part.parquet"
+    if not glob(dividends_glob.as_posix()):
+        return []
+    year_filter, year_params = _dividend_year_filter(start_year, end_year)
+    params: list[Any] = [*tickers, as_of, *year_params]
+    with duckdb.connect(":memory:") as conn:
+        rows = conn.execute(
+            f"""
+            SELECT
+                d.fiscal_year,
+                d.fiscal_period_end,
+                d.rcept_dt,
+                d.available_date,
+                d.corp_code,
+                d.corp_name,
+                d.security_id,
+                d.ticker,
+                d.share_class,
+                d.stock_kind,
+                d.cash_dividend_per_share,
+                d.stock_dividend_per_share,
+                d.cash_dividend_yield_pct,
+                d.currency,
+                d.source_rcept_no,
+                d.report_type,
+                d.source,
+                d.is_estimated
+            FROM read_parquet('{_duckdb_path(dividends_glob)}', hive_partitioning = true, union_by_name = true) AS d
+            WHERE d.ticker IN ({_sql_placeholders(tickers)})
+              AND d.available_date <= ?
+              {year_filter}
+            ORDER BY d.ticker, d.fiscal_year, d.share_class, d.stock_kind
+            """,
+            params,
+        ).fetchall()
+    return [_dividend_row_dict(row) for row in rows]
+
+
+def _dividend_row_dict(row: tuple[Any, ...]) -> dict[str, Any]:
+    return {
+        "fiscal_year": row[0],
+        "fiscal_period_end": _iso_or_none(row[1]),
+        "rcept_dt": _iso_or_none(row[2]),
+        "available_date": _iso_or_none(row[3]),
+        "corp_code": row[4],
+        "corp_name": row[5],
+        "security_id": row[6],
+        "ticker": row[7],
+        "share_class": row[8],
+        "stock_kind": row[9],
+        "cash_dividend_per_share": row[10],
+        "stock_dividend_per_share": row[11],
+        "cash_dividend_yield_pct": row[12],
+        "currency": row[13],
+        "source_rcept_no": row[14],
+        "report_type": row[15],
+        "source": row[16],
+        "is_estimated": row[17],
+    }
 
 
 def _query_fundamental_rows(
@@ -2439,6 +3570,36 @@ def _iso_or_none(value: Any) -> str | None:
     return value.isoformat() if hasattr(value, "isoformat") else None
 
 
+def _parse_iso_date(value: Any) -> date | None:
+    if isinstance(value, date):
+        return value
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(str(value))
+    except ValueError:
+        return None
+
+
+def _int_or_none(value: Any) -> int | None:
+    if value in (None, "", " ", "-"):
+        return None
+    try:
+        return int(float(str(value).replace(",", "").strip()))
+    except ValueError:
+        return None
+
+
+def _share_class_from_stock_kind(stock_kind: str | None) -> str | None:
+    if not stock_kind:
+        return None
+    if "보통" in stock_kind or "의결권 있는" in stock_kind:
+        return "common"
+    if "우선" in stock_kind or "종류" in stock_kind or "의결권 없는" in stock_kind:
+        return "preferred"
+    return None
+
+
 def _query_macro_table(
     paths: ProjectPaths,
     table: str,
@@ -2634,8 +3795,9 @@ def _safe_float(value: Any, default: str) -> str:
 
 
 def _dataset_stat(data_root: Path, name: str, spec: Any) -> dict[str, Any]:
-    files = [Path(file) for file in glob(spec.glob_path(data_root).as_posix())]
-    size = sum(file.stat().st_size for file in files if file.exists())
+    file_stats = _dataset_file_stats(data_root, spec)
+    files = [path for path, _size in file_stats]
+    size = sum(file_size for _path, file_size in file_stats)
     rows = _row_count(files, spec.hive_partitioning) if files and _scan_parquet_enabled() else None
     latest = _latest_partition(files)
     coverage = _coverage_for(files, spec.hive_partitioning) if files else {}
@@ -2649,6 +3811,63 @@ def _dataset_stat(data_root: Path, name: str, spec: Any) -> dict[str, Any]:
         **coverage,
         "status": "ready" if files else "empty",
     }
+
+
+def _latest_price_date_from_datasets(datasets: list[dict[str, Any]]) -> str | None:
+    dataset = next((item for item in datasets if item["name"] == "gold.daily_prices_adj"), None)
+    latest = dataset.get("latest_partition") if dataset else None
+    if not isinstance(latest, str) or "=" not in latest:
+        return None
+    return latest.split("=", maxsplit=1)[1]
+
+
+def _dataset_file_stats(data_root: Path, spec: Any) -> list[tuple[Path, int]]:
+    relative_glob = getattr(spec, "relative_glob", "")
+    files = _partitioned_part_file_stats(data_root, relative_glob)
+    if files is not None:
+        return files
+    result: list[tuple[Path, int]] = []
+    for file in glob(spec.glob_path(data_root).as_posix()):
+        path = Path(file)
+        try:
+            result.append((path, path.stat().st_size))
+        except OSError:
+            continue
+    return result
+
+
+def _partitioned_part_file_stats(data_root: Path, relative_glob: str) -> list[tuple[Path, int]] | None:
+    parts = relative_glob.split("/")
+    if not parts or parts[-1] != "part.parquet" or not any("*" in part for part in parts):
+        return None
+
+    results: list[tuple[Path, int]] = []
+
+    def visit(directory: Path, index: int) -> None:
+        if index == len(parts) - 1:
+            path = directory / parts[index]
+            with suppress(OSError):
+                results.append((path, path.stat().st_size))
+            return
+
+        part = parts[index]
+        if "*" not in part:
+            visit(directory / part, index + 1)
+            return
+
+        prefix, suffix = part.split("*", maxsplit=1)
+        try:
+            entries = list(os.scandir(directory))
+        except OSError:
+            return
+        for entry in entries:
+            if not entry.is_dir(follow_symlinks=False):
+                continue
+            if entry.name.startswith(prefix) and entry.name.endswith(suffix):
+                visit(Path(entry.path), index + 1)
+
+    visit(data_root, 0)
+    return results
 
 
 def _coverage_for(files: list[Path], hive_partitioning: bool) -> dict[str, str | None]:
@@ -2727,10 +3946,11 @@ def _backfill_overview(
     end_year: int = 1990,
 ) -> dict[str, Any]:
     years = tuple(range(max(start_year, end_year), min(start_year, end_year) - 1, -1))
-    price_files = [
-        Path(file)
-        for file in glob((data_root / "gold/daily_prices_adj/dt=*/part.parquet").as_posix())
-    ]
+    price_file_stats = _partitioned_part_file_stats(
+        data_root,
+        "gold/daily_prices_adj/dt=*/part.parquet",
+    )
+    price_files = [path for path, _size in price_file_stats or []]
     dates_by_year: dict[int, list[str]] = {year: [] for year in years}
     for file in price_files:
         partition_date = _partition_date(file, "dt")

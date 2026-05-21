@@ -18,6 +18,16 @@ def test_parquet_writer_is_append_only_by_default(tmp_path) -> None:
         writer.write(pl.DataFrame({"ticker": ["000660"]}), path)
 
 
+def test_parquet_writer_overwrite_replaces_file_and_cleans_temp(tmp_path) -> None:
+    path = tmp_path / "part.parquet"
+    writer = ParquetDatasetWriter()
+    writer.write(pl.DataFrame({"ticker": ["005930"]}), path)
+    writer.write(pl.DataFrame({"ticker": ["000660"]}), path, mode="overwrite")
+
+    assert pl.read_parquet(path).to_dict(as_series=False) == {"ticker": ["000660"]}
+    assert not list(tmp_path.glob(".part.parquet.*.tmp"))
+
+
 def test_catalog_builds_empty_views(tmp_path) -> None:
     data_root = tmp_path / "data"
     catalog_path = data_root / "catalog" / "finance_pi.duckdb"
@@ -44,6 +54,9 @@ def test_layout_partition_paths(tmp_path) -> None:
     assert path.as_posix().endswith("bronze/krx_daily/dt=2024-01-02/part.parquet")
     naver = layout.partition_path("bronze.naver_summary_raw", date(2024, 1, 2))
     assert naver.as_posix().endswith("bronze/naver_summary/dt=2024-01-02/part.parquet")
+    assert layout.partition_path("silver.dividends", date(2024, 12, 31)).as_posix().endswith(
+        "silver/dividends/fiscal_year=2024/part.parquet"
+    )
     assert layout.singleton_path("macro.cpi").as_posix().endswith("macro/cpi/part.parquet")
     assert layout.singleton_path("macro.rates").as_posix().endswith("macro/rates/part.parquet")
     assert layout.singleton_path("macro.indices").as_posix().endswith("macro/indices/part.parquet")

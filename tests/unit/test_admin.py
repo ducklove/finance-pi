@@ -5,11 +5,14 @@ from datetime import date
 import polars as pl
 
 from finance_pi.admin.server import (
+    AdminServiceBusy,
     AdminState,
+    _admin_max_jobs,
     _admin_max_price_days,
     _admin_max_price_queries,
     _admin_max_price_tickers,
     _admin_max_request_threads,
+    _admin_price_query_wait_seconds,
     _api_docs_payload,
     _ensure_docs_built,
     _health_payload,
@@ -375,6 +378,15 @@ def test_admin_basic_fundamentals_returns_latest_available_metrics(tmp_path) -> 
                 "corp_code": "00126380",
             },
             {
+                "security_id": "S005935",
+                "ticker": "005935",
+                "name": "Samsung Pref",
+                "market": "KOSPI",
+                "share_class": "preferred",
+                "security_type": "equity",
+                "corp_code": "00126380",
+            },
+            {
                 "security_id": "S000660",
                 "ticker": "000660",
                 "name": "SK Hynix",
@@ -414,6 +426,36 @@ def test_admin_basic_fundamentals_returns_latest_available_metrics(tmp_path) -> 
                     "account_id": "dart_OperatingIncomeLoss",
                     "account_name": "영업이익",
                     "amount": 43_000.0,
+                    "is_consolidated": True,
+                    "accounting_basis": "연결",
+                    "fiscal_year": 2025,
+                },
+                {
+                    "security_id": "S005930",
+                    "corp_code": "00126380",
+                    "fiscal_period_end": date(2025, 12, 31),
+                    "event_date": date(2025, 12, 31),
+                    "rcept_dt": date(2026, 3, 10),
+                    "available_date": date(2026, 3, 10),
+                    "report_type": "11011",
+                    "account_id": "ifrs-full_ProfitLossAttributableToOwnersOfParent",
+                    "account_name": "지배기업 소유주지분 순이익",
+                    "amount": 30_000.0,
+                    "is_consolidated": True,
+                    "accounting_basis": "연결",
+                    "fiscal_year": 2025,
+                },
+                {
+                    "security_id": "S005930",
+                    "corp_code": "00126380",
+                    "fiscal_period_end": date(2025, 12, 31),
+                    "event_date": date(2025, 12, 31),
+                    "rcept_dt": date(2026, 3, 10),
+                    "available_date": date(2026, 3, 10),
+                    "report_type": "11011",
+                    "account_id": "ifrs-full_EquityAttributableToOwnersOfParent",
+                    "account_name": "지배기업 소유주지분",
+                    "amount": 120_000.0,
                     "is_consolidated": True,
                     "accounting_basis": "연결",
                     "fiscal_year": 2025,
@@ -497,6 +539,102 @@ def test_admin_basic_fundamentals_returns_latest_available_metrics(tmp_path) -> 
         ),
         layout.partition_path("silver.financials", date(2025, 1, 1)),
     )
+    writer.write(
+        pl.DataFrame(
+            [
+                {
+                    "date": date(2025, 12, 31),
+                    "security_id": "S005930",
+                    "listing_id": "L005930",
+                    "open_adj": 100.0,
+                    "high_adj": 100.0,
+                    "low_adj": 100.0,
+                    "close_adj": 100.0,
+                    "return_1d": 0.0,
+                    "volume": 1,
+                    "trading_value": 100,
+                    "market_cap": 1_000_000,
+                    "listed_shares": 1_000,
+                    "is_halted": False,
+                    "is_designated": False,
+                    "is_liquidation_window": False,
+                },
+                {
+                    "date": date(2025, 12, 31),
+                    "security_id": "S005935",
+                    "listing_id": "L005935",
+                    "open_adj": 80.0,
+                    "high_adj": 80.0,
+                    "low_adj": 80.0,
+                    "close_adj": 80.0,
+                    "return_1d": 0.0,
+                    "volume": 1,
+                    "trading_value": 80,
+                    "market_cap": 40_000,
+                    "listed_shares": 500,
+                    "is_halted": False,
+                    "is_designated": False,
+                    "is_liquidation_window": False,
+                },
+            ]
+        ),
+        layout.partition_path("gold.daily_prices_adj", date(2025, 12, 31)),
+    )
+    writer.write(
+        pl.DataFrame(
+            [
+                {
+                    "fiscal_year": 2025,
+                    "fiscal_period_end": date(2025, 12, 31),
+                    "rcept_dt": date(2026, 3, 10),
+                    "available_date": date(2026, 3, 10),
+                    "corp_code": "00126380",
+                    "corp_name": "Samsung",
+                    "share_class": "common",
+                    "stock_kind": "보통주",
+                    "authorized_shares": 20_000.0,
+                    "cumulative_issued_shares": 1_200.0,
+                    "cumulative_decreased_shares": 100.0,
+                    "capital_reduction_shares": None,
+                    "profit_retirement_shares": 100.0,
+                    "redemption_shares": None,
+                    "other_decrease_shares": None,
+                    "issued_shares": 1_100.0,
+                    "treasury_shares": 100.0,
+                    "outstanding_shares": 1_000.0,
+                    "source_rcept_no": "20260310000001",
+                    "report_type": "11011",
+                    "source": "opendart.stockTotqySttus",
+                    "is_estimated": False,
+                },
+                {
+                    "fiscal_year": 2025,
+                    "fiscal_period_end": date(2025, 12, 31),
+                    "rcept_dt": date(2026, 3, 10),
+                    "available_date": date(2026, 3, 10),
+                    "corp_code": "00126380",
+                    "corp_name": "Samsung",
+                    "share_class": "preferred",
+                    "stock_kind": "우선주",
+                    "authorized_shares": 5_000.0,
+                    "cumulative_issued_shares": 500.0,
+                    "cumulative_decreased_shares": None,
+                    "capital_reduction_shares": None,
+                    "profit_retirement_shares": None,
+                    "redemption_shares": None,
+                    "other_decrease_shares": None,
+                    "issued_shares": 500.0,
+                    "treasury_shares": 100.0,
+                    "outstanding_shares": 400.0,
+                    "source_rcept_no": "20260310000001",
+                    "report_type": "11011",
+                    "source": "opendart.stockTotqySttus",
+                    "is_estimated": False,
+                },
+            ]
+        ),
+        layout.partition_path("silver.share_counts", date(2025, 12, 31)),
+    )
 
     payload = AdminState(tmp_path).basic_fundamentals(
         {"tickers": ["5930,660"], "as_of": ["2026-03-15"]}
@@ -518,7 +656,232 @@ def test_admin_basic_fundamentals_returns_latest_available_metrics(tmp_path) -> 
         payload["fundamentals"]["005930"]["metrics"]["treasury_share_purchase"]["amount"]
         == 8_200.0
     )
+    assert payload["fundamentals"]["005930"]["per_share"]["eps_annual"]["value"] == (
+        30_000.0 / 1_400
+    )
+    assert payload["fundamentals"]["005930"]["per_share"]["eps_ttm"]["value"] == (
+        30_000.0 / 1_400
+    )
+    assert payload["fundamentals"]["005930"]["per_share"]["bps"]["value"] == (120_000.0 / 1_400)
+    assert payload["fundamentals"]["005930"]["per_share"]["eps_annual"]["shares"] == 1_400
+    assert (
+        payload["fundamentals"]["005930"]["per_share"]["eps_annual"]["share_basis"]
+        == "dart_distributed_shares"
+    )
+    assert (
+        payload["fundamentals"]["005930"]["per_share"]["eps_annual"]["includes_preferred"]
+        is True
+    )
+    assert (
+        payload["fundamentals"]["005930"]["per_share"]["eps_annual"][
+            "treasury_shares_excluded"
+        ]
+        is True
+    )
+    assert (
+        payload["fundamentals"]["005930"]["per_share"]["eps_annual"]["components"][0][
+            "treasury_shares"
+        ]
+        == 100.0
+    )
+    assert payload["fundamentals"]["005930"]["per_share"]["eps_forward"]["value"] is None
     assert payload["fundamentals"]["000660"]["metrics"] == {}
+
+
+def test_admin_basic_fundamentals_derives_equity_when_total_equity_is_suspicious(
+    tmp_path,
+) -> None:
+    data_root = tmp_path / "data"
+    layout = DataLakeLayout(data_root)
+    layout.ensure_base_dirs()
+    writer = ParquetDatasetWriter()
+    (data_root / "gold").mkdir(parents=True, exist_ok=True)
+    pl.DataFrame(
+        [
+            {
+                "security_id": "S037350",
+                "ticker": "037350",
+                "name": "Sungdo",
+                "market": "KOSDAQ",
+                "share_class": "common",
+                "security_type": "equity",
+                "corp_code": "00216498",
+            },
+        ]
+    ).write_parquet(data_root / "gold" / "security_master.parquet")
+    common = {
+        "security_id": "S037350",
+        "corp_code": "00216498",
+        "fiscal_period_end": date(2025, 12, 31),
+        "event_date": date(2025, 12, 31),
+        "rcept_dt": date(2026, 3, 19),
+        "available_date": date(2026, 3, 19),
+        "report_type": "11011",
+        "is_consolidated": True,
+        "accounting_basis": "연결",
+        "fiscal_year": 2025,
+    }
+    writer.write(
+        pl.DataFrame(
+            [
+                {
+                    **common,
+                    "account_id": "ifrs-full_Assets",
+                    "account_name": "자산총계",
+                    "amount": 1_000.0,
+                },
+                {
+                    **common,
+                    "account_id": "ifrs-full_Liabilities",
+                    "account_name": "부채총계",
+                    "amount": 400.0,
+                },
+                {
+                    **common,
+                    "account_id": "ifrs-full_Equity",
+                    "account_name": "자본총계",
+                    "amount": 10.0,
+                },
+            ]
+        ),
+        layout.partition_path("silver.financials", date(2025, 1, 1)),
+    )
+    writer.write(
+        pl.DataFrame(
+            [
+                {
+                    "fiscal_year": 2025,
+                    "fiscal_period_end": date(2025, 12, 31),
+                    "rcept_dt": date(2026, 3, 19),
+                    "available_date": date(2026, 3, 19),
+                    "corp_code": "00216498",
+                    "corp_name": "Sungdo",
+                    "share_class": "common",
+                    "stock_kind": "보통주",
+                    "authorized_shares": 100.0,
+                    "cumulative_issued_shares": 12.0,
+                    "cumulative_decreased_shares": None,
+                    "capital_reduction_shares": None,
+                    "profit_retirement_shares": None,
+                    "redemption_shares": None,
+                    "other_decrease_shares": None,
+                    "issued_shares": 12.0,
+                    "treasury_shares": 2.0,
+                    "outstanding_shares": 10.0,
+                    "source_rcept_no": "20260319000001",
+                    "report_type": "11011",
+                    "source": "opendart.stockTotqySttus",
+                    "is_estimated": False,
+                },
+            ]
+        ),
+        layout.partition_path("silver.share_counts", date(2025, 12, 31)),
+    )
+
+    payload = AdminState(tmp_path).basic_fundamentals(
+        {"ticker": ["037350"], "as_of": ["2026-05-10"]}
+    )
+
+    equity = payload["fundamentals"]["037350"]["metrics"]["equity"]
+    assert equity["amount"] == 600.0
+    assert equity["account_id"] == "derived_AssetsMinusLiabilities"
+    assert equity["replaced_account_id"] == "ifrs-full_Equity"
+    assert payload["fundamentals"]["037350"]["per_share"]["bps"]["value"] == 60.0
+    assert (
+        payload["fundamentals"]["037350"]["per_share"]["bps"]["treasury_shares_excluded"]
+        is True
+    )
+
+
+def test_admin_basic_fundamentals_does_not_use_future_share_count_for_bps(
+    tmp_path,
+) -> None:
+    data_root = tmp_path / "data"
+    layout = DataLakeLayout(data_root)
+    layout.ensure_base_dirs()
+    writer = ParquetDatasetWriter()
+    (data_root / "gold").mkdir(parents=True, exist_ok=True)
+    pl.DataFrame(
+        [
+            {
+                "security_id": "S009770",
+                "ticker": "009770",
+                "name": "Samjung Pulp",
+                "market": "KOSPI",
+                "share_class": "common",
+                "security_type": "equity",
+                "corp_code": "00128227",
+            },
+        ]
+    ).write_parquet(data_root / "gold" / "security_master.parquet")
+    common = {
+        "security_id": "S009770",
+        "corp_code": "00128227",
+        "fiscal_period_end": date(2018, 12, 31),
+        "event_date": date(2018, 12, 31),
+        "rcept_dt": date(2019, 4, 1),
+        "available_date": date(2019, 4, 1),
+        "report_type": "11011",
+        "is_consolidated": True,
+        "accounting_basis": "연결",
+        "fiscal_year": 2018,
+    }
+    writer.write(
+        pl.DataFrame(
+            [
+                {
+                    **common,
+                    "account_id": "ifrs_EquityAttributableToOwnersOfParent",
+                    "account_name": "지배기업의 소유주에게 귀속되는 자본",
+                    "amount": 180_345_954_779.0,
+                },
+            ]
+        ),
+        layout.partition_path("silver.financials", date(2018, 1, 1)),
+    )
+    writer.write(
+        pl.DataFrame(
+            [
+                {
+                    "fiscal_year": 2025,
+                    "fiscal_period_end": date(2025, 12, 31),
+                    "rcept_dt": date(2026, 3, 19),
+                    "available_date": date(2026, 3, 19),
+                    "corp_code": "00128227",
+                    "corp_name": "Samjung Pulp",
+                    "share_class": "common",
+                    "stock_kind": "보통주",
+                    "authorized_shares": None,
+                    "cumulative_issued_shares": None,
+                    "cumulative_decreased_shares": None,
+                    "capital_reduction_shares": None,
+                    "profit_retirement_shares": None,
+                    "redemption_shares": None,
+                    "other_decrease_shares": None,
+                    "issued_shares": 2_499_971.0,
+                    "treasury_shares": 0.0,
+                    "outstanding_shares": 2_499_971.0,
+                    "source_rcept_no": "20260319000474",
+                    "report_type": "11011",
+                    "source": "opendart.stockTotqySttus",
+                    "is_estimated": False,
+                },
+            ]
+        ),
+        layout.partition_path("silver.share_counts", date(2025, 12, 31)),
+    )
+
+    payload = AdminState(tmp_path).basic_fundamentals(
+        {"ticker": ["009770"], "as_of": ["2026-05-14"]}
+    )
+
+    fundamental = payload["fundamentals"]["009770"]
+    assert fundamental["metrics"]["equity"]["amount"] == 180_345_954_779.0
+    bps = fundamental["per_share"]["bps"]
+    assert bps["available"] is False
+    assert bps["value"] is None
+    assert bps["numerator_amount"] == 180_345_954_779.0
+    assert bps["reason"] == "share denominator is not available as of the equity fiscal period"
 
 
 def test_admin_capital_actions_returns_fiscal_year_series(tmp_path) -> None:
@@ -617,60 +980,175 @@ def test_admin_capital_actions_returns_fiscal_year_series(tmp_path) -> None:
     )
 
 
+def test_admin_dividends_returns_security_level_dps(tmp_path) -> None:
+    data_root = tmp_path / "data"
+    layout = DataLakeLayout(data_root)
+    layout.ensure_base_dirs()
+    writer = ParquetDatasetWriter()
+    writer.write(
+        pl.DataFrame(
+            [
+                {
+                    "fiscal_period_end": date(2024, 12, 31),
+                    "rcept_dt": date(2025, 3, 11),
+                    "available_date": date(2025, 3, 11),
+                    "corp_code": "00126380",
+                    "corp_name": "Samsung",
+                    "security_id": "S005930",
+                    "ticker": "005930",
+                    "share_class": "common",
+                    "stock_kind": "보통주",
+                    "cash_dividend_per_share": 1446.0,
+                    "stock_dividend_per_share": None,
+                    "cash_dividend_yield_pct": 2.7,
+                    "currency": "KRW",
+                    "source_rcept_no": "20250311001085",
+                    "report_type": "11011",
+                    "source": "opendart.alotMatter",
+                    "is_estimated": False,
+                },
+                {
+                    "fiscal_period_end": date(2024, 12, 31),
+                    "rcept_dt": date(2025, 3, 11),
+                    "available_date": date(2025, 3, 11),
+                    "corp_code": "00126380",
+                    "corp_name": "Samsung",
+                    "security_id": "S005935",
+                    "ticker": "005935",
+                    "share_class": "preferred",
+                    "stock_kind": "우선주",
+                    "cash_dividend_per_share": 1447.0,
+                    "stock_dividend_per_share": None,
+                    "cash_dividend_yield_pct": 3.3,
+                    "currency": "KRW",
+                    "source_rcept_no": "20250311001085",
+                    "report_type": "11011",
+                    "source": "opendart.alotMatter",
+                    "is_estimated": False,
+                },
+            ]
+        ),
+        layout.partition_path("silver.dividends", date(2024, 12, 31)),
+    )
+
+    payload = AdminState(tmp_path).dividends(
+        {"tickers": ["005930,005935"], "start_year": ["2024"], "end_year": ["2024"]}
+    )
+
+    assert payload["count"] == 2
+    assert payload["dividends"]["005930"][0]["cash_dividend_per_share"] == 1446.0
+    assert payload["dividends"]["005935"][0]["cash_dividend_per_share"] == 1447.0
+
+
 def test_admin_api_docs_describe_price_endpoints(tmp_path) -> None:
     payload = _api_docs_payload(AdminState(tmp_path))
 
-    assert "/api/prices/close" == payload["endpoints"]["close_prices"]["path"]
-    assert "/api/prices/daily" == payload["endpoints"]["daily_prices"]["path"]
-    assert "/api/fundamentals/basic" == payload["endpoints"]["basic_fundamentals"]["path"]
+    assert payload["endpoints"]["close_prices"]["path"] == "/api/prices/close"
+    assert payload["endpoints"]["daily_prices"]["path"] == "/api/prices/daily"
+    assert payload["endpoints"]["basic_fundamentals"]["path"] == "/api/fundamentals/basic"
     assert (
-        "/api/fundamentals/capital-actions"
-        == payload["endpoints"]["capital_actions"]["path"]
+        payload["endpoints"]["capital_actions"]["path"]
+        == "/api/fundamentals/capital-actions"
     )
-    assert "/api/macro/cpi" == payload["endpoints"]["cpi"]["path"]
-    assert "/api/macro/rates" == payload["endpoints"]["rates"]["path"]
-    assert "/api/macro/indices" == payload["endpoints"]["indices"]["path"]
-    assert "/api/macro/commodities" == payload["endpoints"]["commodities"]["path"]
-    assert "/api/macro/fx" == payload["endpoints"]["fx"]["path"]
+    assert payload["endpoints"]["dividends"]["path"] == "/api/fundamentals/dividends"
+    assert payload["endpoints"]["cpi"]["path"] == "/api/macro/cpi"
+    assert payload["endpoints"]["rates"]["path"] == "/api/macro/rates"
+    assert payload["endpoints"]["indices"]["path"] == "/api/macro/indices"
+    assert payload["endpoints"]["commodities"]["path"] == "/api/macro/commodities"
+    assert payload["endpoints"]["fx"]["path"] == "/api/macro/fx"
     assert (
-        "/api/macro/economic-indicators"
-        == payload["endpoints"]["economic_indicators"]["path"]
+        payload["endpoints"]["economic_indicators"]["path"]
+        == "/api/macro/economic-indicators"
     )
     assert "volume" in payload["endpoints"]["daily_prices"]["fields"]["available"]
     assert "trading_value" in payload["endpoints"]["daily_prices"]["fields"]["default"]
     assert "revenue" in payload["endpoints"]["basic_fundamentals"]["metrics"]
     assert "dividends_paid" in payload["endpoints"]["basic_fundamentals"]["metrics"]
     assert "treasury_share_purchase" in payload["endpoints"]["capital_actions"]["metrics"]
+    assert payload["limits"]["max_admin_jobs"] == 1
     assert payload["limits"]["max_price_queries"] == 4
+    assert payload["limits"]["price_query_wait_seconds"] == 15.0
 
 
 def test_admin_limits_use_safe_defaults(monkeypatch) -> None:
+    monkeypatch.delenv("FINANCE_PI_ADMIN_MAX_JOBS", raising=False)
     monkeypatch.delenv("FINANCE_PI_ADMIN_MAX_THREADS", raising=False)
     monkeypatch.delenv("FINANCE_PI_ADMIN_MAX_PRICE_QUERIES", raising=False)
+    monkeypatch.delenv("FINANCE_PI_ADMIN_PRICE_QUERY_WAIT_SECONDS", raising=False)
     monkeypatch.delenv("FINANCE_PI_ADMIN_MAX_PRICE_TICKERS", raising=False)
     monkeypatch.delenv("FINANCE_PI_ADMIN_MAX_PRICE_DAYS", raising=False)
     assert _admin_max_request_threads() == 16
+    assert _admin_max_jobs() == 1
     assert _admin_max_price_queries() == 4
+    assert _admin_price_query_wait_seconds() == 15.0
     assert _admin_max_price_tickers() == 500
     assert _admin_max_price_days() == 3700
 
+    monkeypatch.setenv("FINANCE_PI_ADMIN_MAX_JOBS", "3")
     monkeypatch.setenv("FINANCE_PI_ADMIN_MAX_THREADS", "4")
     monkeypatch.setenv("FINANCE_PI_ADMIN_MAX_PRICE_QUERIES", "2")
+    monkeypatch.setenv("FINANCE_PI_ADMIN_PRICE_QUERY_WAIT_SECONDS", "0.25")
     monkeypatch.setenv("FINANCE_PI_ADMIN_MAX_PRICE_TICKERS", "10")
     monkeypatch.setenv("FINANCE_PI_ADMIN_MAX_PRICE_DAYS", "30")
     assert _admin_max_request_threads() == 4
+    assert _admin_max_jobs() == 3
     assert _admin_max_price_queries() == 2
+    assert _admin_price_query_wait_seconds() == 0.25
     assert _admin_max_price_tickers() == 10
     assert _admin_max_price_days() == 30
 
+    monkeypatch.setenv("FINANCE_PI_ADMIN_MAX_JOBS", "not-a-number")
     monkeypatch.setenv("FINANCE_PI_ADMIN_MAX_THREADS", "not-a-number")
     monkeypatch.setenv("FINANCE_PI_ADMIN_MAX_PRICE_QUERIES", "not-a-number")
+    monkeypatch.setenv("FINANCE_PI_ADMIN_PRICE_QUERY_WAIT_SECONDS", "not-a-number")
     monkeypatch.setenv("FINANCE_PI_ADMIN_MAX_PRICE_TICKERS", "not-a-number")
     monkeypatch.setenv("FINANCE_PI_ADMIN_MAX_PRICE_DAYS", "not-a-number")
     assert _admin_max_request_threads() == 16
+    assert _admin_max_jobs() == 1
     assert _admin_max_price_queries() == 4
+    assert _admin_price_query_wait_seconds() == 15.0
     assert _admin_max_price_tickers() == 500
     assert _admin_max_price_days() == 3700
+
+    monkeypatch.setenv("FINANCE_PI_ADMIN_PRICE_QUERY_WAIT_SECONDS", "-10")
+    assert _admin_price_query_wait_seconds() == 0.0
+
+
+def test_admin_data_query_queue_timeout_raises_busy(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("FINANCE_PI_ADMIN_MAX_PRICE_QUERIES", "1")
+    monkeypatch.setenv("FINANCE_PI_ADMIN_PRICE_QUERY_WAIT_SECONDS", "0")
+    state = AdminState(tmp_path)
+    assert state._price_query_slots.acquire(blocking=False)
+    try:
+        try:
+            state.daily_prices(
+                {
+                    "ticker": ["005930"],
+                    "since": ["2026-04-29"],
+                    "until": ["2026-04-30"],
+                }
+            )
+        except AdminServiceBusy as exc:
+            assert "data query queue timeout" in str(exc)
+        else:
+            raise AssertionError("expected AdminServiceBusy")
+    finally:
+        state._price_query_slots.release()
+
+
+def test_admin_start_job_rejects_when_job_slot_is_full(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("FINANCE_PI_ADMIN_MAX_JOBS", "1")
+    state = AdminState(tmp_path)
+    assert state._job_slots.acquire(blocking=False)
+    try:
+        try:
+            state.start_job({"action": "daily_no_ingest"})
+        except AdminServiceBusy as exc:
+            assert "admin job already running" in str(exc)
+        else:
+            raise AssertionError("expected AdminServiceBusy")
+    finally:
+        state._job_slots.release()
 
 
 def test_admin_daily_prices_rejects_large_requests(tmp_path, monkeypatch) -> None:
