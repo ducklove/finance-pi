@@ -12,8 +12,11 @@ def test_runtime_settings_treat_empty_base_urls_as_defaults(tmp_path, monkeypatc
                 "KIS_BASE_URL=",
                 "KIS_APP_KEY= app-key ",
                 "KIS_APP_SECRET= app-secret ",
+                "KIS_DAILY_SLEEP_SECONDS=0.4",
+                "KIS_DAILY_TICKER_BATCH_SIZE=12",
                 "OPENDART_BASE_URL=",
                 "FRED_API_KEY= fred-key ",
+                "ECOS_API_KEY= ecos-key ",
             ]
         ),
         encoding="utf-8",
@@ -25,7 +28,10 @@ def test_runtime_settings_treat_empty_base_urls_as_defaults(tmp_path, monkeypatc
     assert settings.opendart_base_url == RuntimeSettings.opendart_base_url
     assert settings.kis_app_key == "app-key"
     assert settings.kis_app_secret == "app-secret"
+    assert settings.kis_daily_sleep_seconds == 0.4
+    assert settings.kis_daily_ticker_batch_size == 12
     assert settings.fred_api_key == "fred-key"
+    assert settings.ecos_api_key == "ecos-key"
     assert settings.has_kis
 
 

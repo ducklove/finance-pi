@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import date
 from types import SimpleNamespace
 
@@ -14,6 +15,7 @@ from finance_pi.cli.app import (
     _daily_complete,
     _latest_gold_price_date,
     _latest_price_universe_tickers,
+    _previous_weekday,
     _run_daily_builds,
     _run_daily_ingest,
     _validated_backfill_paths,
@@ -66,9 +68,16 @@ def test_admin_health_ok_returns_false_on_error(monkeypatch) -> None:
 
 def test_catchup_dates_use_explicit_since_and_skip_weekend(tmp_path) -> None:
     assert _catchup_dates(tmp_path, date(2026, 5, 1), date(2026, 5, 4)) == (
-        date(2026, 5, 1),
         date(2026, 5, 4),
     )
+
+
+def test_catchup_dates_skip_krx_holidays(tmp_path) -> None:
+    assert _catchup_dates(tmp_path, date(2026, 5, 22), date(2026, 5, 26)) == (
+        date(2026, 5, 22),
+        date(2026, 5, 26),
+    )
+    assert _previous_weekday(date(2026, 5, 25)) == date(2026, 5, 22)
 
 
 def test_catchup_dates_start_after_daily_marker_for_no_price_day(tmp_path) -> None:
@@ -116,7 +125,12 @@ def test_daily_ingest_internal_calls_pass_concrete_defaults(tmp_path, monkeypatc
 
     failures = _run_daily_ingest(
         ProjectPaths(tmp_path),
-        SimpleNamespace(has_opendart=True, has_kis=True),
+        SimpleNamespace(
+            has_opendart=True,
+            has_kis=True,
+            kis_daily_sleep_seconds=0.25,
+            kis_daily_ticker_batch_size=25,
+        ),
         date(2026, 4, 30),
     )
 
@@ -127,8 +141,8 @@ def test_daily_ingest_internal_calls_pass_concrete_defaults(tmp_path, monkeypatc
         tmp_path,
         None,
         1,
-        0.05,
-        50,
+        0.25,
+        25,
     )
     assert calls["dart_filings"] == ("2026-04-29", "2026-04-30", tmp_path, 7)
     assert calls["dart_dividends"] == ("2026-04-29", "2026-04-30", tmp_path, None, None, 0.05)
@@ -186,6 +200,279 @@ def test_fred_rows_use_api_key_json_response(monkeypatch) -> None:
     assert "api.stlouisfed.org/fred/series/observations" in seen["url"]
     assert "api_key=secret" in seen["url"]
     assert [row["value"] for row in rows] == [320.0, 322.0]
+
+
+def test_requested_macro_series_are_configured() -> None:
+    index_ids = {series["series_id"] for series in cli_app.YAHOO_INDEX_SERIES}
+    commodity_ids = {series["series_id"] for series in cli_app.YAHOO_COMMODITY_SERIES}
+    fx_ids = {series["series_id"] for series in cli_app.YAHOO_FX_SERIES}
+    fx_ids |= {series["series_id"] for series in cli_app.YAHOO_DERIVED_FX_SERIES}
+    rate_ids = {series["series_id"] for series in cli_app.FRED_SERIES["rates"]}
+    rate_ids |= {series["series_id"] for series in cli_app.YAHOO_RATE_SERIES}
+    rate_ids |= {series["series_id"] for series in cli_app.KRX_BOND_RATE_SERIES}
+    rate_ids |= {series["series_id"] for series in cli_app.ECOS_RATE_SERIES}
+    rate_ids |= {series["series_id"] for series in cli_app.CNBC_RATE_SERIES}
+    cpi_ids = {series["series_id"] for series in cli_app.ECOS_CPI_SERIES}
+    econ_ids = {series["series_id"] for series in cli_app.ECOS_ECONOMIC_SERIES}
+    cnbc_index_ids = {series["series_id"] for series in cli_app.CNBC_INDEX_SERIES}
+    cnbc_commodity_ids = {series["series_id"] for series in cli_app.CNBC_COMMODITY_SERIES}
+    cnbc_fx_ids = {series["series_id"] for series in cli_app.CNBC_FX_SERIES}
+    cnbc_fx_ids |= {series["series_id"] for series in cli_app.CNBC_DERIVED_FX_SERIES}
+
+    assert {
+        "SP500",
+        "NASDAQ",
+        "DOW_JONES",
+        "NIKKEI_225",
+        "HANG_SENG",
+        "SSE_COMPOSITE",
+        "US_DOLLAR_INDEX",
+    } <= index_ids
+    assert {
+        "SP500",
+        "NASDAQ",
+        "DOW_JONES",
+        "NIKKEI_225",
+        "HANG_SENG",
+        "SSE_COMPOSITE",
+        "US_DOLLAR_INDEX",
+    } <= cnbc_index_ids
+    assert {"GOLD_USD_OZ", "SILVER_USD_OZ", "WTI_USD_BBL", "BRENT_USD_BBL"} <= commodity_ids
+    assert {
+        "GOLD_USD_OZ",
+        "SILVER_USD_OZ",
+        "WTI_USD_BBL",
+        "BRENT_USD_BBL",
+    } <= cnbc_commodity_ids
+    assert {"USD_KRW", "EUR_KRW", "JPY_KRW", "CNY_KRW", "AUD_KRW", "VND_KRW"} <= fx_ids
+    assert {"USD_KRW", "EUR_KRW", "JPY_KRW", "CNY_KRW", "AUD_KRW", "VND_KRW"} <= cnbc_fx_ids
+    assert {
+        "KR_GOVT_3Y",
+        "KR_GOVT_5Y",
+        "US_TREASURY_2Y",
+        "US_TREASURY_10Y",
+        "US_TREASURY_30Y",
+        "KR_GOVT_10Y",
+        "JP_GOVT_10Y",
+        "DE_GOVT_10Y",
+        "FR_GOVT_10Y",
+        "GB_GOVT_10Y",
+        "KR_BASE_RATE_ECOS",
+        "KR_CALL_RATE_ECOS",
+        "KR_GOVT_10Y_ECOS",
+        "KR_CD_91D_ECOS",
+        "KR_BANK_MORTGAGE_RATE_ECOS",
+    } <= rate_ids
+    assert {"KR_CPI_ALL_ECOS"} <= cpi_ids
+    assert {
+        "KR_REAL_GDP_SA_ECOS",
+        "KR_CURRENT_ACCOUNT_SA_ECOS",
+        "KR_UNEMPLOYMENT_RATE_SA_ECOS",
+        "KR_M2_SA_ECOS",
+    } <= econ_ids
+
+
+def test_ecos_rows_page_and_parse_periods(monkeypatch) -> None:
+    seen_urls = []
+
+    def fake_urlopen(request, timeout: int):
+        seen_urls.append(request.full_url)
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                if "/1/1000/" in request.full_url:
+                    rows = [{"TIME": "2020Q1", "DATA_VALUE": "517,612"}] * 1000
+                else:
+                    rows = [{"TIME": "2020Q2", "DATA_VALUE": "519000"}]
+                return json.dumps(
+                    {"StatisticSearch": {"list_total_count": 1001, "row": rows}}
+                ).encode("utf-8")
+
+        return Response()
+
+    monkeypatch.setattr(cli_app, "urlopen", fake_urlopen)
+
+    rows = cli_app._fetch_ecos_indicator_rows(
+        {
+            "series_id": "KR_REAL_GDP_SA_ECOS",
+            "stat_code": "200Y108",
+            "cycle": "Q",
+            "items": ("10601",),
+            "country": "KR",
+            "name": "Korea Real GDP SA",
+            "category": "growth",
+            "frequency": "Q",
+            "unit": "billions_krw",
+        },
+        date(2020, 1, 1),
+        date(2020, 6, 30),
+        "secret",
+    )
+
+    assert "/StatisticSearch/secret/json/kr/1/1000/200Y108/Q/2020Q1/2020Q2/10601" in seen_urls[0]
+    assert "/1001/2000/" in seen_urls[1]
+    assert len(rows) == 1001
+    assert rows[0]["date"] == date(2020, 1, 1)
+    assert rows[-1]["date"] == date(2020, 4, 1)
+    assert rows[0]["value"] == 517612.0
+    assert rows[-1]["value"] == 519000.0
+    assert rows[0]["source"] == "bok_ecos"
+
+
+def test_krx_bond_rate_rows_parse_korean_yield_frame() -> None:
+    class FakeFrame:
+        def reset_index(self):
+            return self
+
+        def to_dict(self, orient: str):
+            assert orient == "records"
+            return [
+                {"일자": "2024-01-02", "수익률": 3.25, "대비": 0.01},
+                {"일자": "2024-01-03", "수익률": 3.20, "대비": -0.05},
+            ]
+
+    def fake_fetcher(start: str, end: str, kind: str):
+        assert (start, end, kind) == ("20240101", "20240103", "국고채3년")
+        return FakeFrame()
+
+    rows = cli_app._fetch_krx_bond_rate_rows(
+        {
+            "series_id": "KR_GOVT_3Y",
+            "krx_kind": "국고채3년",
+            "country": "KR",
+            "name": "Korea Treasury Bond 3-Year Yield",
+            "frequency": "D",
+            "tenor": "3Y",
+            "unit": "percent",
+        },
+        date(2024, 1, 1),
+        date(2024, 1, 3),
+        fake_fetcher,
+    )
+
+    assert [row["date"] for row in rows] == [date(2024, 1, 2), date(2024, 1, 3)]
+    assert rows[0]["series_id"] == "KR_GOVT_3Y"
+    assert rows[0]["value"] == 3.25
+    assert rows[0]["source"] == "pykrx"
+
+
+def test_cnbc_quote_rows_parse_snapshot_values() -> None:
+    quotes = {
+        ".SPX": {
+            "symbol": ".SPX",
+            "code": "0",
+            "last": "7,599.96",
+            "previous_day_closing": "7,580.06",
+            "name": "S&P 500 Index",
+            "last_time": "2026-06-01T16:58:18.000-0400",
+        },
+        "US10Y": {
+            "symbol": "US10Y",
+            "code": "0",
+            "last": "4.443",
+            "name": "U.S. 10 Year Treasury",
+            "last_time": "2026-06-01T23:52:40.000-0400",
+        },
+        "@CL.1": {
+            "symbol": "@CL.1",
+            "code": "0",
+            "last": "91.57",
+            "name": "WTI Crude",
+            "last_time": "2026-06-01T23:43:04.000-0400",
+        },
+    }
+
+    indices = cli_app._cnbc_index_rows(
+        [series for series in cli_app.CNBC_INDEX_SERIES if series["series_id"] == "SP500"],
+        quotes,
+        date(2026, 6, 1),
+        date(2026, 6, 1),
+    )
+    rates = cli_app._cnbc_rate_rows(
+        [series for series in cli_app.CNBC_RATE_SERIES if series["series_id"] == "US_TREASURY_10Y"],
+        quotes,
+        date(2026, 6, 1),
+        date(2026, 6, 1),
+    )
+    commodities = cli_app._cnbc_commodity_rows(
+        [
+            series
+            for series in cli_app.CNBC_COMMODITY_SERIES
+            if series["series_id"] == "WTI_USD_BBL"
+        ],
+        quotes,
+        date(2026, 6, 1),
+        date(2026, 6, 1),
+    )
+
+    assert indices[0]["value"] == 7599.96
+    assert indices[0]["return_1d"] == pytest.approx((7599.96 / 7580.06 - 1) * 100)
+    assert indices[0]["source"] == "cnbc"
+    assert rates[0]["value"] == 4.443
+    assert rates[0]["source"] == "cnbc"
+    assert commodities[0]["value"] == 91.57
+    assert commodities[0]["source"] == "cnbc"
+
+
+def test_cnbc_derived_fx_rows_cross_rate() -> None:
+    quotes = {
+        "KRW=": {
+            "symbol": "KRW=",
+            "code": "0",
+            "last": "1518.10",
+            "last_time": "2026-06-01T23:54:00.000-0400",
+        },
+        "VND=": {
+            "symbol": "VND=",
+            "code": "0",
+            "last": "26329.00",
+            "last_time": "2026-06-01T23:50:00.000-0400",
+        },
+    }
+
+    rows = cli_app._cnbc_derived_fx_rows(
+        cli_app.CNBC_DERIVED_FX_SERIES,
+        quotes,
+        date(2026, 6, 1),
+        date(2026, 6, 1),
+    )
+
+    assert rows[0]["series_id"] == "VND_KRW"
+    assert rows[0]["value"] == pytest.approx(1518.10 / 26329.00)
+    assert rows[0]["source"] == "cnbc_derived"
+
+
+def test_yahoo_derived_fx_rows_cross_rate(monkeypatch) -> None:
+    def fake_closes(symbol: str, since: date, until: date):
+        assert since == date(2024, 1, 1)
+        assert until == date(2024, 1, 2)
+        return {
+            "KRW=X": [(date(2024, 1, 2), 1320.0)],
+            "USDVND=X": [(date(2024, 1, 2), 24000.0)],
+        }[symbol]
+
+    monkeypatch.setattr(cli_app, "_fetch_yahoo_daily_closes", fake_closes)
+
+    rows = cli_app._fetch_yahoo_derived_fx_rows(
+        {
+            "series_id": "VND_KRW",
+            "numerator_symbol": "KRW=X",
+            "denominator_symbol": "USDVND=X",
+            "base_currency": "VND",
+            "quote_currency": "KRW",
+        },
+        date(2024, 1, 1),
+        date(2024, 1, 2),
+    )
+
+    assert rows[0]["value"] == pytest.approx(0.055)
+    assert rows[0]["source"] == "yahoo_derived"
 
 
 def test_daily_marker_uses_report_date_not_price_date(tmp_path, monkeypatch) -> None:

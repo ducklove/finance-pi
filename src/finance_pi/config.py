@@ -23,6 +23,8 @@ KNOWN_DOTENV_KEYS = frozenset(
         "KIS_APP_KEY",
         "KIS_APP_SECRET",
         "KIS_ACCESS_TOKEN",
+        "KIS_DAILY_SLEEP_SECONDS",
+        "KIS_DAILY_TICKER_BATCH_SIZE",
         "KIS_ACCOUNT_NO",
         "KIS_ACCOUNT_PRODUCT_CODE",
         "NAVER_FINANCE_BASE_URL",
@@ -30,6 +32,9 @@ KNOWN_DOTENV_KEYS = frozenset(
         "NAVER_FINANCE_USER_AGENT",
         "FINANCE_PI_ADMIN_TOKEN",
         "FRED_API_KEY",
+        "ECOS_API_KEY",
+        "BOK_ECOS_API_KEY",
+        "BOK_API_KEY",
     }
 )
 
@@ -79,10 +84,13 @@ class RuntimeSettings:
     kis_app_key: str | None = None
     kis_app_secret: str | None = None
     kis_access_token: str | None = None
+    kis_daily_sleep_seconds: float = 0.25
+    kis_daily_ticker_batch_size: int = 25
     naver_finance_base_url: str = "https://finance.naver.com"
     naver_finance_api_base_url: str = "https://api.finance.naver.com"
     naver_finance_user_agent: str = "Mozilla/5.0 finance-pi/0.1"
     fred_api_key: str | None = None
+    ecos_api_key: str | None = None
 
     @classmethod
     def load(cls, root: Path | None = None) -> RuntimeSettings:
@@ -109,6 +117,14 @@ class RuntimeSettings:
             kis_app_key=_env_first("KIS_APP_KEY"),
             kis_app_secret=_env_first("KIS_APP_SECRET"),
             kis_access_token=_env_first("KIS_ACCESS_TOKEN"),
+            kis_daily_sleep_seconds=_env_float(
+                "KIS_DAILY_SLEEP_SECONDS",
+                cls.kis_daily_sleep_seconds,
+            ),
+            kis_daily_ticker_batch_size=_env_int(
+                "KIS_DAILY_TICKER_BATCH_SIZE",
+                cls.kis_daily_ticker_batch_size,
+            ),
             naver_finance_base_url=_env_first("NAVER_FINANCE_BASE_URL")
             or cls.naver_finance_base_url,
             naver_finance_api_base_url=_env_first("NAVER_FINANCE_API_BASE_URL")
@@ -116,6 +132,7 @@ class RuntimeSettings:
             naver_finance_user_agent=_env_first("NAVER_FINANCE_USER_AGENT")
             or cls.naver_finance_user_agent,
             fred_api_key=_env_first("FRED_API_KEY"),
+            ecos_api_key=_env_first("ECOS_API_KEY", "BOK_ECOS_API_KEY", "BOK_API_KEY"),
         )
 
     @property
@@ -207,3 +224,23 @@ def _env_first(*names: str) -> str | None:
         if value:
             return value.strip()
     return None
+
+
+def _env_float(name: str, default: float) -> float:
+    value = _env_first(name)
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        return default
+
+
+def _env_int(name: str, default: int) -> int:
+    value = _env_first(name)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default

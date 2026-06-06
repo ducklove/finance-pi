@@ -1175,6 +1175,7 @@ class AdminJob:
 class AdminState:
     overview_cache_seconds = 120.0
     price_cache_seconds = 60.0
+    realtime_cache_seconds = 15.0
     price_cache_max_entries = 512
 
     def __init__(self, root: Path, token: str | None = None) -> None:
@@ -1187,6 +1188,7 @@ class AdminState:
             tuple[Any, ...],
             tuple[float, dict[str, list[dict[str, Any]]]],
         ] = {}
+        self._realtime_cache: dict[tuple[str | None, str | None], tuple[float, dict[str, Any]]] = {}
         self._job_slots = threading.BoundedSemaphore(_admin_max_jobs())
         self._price_query_slots = threading.BoundedSemaphore(_admin_max_price_queries())
 
@@ -1268,6 +1270,31 @@ class AdminState:
             "prices": prices,
         }
 
+    def quotes(self, params: dict[str, list[str]]) -> dict[str, Any]:
+        symbols = _symbol_params(params)
+        if len(symbols) > _admin_max_price_tickers():
+            raise ValueError(f"too many symbols; max is {_admin_max_price_tickers()}")
+        quotes = _query_quotes(self.paths, symbols)
+        return {
+            "symbols": symbols,
+            "generated_at": datetime.now(UTC).isoformat(),
+            "count": len(quotes),
+            "quotes": quotes,
+        }
+
+    def security_search(self, params: dict[str, list[str]]) -> dict[str, Any]:
+        queries = _search_query_params(params)
+        limit = _optional_int_param(params, "limit") or 10
+        if limit < 1 or limit > 50:
+            raise ValueError("limit must be between 1 and 50")
+        results = _search_securities(self.paths, queries, limit)
+        return {
+            "queries": queries,
+            "limit": limit,
+            "count": sum(len(rows) for rows in results.values()),
+            "results": results,
+        }
+
     def basic_fundamentals(self, params: dict[str, list[str]]) -> dict[str, Any]:
         tickers = _ticker_params(params)
         as_of = _optional_date_param(params, "as_of") or date.today()
@@ -1334,6 +1361,9 @@ class AdminState:
     def indices(self, params: dict[str, list[str]]) -> dict[str, Any]:
         return self._macro_payload("indices", params)
 
+    def daily_indices(self, params: dict[str, list[str]]) -> dict[str, Any]:
+        return self._macro_payload("indices", params)
+
     def commodities(self, params: dict[str, list[str]]) -> dict[str, Any]:
         return self._macro_payload("commodities", params)
 
@@ -1342,6 +1372,28 @@ class AdminState:
 
     def economic_indicators(self, params: dict[str, list[str]]) -> dict[str, Any]:
         return self._macro_payload("economic_indicators", params)
+
+    def realtime_indicators(self, params: dict[str, list[str]]) -> dict[str, Any]:
+        category = _optional_text_param(params, "category")
+        series_id = _optional_text_param(params, "series_id")
+        if category is not None and category not in {"indices", "rates", "commodities", "fx"}:
+            raise ValueError("category must be one of: indices, rates, commodities, fx")
+        cache_key = (category, series_id)
+        now = time.monotonic()
+        with self.lock:
+            cached_item = self._realtime_cache.get(cache_key)
+            if cached_item is not None:
+                cached_at, cached = cached_item
+                if now - cached_at < self.realtime_cache_seconds:
+                    return deepcopy(cached)
+
+        payload = _query_realtime_indicators(category, series_id)
+        with self.lock:
+            self._realtime_cache[cache_key] = (time.monotonic(), deepcopy(payload))
+            if len(self._realtime_cache) > 128:
+                oldest_key = min(self._realtime_cache, key=lambda key: self._realtime_cache[key][0])
+                self._realtime_cache.pop(oldest_key, None)
+        return payload
 
     def _macro_payload(self, table: str, params: dict[str, list[str]]) -> dict[str, Any]:
         since = _optional_date_param(params, "since")
@@ -1647,6 +1699,14 @@ def _handler_for(state: AdminState) -> type[BaseHTTPRequestHandler]:
                     if not self._authorized():
                         return
                     self._send_json(state.daily_prices(parse_qs(parsed.query)))
+                elif parsed.path == "/api/quotes":
+                    if not self._authorized():
+                        return
+                    self._send_json(state.quotes(parse_qs(parsed.query)))
+                elif parsed.path == "/api/securities/search":
+                    if not self._authorized():
+                        return
+                    self._send_json(state.security_search(parse_qs(parsed.query)))
                 elif parsed.path == "/api/fundamentals/basic":
                     if not self._authorized():
                         return
@@ -1671,6 +1731,10 @@ def _handler_for(state: AdminState) -> type[BaseHTTPRequestHandler]:
                     if not self._authorized():
                         return
                     self._send_json(state.indices(parse_qs(parsed.query)))
+                elif parsed.path == "/api/daily-indices":
+                    if not self._authorized():
+                        return
+                    self._send_json(state.daily_indices(parse_qs(parsed.query)))
                 elif parsed.path == "/api/macro/commodities":
                     if not self._authorized():
                         return
@@ -1683,6 +1747,10 @@ def _handler_for(state: AdminState) -> type[BaseHTTPRequestHandler]:
                     if not self._authorized():
                         return
                     self._send_json(state.economic_indicators(parse_qs(parsed.query)))
+                elif parsed.path == "/api/realtime/indicators":
+                    if not self._authorized():
+                        return
+                    self._send_json(state.realtime_indicators(parse_qs(parsed.query)))
                 elif parsed.path == "/api/jobs":
                     if not self._authorized():
                         return
@@ -1915,6 +1983,33 @@ def _api_docs_payload(state: AdminState) -> dict[str, Any]:
                     f"{base_url}/prices/daily?ticker=005930&since=2026-04-29&until=2026-04-30&fields=close,volume",
                 ],
             },
+            "quotes": {
+                "method": "GET",
+                "path": f"{base_url}/quotes",
+                "description": "Domestic and overseas quote snapshots. Korean numeric tickers use local Naver/gold data; other symbols use CNBC quotes.",
+                "query": {
+                    "symbol": "Single ticker/symbol, e.g. 005930 or AAPL.",
+                    "symbols": "Comma-separated tickers/symbols, e.g. 005930,AAPL,.SPX.",
+                },
+                "examples": [
+                    f"{base_url}/quotes?symbols=005930,000660",
+                    f"{base_url}/quotes?symbols=AAPL,MSFT,.SPX,US10Y",
+                ],
+            },
+            "security_search": {
+                "method": "GET",
+                "path": f"{base_url}/securities/search",
+                "description": "Batch search local Korean securities by ticker/name and validate overseas CNBC symbols.",
+                "query": {
+                    "q": "Search query. Can be repeated or comma-separated.",
+                    "queries": "Alternative comma-separated batch query parameter.",
+                    "limit": "Optional max results per query, 1..50. Defaults to 10.",
+                },
+                "examples": [
+                    f"{base_url}/securities/search?q=삼성전자&q=000660",
+                    f"{base_url}/securities/search?queries=AAPL,MSFT,.SPX&limit=5",
+                ],
+            },
             "basic_fundamentals": {
                 "method": "GET",
                 "path": f"{base_url}/fundamentals/basic",
@@ -2025,6 +2120,36 @@ def _api_docs_payload(state: AdminState) -> dict[str, Any]:
                 "examples": [
                     f"{base_url}/macro/indices?country=KR&since=2024-01-01",
                     f"{base_url}/macro/indices?series_id=KOSPI",
+                ],
+            },
+            "daily_indices": {
+                "method": "GET",
+                "path": f"{base_url}/daily-indices",
+                "description": "Alias for daily market index observations from macro.indices.",
+                "query": {
+                    "since": "Optional YYYY-MM-DD inclusive.",
+                    "until": "Optional YYYY-MM-DD inclusive.",
+                    "country": "Optional country code, e.g. JP or US.",
+                    "series_id": "Optional index series id, e.g. SP500, NASDAQ, DOW_JONES, NIKKEI_225, HANG_SENG, SSE_COMPOSITE.",
+                },
+                "columns": list(MACRO_TABLE_COLUMNS["indices"]),
+                "examples": [
+                    f"{base_url}/daily-indices?series_id=SP500&since=2024-01-01",
+                    f"{base_url}/daily-indices?country=JP&since=2024-01-01",
+                ],
+            },
+            "realtime_indicators": {
+                "method": "GET",
+                "path": f"{base_url}/realtime/indicators",
+                "description": "Live CNBC quote snapshots for configured indices, rates, commodities, and FX indicators. Responses are cached briefly in-process.",
+                "query": {
+                    "category": "Optional group: indices, rates, commodities, or fx.",
+                    "series_id": "Optional configured series id, e.g. SP500, USD_KRW, US_TREASURY_10Y.",
+                },
+                "examples": [
+                    f"{base_url}/realtime/indicators",
+                    f"{base_url}/realtime/indicators?category=indices",
+                    f"{base_url}/realtime/indicators?series_id=USD_KRW",
                 ],
             },
             "commodities": {
@@ -2196,6 +2321,45 @@ def _ticker_params(params: dict[str, list[str]]) -> list[str]:
     return list(dict.fromkeys(tickers))
 
 
+def _symbol_params(params: dict[str, list[str]]) -> list[str]:
+    values = params.get("symbols") or params.get("symbol")
+    if not values:
+        raise ValueError("symbol is required")
+    symbols: list[str] = []
+    for value in values:
+        for part in value.split(","):
+            symbol = part.strip()
+            if symbol:
+                symbols.append(_normalize_symbol_param(symbol))
+    if not symbols:
+        raise ValueError("symbol is required")
+    return list(dict.fromkeys(symbols))
+
+
+def _normalize_symbol_param(value: str) -> str:
+    symbol = value.strip()
+    if not symbol:
+        raise ValueError("symbol is required")
+    if symbol.isdigit() and len(symbol) <= 6:
+        return symbol.zfill(6)
+    return symbol.upper()
+
+
+def _search_query_params(params: dict[str, list[str]]) -> list[str]:
+    values = params.get("queries") or params.get("q") or params.get("query")
+    if not values:
+        raise ValueError("query is required")
+    queries: list[str] = []
+    for value in values:
+        for part in value.split(","):
+            query = part.strip()
+            if query:
+                queries.append(query)
+    if not queries:
+        raise ValueError("query is required")
+    return list(dict.fromkeys(queries))
+
+
 def _daily_price_fields(params: dict[str, list[str]]) -> tuple[str, ...]:
     values = params.get("fields")
     if not values:
@@ -2305,6 +2469,295 @@ def _query_daily_prices_batch(
         rows = conn.execute(sql, params).fetchall()
     _append_daily_price_rows(prices, rows, fields)
     return prices
+
+
+def _query_quotes(paths: ProjectPaths, symbols: list[str]) -> list[dict[str, Any]]:
+    domestic_symbols = [symbol for symbol in symbols if _is_korean_ticker(symbol)]
+    overseas_symbols = [symbol for symbol in symbols if symbol not in domestic_symbols]
+    domestic_quotes = _query_domestic_quotes(paths, domestic_symbols)
+    overseas_quotes = _query_cnbc_symbol_quotes(overseas_symbols)
+    by_symbol = {
+        quote["symbol"]: quote
+        for quote in [*domestic_quotes, *overseas_quotes]
+    }
+    return [by_symbol[symbol] for symbol in symbols if symbol in by_symbol]
+
+
+def _is_korean_ticker(symbol: str) -> bool:
+    return symbol.isdigit() and len(symbol) == 6
+
+
+def _query_domestic_quotes(paths: ProjectPaths, symbols: list[str]) -> list[dict[str, Any]]:
+    if not symbols:
+        return []
+    latest_summary = _query_latest_naver_summary_quotes(paths, symbols)
+    missing = [symbol for symbol in symbols if symbol not in latest_summary]
+    latest_gold = _query_latest_gold_quotes(paths, missing)
+    by_symbol = {**latest_gold, **latest_summary}
+    return [by_symbol[symbol] for symbol in symbols if symbol in by_symbol]
+
+
+def _query_latest_naver_summary_quotes(
+    paths: ProjectPaths,
+    symbols: list[str],
+) -> dict[str, dict[str, Any]]:
+    files = sorted(paths.data_root.glob("bronze/naver_summary/dt=*/part.parquet"))
+    if not files:
+        return {}
+    latest = files[-1]
+    with duckdb.connect(":memory:") as conn:
+        rows = conn.execute(
+            f"""
+            SELECT
+                ticker,
+                name,
+                market,
+                snapshot_dt,
+                close,
+                change_abs,
+                change_rate_pct,
+                volume,
+                market_cap
+            FROM read_parquet('{_duckdb_path(latest)}', union_by_name = true)
+            WHERE ticker IN ({_sql_placeholders(symbols)})
+            ORDER BY ticker
+            """,
+            symbols,
+        ).fetchall()
+    return {
+        row[0]: {
+            "symbol": row[0],
+            "name": row[1],
+            "market": row[2],
+            "country": "KR",
+            "asset_type": "equity",
+            "price": row[4],
+            "change": row[5],
+            "change_pct": row[6],
+            "volume": row[7],
+            "trading_value": None,
+            "market_cap": row[8],
+            "as_of": _iso_or_none(row[3]),
+            "source": "naver_summary",
+        }
+        for row in rows
+    }
+
+
+def _query_latest_gold_quotes(
+    paths: ProjectPaths,
+    symbols: list[str],
+) -> dict[str, dict[str, Any]]:
+    if not symbols:
+        return {}
+    price_files = sorted(paths.data_root.glob("gold/daily_prices_adj/dt=*/part.parquet"))
+    if not price_files:
+        return {}
+    master_path = paths.data_root / "gold/security_master.parquet"
+    latest = price_files[-1]
+    security_ids = [f"S{symbol}" for symbol in symbols]
+    if master_path.exists():
+        sql = f"""
+            WITH prices AS (
+                SELECT *
+                FROM read_parquet('{_duckdb_path(latest)}', hive_partitioning = true, union_by_name = true)
+            ),
+            master AS (
+                SELECT *
+                FROM read_parquet('{_duckdb_path(master_path)}', union_by_name = true)
+            )
+            SELECT
+                COALESCE(sm.ticker, regexp_replace(p.security_id, '^S', '')) AS ticker,
+                sm.name,
+                sm.market,
+                p.date,
+                p.close_adj,
+                p.return_1d,
+                p.volume,
+                p.trading_value,
+                p.market_cap
+            FROM prices AS p
+            LEFT JOIN master AS sm
+                ON p.security_id = sm.security_id
+            WHERE sm.ticker IN ({_sql_placeholders(symbols)})
+               OR p.security_id IN ({_sql_placeholders(security_ids)})
+        """
+        params: list[Any] = [*symbols, *security_ids]
+    else:
+        sql = f"""
+            SELECT
+                regexp_replace(security_id, '^S', '') AS ticker,
+                NULL AS name,
+                NULL AS market,
+                date,
+                close_adj,
+                return_1d,
+                volume,
+                trading_value,
+                market_cap
+            FROM read_parquet('{_duckdb_path(latest)}', hive_partitioning = true, union_by_name = true)
+            WHERE security_id IN ({_sql_placeholders(security_ids)})
+        """
+        params = security_ids
+    with duckdb.connect(":memory:") as conn:
+        rows = conn.execute(sql, params).fetchall()
+    return {
+        row[0]: {
+            "symbol": row[0],
+            "name": row[1],
+            "market": row[2],
+            "country": "KR",
+            "asset_type": "equity",
+            "price": row[4],
+            "change": None,
+            "change_pct": row[5] * 100 if row[5] is not None else None,
+            "volume": row[6],
+            "trading_value": row[7],
+            "market_cap": row[8],
+            "as_of": _iso_or_none(row[3]),
+            "source": "gold.daily_prices_adj",
+        }
+        for row in rows
+    }
+
+
+def _query_cnbc_symbol_quotes(symbols: list[str]) -> list[dict[str, Any]]:
+    if not symbols:
+        return []
+    from finance_pi.cli import app as cli_app
+
+    quotes = cli_app._fetch_cnbc_quotes(symbols)
+    rows = []
+    for symbol in symbols:
+        quote_item = quotes.get(symbol)
+        if quote_item is None:
+            continue
+        rows.append(_cnbc_quote_payload(symbol, quote_item))
+    return rows
+
+
+def _cnbc_quote_payload(symbol: str, quote_item: dict[str, Any]) -> dict[str, Any]:
+    last = _safe_quote_float(quote_item.get("last"))
+    previous = _safe_quote_float(
+        quote_item.get("previous_day_closing") or quote_item.get("prev_prev_closing")
+    )
+    change = _safe_quote_float(quote_item.get("change"))
+    change_pct = _safe_quote_float(quote_item.get("change_pct"))
+    if change is None and last is not None and previous is not None:
+        change = last - previous
+    if change_pct is None and last is not None and previous not in (None, 0):
+        change_pct = (last / previous - 1.0) * 100.0
+    return {
+        "symbol": symbol,
+        "name": quote_item.get("name") or quote_item.get("shortName"),
+        "market": quote_item.get("exchange"),
+        "country": quote_item.get("countryCode"),
+        "asset_type": _lower_or_none(quote_item.get("assetType")),
+        "price": last,
+        "change": change,
+        "change_pct": change_pct,
+        "volume": _safe_quote_float(quote_item.get("volume")),
+        "trading_value": None,
+        "market_cap": _safe_quote_float(quote_item.get("marketCap")),
+        "currency": quote_item.get("currencyCode"),
+        "as_of": quote_item.get("last_time") or quote_item.get("reg_last_time"),
+        "source": "cnbc",
+    }
+
+
+def _search_securities(
+    paths: ProjectPaths,
+    queries: list[str],
+    limit: int,
+) -> dict[str, list[dict[str, Any]]]:
+    local = _search_local_securities(paths, queries, limit)
+    symbol_queries = [_normalize_symbol_param(query) for query in queries if _looks_like_symbol(query)]
+    cnbc_quotes = {row["symbol"]: row for row in _query_cnbc_symbol_quotes(symbol_queries)}
+    result: dict[str, list[dict[str, Any]]] = {}
+    for query in queries:
+        rows = list(local.get(query, []))
+        normalized = _normalize_symbol_param(query) if _looks_like_symbol(query) else None
+        if normalized in cnbc_quotes and not any(row.get("symbol") == normalized for row in rows):
+            rows.append(
+                {
+                    "symbol": normalized,
+                    "name": cnbc_quotes[normalized].get("name"),
+                    "market": cnbc_quotes[normalized].get("market"),
+                    "country": cnbc_quotes[normalized].get("country"),
+                    "asset_type": cnbc_quotes[normalized].get("asset_type"),
+                    "source": "cnbc",
+                }
+            )
+        result[query] = rows[:limit]
+    return result
+
+
+def _looks_like_symbol(value: str) -> bool:
+    return bool(re.fullmatch(r"[A-Za-z0-9.@=^_-]{1,24}", value.strip()))
+
+
+def _search_local_securities(
+    paths: ProjectPaths,
+    queries: list[str],
+    limit: int,
+) -> dict[str, list[dict[str, Any]]]:
+    rows = _local_security_search_rows(paths)
+    result: dict[str, list[dict[str, Any]]] = {query: [] for query in queries}
+    for query in queries:
+        normalized_query = query.lower()
+        normalized_ticker = query.zfill(6) if query.isdigit() and len(query) <= 6 else query.upper()
+        matches = []
+        for row in rows:
+            ticker = str(row.get("ticker") or "")
+            name = str(row.get("name") or "")
+            if ticker == normalized_ticker or normalized_query in name.lower():
+                matches.append(row)
+            if len(matches) >= limit:
+                break
+        result[query] = matches
+    return result
+
+
+def _local_security_search_rows(paths: ProjectPaths) -> list[dict[str, Any]]:
+    frames = []
+    master_path = paths.data_root / "gold/security_master.parquet"
+    if master_path.exists():
+        frames.append(
+            pl.read_parquet(master_path)
+            .select(["ticker", "name", "market", "security_type", "share_class"])
+            .with_columns(
+                pl.lit("KR").alias("country"),
+                pl.lit("security_master").alias("source"),
+            )
+        )
+    naver_files = sorted(paths.data_root.glob("bronze/naver_summary/dt=*/part.parquet"))
+    if naver_files:
+        frames.append(
+            pl.read_parquet(naver_files[-1])
+            .select(["ticker", "name", "market"])
+            .with_columns(
+                pl.lit("equity").alias("security_type"),
+                pl.lit(None).alias("share_class"),
+                pl.lit("KR").alias("country"),
+                pl.lit("naver_summary").alias("source"),
+            )
+        )
+    if not frames:
+        return []
+    frame = pl.concat(frames, how="diagonal_relaxed").unique(subset=["ticker"], keep="first")
+    return [
+        {
+            "symbol": row["ticker"],
+            "ticker": row["ticker"],
+            "name": row["name"],
+            "market": row["market"],
+            "country": row["country"],
+            "asset_type": row["security_type"],
+            "share_class": row["share_class"],
+            "source": row["source"],
+        }
+        for row in frame.sort("ticker").to_dicts()
+    ]
 
 
 def _daily_price_partition_files(data_root: Path, since: date, until: date) -> list[Path]:
@@ -3570,6 +4023,19 @@ def _iso_or_none(value: Any) -> str | None:
     return value.isoformat() if hasattr(value, "isoformat") else None
 
 
+def _safe_quote_float(value: Any) -> float | None:
+    if value in (None, "", "N/A", "--"):
+        return None
+    try:
+        return float(str(value).replace(",", ""))
+    except ValueError:
+        return None
+
+
+def _lower_or_none(value: Any) -> str | None:
+    return str(value).lower() if value is not None else None
+
+
 def _parse_iso_date(value: Any) -> date | None:
     if isinstance(value, date):
         return value
@@ -3639,6 +4105,76 @@ def _query_macro_table(
             params,
         ).fetchall()
     return [_macro_row_dict(columns, row) for row in rows]
+
+
+def _query_realtime_indicators(
+    category: str | None,
+    series_id: str | None,
+) -> dict[str, Any]:
+    from finance_pi.cli import app as cli_app
+
+    series_by_category = {
+        "indices": cli_app.CNBC_INDEX_SERIES,
+        "rates": cli_app.CNBC_RATE_SERIES,
+        "commodities": cli_app.CNBC_COMMODITY_SERIES,
+        "fx": cli_app.CNBC_FX_SERIES,
+    }
+    selected_categories = [category] if category is not None else list(series_by_category)
+    selected_series = {
+        key: [
+            item
+            for item in series_by_category[key]
+            if series_id is None or item["series_id"] == series_id
+        ]
+        for key in selected_categories
+    }
+    derived_fx = [
+        item
+        for item in cli_app.CNBC_DERIVED_FX_SERIES
+        if (category in (None, "fx")) and (series_id is None or item["series_id"] == series_id)
+    ]
+    symbols = [
+        item["cnbc_symbol"]
+        for items in selected_series.values()
+        for item in items
+    ]
+    symbols.extend(item["numerator_symbol"] for item in derived_fx)
+    symbols.extend(item["denominator_symbol"] for item in derived_fx)
+    symbols = sorted(set(symbols))
+    quotes = cli_app._fetch_cnbc_quotes(symbols)
+    today = datetime.now(UTC).date()
+    since = today - timedelta(days=7)
+    until = today + timedelta(days=1)
+    indicators = {
+        "indices": cli_app._cnbc_index_rows(selected_series.get("indices", []), quotes, since, until),
+        "rates": cli_app._cnbc_rate_rows(selected_series.get("rates", []), quotes, since, until),
+        "commodities": cli_app._cnbc_commodity_rows(
+            selected_series.get("commodities", []),
+            quotes,
+            since,
+            until,
+        ),
+        "fx": [
+            *cli_app._cnbc_fx_rows(selected_series.get("fx", []), quotes, since, until),
+            *cli_app._cnbc_derived_fx_rows(derived_fx, quotes, since, until),
+        ],
+    }
+    if series_id is not None:
+        indicators = {
+            key: [row for row in rows if row.get("series_id") == series_id]
+            for key, rows in indicators.items()
+        }
+    if category is not None:
+        indicators = {category: indicators[category]}
+    return {
+        "generated_at": datetime.now(UTC).isoformat(),
+        "source": "cnbc",
+        "cache_ttl_seconds": AdminState.realtime_cache_seconds,
+        "category": category,
+        "series_id": series_id,
+        "count": sum(len(rows) for rows in indicators.values()),
+        "indicators": indicators,
+    }
 
 
 def _macro_where_clause(

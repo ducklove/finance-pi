@@ -91,6 +91,7 @@ app.add_typer(backfill_app, name="backfill")
 
 FRED_TIMEOUT_SECONDS = 10
 YAHOO_TIMEOUT_SECONDS = 15
+ECOS_TIMEOUT_SECONDS = 20
 FRED_SERIES = {
     "cpi": [
         {
@@ -121,6 +122,15 @@ FRED_SERIES = {
             "unit": "percent",
         },
         {
+            "series_id": "US_TREASURY_2Y",
+            "fred_id": "DGS2",
+            "country": "US",
+            "name": "US Treasury 2-Year Constant Maturity",
+            "frequency": "D",
+            "tenor": "2Y",
+            "unit": "percent",
+        },
+        {
             "series_id": "US_TREASURY_10Y",
             "fred_id": "DGS10",
             "country": "US",
@@ -129,8 +139,354 @@ FRED_SERIES = {
             "tenor": "10Y",
             "unit": "percent",
         },
+        {
+            "series_id": "US_TREASURY_30Y",
+            "fred_id": "DGS30",
+            "country": "US",
+            "name": "US Treasury 30-Year Constant Maturity",
+            "frequency": "D",
+            "tenor": "30Y",
+            "unit": "percent",
+        },
+        {
+            "series_id": "KR_GOVT_10Y",
+            "fred_id": "IRLTLT01KRM156N",
+            "country": "KR",
+            "name": "Korea 10-Year Government Bond Yield",
+            "frequency": "M",
+            "tenor": "10Y",
+            "unit": "percent",
+        },
+        {
+            "series_id": "JP_GOVT_10Y",
+            "fred_id": "IRLTLT01JPM156N",
+            "country": "JP",
+            "name": "Japan 10-Year Government Bond Yield",
+            "frequency": "M",
+            "tenor": "10Y",
+            "unit": "percent",
+        },
+        {
+            "series_id": "DE_GOVT_10Y",
+            "fred_id": "IRLTLT01DEM156N",
+            "country": "DE",
+            "name": "Germany 10-Year Government Bond Yield",
+            "frequency": "M",
+            "tenor": "10Y",
+            "unit": "percent",
+        },
+        {
+            "series_id": "FR_GOVT_10Y",
+            "fred_id": "IRLTLT01FRM156N",
+            "country": "FR",
+            "name": "France 10-Year Government Bond Yield",
+            "frequency": "M",
+            "tenor": "10Y",
+            "unit": "percent",
+        },
+        {
+            "series_id": "GB_GOVT_10Y",
+            "fred_id": "IRLTLT01GBM156N",
+            "country": "GB",
+            "name": "United Kingdom 10-Year Government Bond Yield",
+            "frequency": "M",
+            "tenor": "10Y",
+            "unit": "percent",
+        },
     ],
 }
+ECOS_RATE_SERIES = [
+    {
+        "series_id": "KR_BASE_RATE_ECOS",
+        "stat_code": "722Y001",
+        "cycle": "D",
+        "items": ("0101000",),
+        "country": "KR",
+        "name": "Bank of Korea Base Rate",
+        "frequency": "D",
+        "tenor": "overnight",
+        "unit": "percent",
+    },
+    {
+        "series_id": "KR_CALL_RATE_ECOS",
+        "stat_code": "817Y002",
+        "cycle": "D",
+        "items": ("010101000",),
+        "country": "KR",
+        "name": "Korea Call Rate 1-Day",
+        "frequency": "D",
+        "tenor": "overnight",
+        "unit": "percent",
+    },
+    {
+        "series_id": "KR_GOVT_2Y_ECOS",
+        "stat_code": "817Y002",
+        "cycle": "D",
+        "items": ("010195000",),
+        "country": "KR",
+        "name": "Korea Treasury Bond 2-Year Yield",
+        "frequency": "D",
+        "tenor": "2Y",
+        "unit": "percent",
+    },
+    {
+        "series_id": "KR_GOVT_3Y_ECOS",
+        "stat_code": "817Y002",
+        "cycle": "D",
+        "items": ("010200000",),
+        "country": "KR",
+        "name": "Korea Treasury Bond 3-Year Yield",
+        "frequency": "D",
+        "tenor": "3Y",
+        "unit": "percent",
+    },
+    {
+        "series_id": "KR_GOVT_5Y_ECOS",
+        "stat_code": "817Y002",
+        "cycle": "D",
+        "items": ("010200001",),
+        "country": "KR",
+        "name": "Korea Treasury Bond 5-Year Yield",
+        "frequency": "D",
+        "tenor": "5Y",
+        "unit": "percent",
+    },
+    {
+        "series_id": "KR_GOVT_10Y_ECOS",
+        "stat_code": "817Y002",
+        "cycle": "D",
+        "items": ("010210000",),
+        "country": "KR",
+        "name": "Korea Treasury Bond 10-Year Yield",
+        "frequency": "D",
+        "tenor": "10Y",
+        "unit": "percent",
+    },
+    {
+        "series_id": "KR_CORP_AA_3Y_ECOS",
+        "stat_code": "817Y002",
+        "cycle": "D",
+        "items": ("010300000",),
+        "country": "KR",
+        "name": "Korea Corporate Bond AA- 3-Year Yield",
+        "frequency": "D",
+        "tenor": "3Y",
+        "unit": "percent",
+    },
+    {
+        "series_id": "KR_CD_91D_ECOS",
+        "stat_code": "817Y002",
+        "cycle": "D",
+        "items": ("010502000",),
+        "country": "KR",
+        "name": "Korea CD 91-Day Yield",
+        "frequency": "D",
+        "tenor": "91D",
+        "unit": "percent",
+    },
+    {
+        "series_id": "KR_KOFR_ECOS",
+        "stat_code": "817Y002",
+        "cycle": "D",
+        "items": ("010901000",),
+        "country": "KR",
+        "name": "Korea Overnight Financing Repo Rate",
+        "frequency": "D",
+        "tenor": "overnight",
+        "unit": "percent",
+    },
+    {
+        "series_id": "KR_BANK_MORTGAGE_RATE_ECOS",
+        "stat_code": "121Y006",
+        "cycle": "M",
+        "items": ("BECBLA0302",),
+        "country": "KR",
+        "name": "Korea Bank Mortgage Loan Rate",
+        "frequency": "M",
+        "tenor": "loan",
+        "unit": "percent",
+    },
+    {
+        "series_id": "KR_BANK_CREDIT_LOAN_RATE_ECOS",
+        "stat_code": "121Y006",
+        "cycle": "M",
+        "items": ("BECBLA03051",),
+        "country": "KR",
+        "name": "Korea Bank Unsecured Consumer Loan Rate",
+        "frequency": "M",
+        "tenor": "loan",
+        "unit": "percent",
+    },
+]
+ECOS_FX_SERIES = [
+    {
+        "series_id": "USD_KRW_ECOS",
+        "stat_code": "731Y001",
+        "cycle": "D",
+        "items": ("0000001",),
+        "base_currency": "USD",
+        "quote_currency": "KRW",
+    },
+    {
+        "series_id": "EUR_KRW_ECOS",
+        "stat_code": "731Y001",
+        "cycle": "D",
+        "items": ("0000003",),
+        "base_currency": "EUR",
+        "quote_currency": "KRW",
+    },
+    {
+        "series_id": "CNY_KRW_ECOS",
+        "stat_code": "731Y001",
+        "cycle": "D",
+        "items": ("0000053",),
+        "base_currency": "CNY",
+        "quote_currency": "KRW",
+    },
+    {
+        "series_id": "JPY100_KRW_ECOS",
+        "stat_code": "731Y001",
+        "cycle": "D",
+        "items": ("0000002",),
+        "base_currency": "JPY100",
+        "quote_currency": "KRW",
+    },
+]
+ECOS_CPI_SERIES = [
+    {
+        "series_id": "KR_CPI_ALL_ECOS",
+        "stat_code": "901Y009",
+        "cycle": "M",
+        "items": ("0",),
+        "country": "KR",
+        "name": "Korea CPI All Items",
+        "frequency": "M",
+        "index_base": "2020=100",
+    },
+]
+ECOS_ECONOMIC_SERIES = [
+    {
+        "series_id": "KR_REAL_GDP_SA_ECOS",
+        "stat_code": "200Y108",
+        "cycle": "Q",
+        "items": ("10601",),
+        "country": "KR",
+        "name": "Korea Real GDP SA",
+        "category": "growth",
+        "frequency": "Q",
+        "unit": "billions_krw",
+    },
+    {
+        "series_id": "KR_NOMINAL_GDP_SA_ECOS",
+        "stat_code": "200Y107",
+        "cycle": "Q",
+        "items": ("10601",),
+        "country": "KR",
+        "name": "Korea Nominal GDP SA",
+        "category": "growth",
+        "frequency": "Q",
+        "unit": "billions_krw",
+    },
+    {
+        "series_id": "KR_CURRENT_ACCOUNT_SA_ECOS",
+        "stat_code": "301Y017",
+        "cycle": "M",
+        "items": ("SA000",),
+        "country": "KR",
+        "name": "Korea Current Account SA",
+        "category": "external",
+        "frequency": "M",
+        "unit": "millions_usd",
+    },
+    {
+        "series_id": "KR_UNEMPLOYMENT_RATE_SA_ECOS",
+        "stat_code": "901Y027",
+        "cycle": "M",
+        "items": ("I61BC", "I28B"),
+        "country": "KR",
+        "name": "Korea Unemployment Rate SA",
+        "category": "labor",
+        "frequency": "M",
+        "unit": "percent",
+    },
+    {
+        "series_id": "KR_EMPLOYMENT_RATE_SA_ECOS",
+        "stat_code": "901Y027",
+        "cycle": "M",
+        "items": ("I61E", "I28B"),
+        "country": "KR",
+        "name": "Korea Employment Rate SA",
+        "category": "labor",
+        "frequency": "M",
+        "unit": "percent",
+    },
+    {
+        "series_id": "KR_INDUSTRIAL_PRODUCTION_SA_ECOS",
+        "stat_code": "901Y033",
+        "cycle": "M",
+        "items": ("A00", "2"),
+        "country": "KR",
+        "name": "Korea All-Industry Production Index SA",
+        "category": "growth",
+        "frequency": "M",
+        "unit": "index_2020_100",
+    },
+    {
+        "series_id": "KR_RETAIL_SALES_REAL_SA_ECOS",
+        "stat_code": "901Y100",
+        "cycle": "M",
+        "items": ("G0", "T3"),
+        "country": "KR",
+        "name": "Korea Retail Sales Index SA",
+        "category": "consumption",
+        "frequency": "M",
+        "unit": "index_2020_100",
+    },
+    {
+        "series_id": "KR_UNSOLD_HOMES_ECOS",
+        "stat_code": "901Y074",
+        "cycle": "M",
+        "items": ("I410A",),
+        "country": "KR",
+        "name": "Korea Unsold Homes",
+        "category": "housing",
+        "frequency": "M",
+        "unit": "homes",
+    },
+    {
+        "series_id": "KR_HOUSEHOLD_CREDIT_ECOS",
+        "stat_code": "151Y001",
+        "cycle": "Q",
+        "items": ("1000000",),
+        "country": "KR",
+        "name": "Korea Household Credit",
+        "category": "credit",
+        "frequency": "Q",
+        "unit": "billions_krw",
+    },
+    {
+        "series_id": "KR_DEPOSIT_TAKER_HOUSEHOLD_LOANS_ECOS",
+        "stat_code": "151Y002",
+        "cycle": "M",
+        "items": ("1110000",),
+        "country": "KR",
+        "name": "Korea Deposit-Taker Household Loans",
+        "category": "credit",
+        "frequency": "M",
+        "unit": "billions_krw",
+    },
+    {
+        "series_id": "KR_M2_SA_ECOS",
+        "stat_code": "161Y005",
+        "cycle": "M",
+        "items": ("BBHS00",),
+        "country": "KR",
+        "name": "Korea M2 Average Balance SA",
+        "category": "money",
+        "frequency": "M",
+        "unit": "billions_krw",
+    },
+]
 FRED_ECONOMIC_SERIES = [
     {
         "series_id": "CPILFESL",
@@ -390,8 +746,58 @@ YAHOO_INDEX_SERIES = [
         "category": "equity_index",
         "currency": "USD",
     },
+    {
+        "series_id": "DOW_JONES",
+        "symbol": "^DJI",
+        "country": "US",
+        "name": "Dow Jones Industrial Average",
+        "category": "equity_index",
+        "currency": "USD",
+    },
+    {
+        "series_id": "NIKKEI_225",
+        "symbol": "^N225",
+        "country": "JP",
+        "name": "Nikkei 225",
+        "category": "equity_index",
+        "currency": "JPY",
+    },
+    {
+        "series_id": "HANG_SENG",
+        "symbol": "^HSI",
+        "country": "HK",
+        "name": "Hang Seng Index",
+        "category": "equity_index",
+        "currency": "HKD",
+    },
+    {
+        "series_id": "SSE_COMPOSITE",
+        "symbol": "000001.SS",
+        "country": "CN",
+        "name": "Shanghai Composite Index",
+        "category": "equity_index",
+        "currency": "CNY",
+    },
+    {
+        "series_id": "US_DOLLAR_INDEX",
+        "symbol": "DX-Y.NYB",
+        "country": "US",
+        "name": "US Dollar Index",
+        "category": "fx_index",
+        "currency": "USD",
+    },
 ]
 YAHOO_RATE_SERIES = [
+    {
+        "series_id": "US_TREASURY_5Y_YAHOO",
+        "symbol": "^FVX",
+        "country": "US",
+        "name": "US Treasury 5-Year Yield",
+        "frequency": "D",
+        "tenor": "5Y",
+        "unit": "percent",
+        "scale": "1",
+    },
     {
         "series_id": "US_TREASURY_10Y_YAHOO",
         "symbol": "^TNX",
@@ -399,6 +805,16 @@ YAHOO_RATE_SERIES = [
         "name": "US Treasury 10-Year Yield",
         "frequency": "D",
         "tenor": "10Y",
+        "unit": "percent",
+        "scale": "1",
+    },
+    {
+        "series_id": "US_TREASURY_30Y_YAHOO",
+        "symbol": "^TYX",
+        "country": "US",
+        "name": "US Treasury 30-Year Yield",
+        "frequency": "D",
+        "tenor": "30Y",
         "unit": "percent",
         "scale": "1",
     },
@@ -411,6 +827,35 @@ YAHOO_RATE_SERIES = [
         "tenor": "13W",
         "unit": "percent",
         "scale": "1",
+    },
+]
+KRX_BOND_RATE_SERIES = [
+    {
+        "series_id": "KR_GOVT_3Y",
+        "krx_kind": "국고채3년",
+        "country": "KR",
+        "name": "Korea Treasury Bond 3-Year Yield",
+        "frequency": "D",
+        "tenor": "3Y",
+        "unit": "percent",
+    },
+    {
+        "series_id": "KR_GOVT_5Y",
+        "krx_kind": "국고채5년",
+        "country": "KR",
+        "name": "Korea Treasury Bond 5-Year Yield",
+        "frequency": "D",
+        "tenor": "5Y",
+        "unit": "percent",
+    },
+    {
+        "series_id": "KR_GOVT_10Y_DAILY",
+        "krx_kind": "국고채10년",
+        "country": "KR",
+        "name": "Korea Treasury Bond 10-Year Yield",
+        "frequency": "D",
+        "tenor": "10Y",
+        "unit": "percent",
     },
 ]
 YAHOO_COMMODITY_SERIES = [
@@ -430,6 +875,22 @@ YAHOO_COMMODITY_SERIES = [
         "unit": "troy_oz",
         "currency": "USD",
     },
+    {
+        "series_id": "WTI_USD_BBL",
+        "symbol": "CL=F",
+        "name": "WTI Crude Oil Futures",
+        "commodity": "wti",
+        "unit": "barrel",
+        "currency": "USD",
+    },
+    {
+        "series_id": "BRENT_USD_BBL",
+        "symbol": "BZ=F",
+        "name": "Brent Crude Oil Futures",
+        "commodity": "brent",
+        "unit": "barrel",
+        "currency": "USD",
+    },
 ]
 YAHOO_FX_SERIES = [
     {
@@ -443,6 +904,267 @@ YAHOO_FX_SERIES = [
         "symbol": "JPY=X",
         "base_currency": "USD",
         "quote_currency": "JPY",
+    },
+    {
+        "series_id": "EUR_KRW",
+        "symbol": "EURKRW=X",
+        "base_currency": "EUR",
+        "quote_currency": "KRW",
+    },
+    {
+        "series_id": "JPY_KRW",
+        "symbol": "JPYKRW=X",
+        "base_currency": "JPY",
+        "quote_currency": "KRW",
+    },
+    {
+        "series_id": "CNY_KRW",
+        "symbol": "CNYKRW=X",
+        "base_currency": "CNY",
+        "quote_currency": "KRW",
+    },
+    {
+        "series_id": "AUD_KRW",
+        "symbol": "AUDKRW=X",
+        "base_currency": "AUD",
+        "quote_currency": "KRW",
+    },
+    {
+        "series_id": "USD_VND",
+        "symbol": "USDVND=X",
+        "base_currency": "USD",
+        "quote_currency": "VND",
+    },
+]
+YAHOO_DERIVED_FX_SERIES = [
+    {
+        "series_id": "VND_KRW",
+        "numerator_symbol": "KRW=X",
+        "denominator_symbol": "USDVND=X",
+        "base_currency": "VND",
+        "quote_currency": "KRW",
+    },
+]
+CNBC_INDEX_SERIES = [
+    {
+        "series_id": "SP500",
+        "cnbc_symbol": ".SPX",
+        "country": "US",
+        "name": "S&P 500 Index",
+        "category": "equity_index",
+        "currency": "USD",
+    },
+    {
+        "series_id": "NASDAQ",
+        "cnbc_symbol": ".IXIC",
+        "country": "US",
+        "name": "NASDAQ Composite Index",
+        "category": "equity_index",
+        "currency": "USD",
+    },
+    {
+        "series_id": "DOW_JONES",
+        "cnbc_symbol": ".DJI",
+        "country": "US",
+        "name": "Dow Jones Industrial Average",
+        "category": "equity_index",
+        "currency": "USD",
+    },
+    {
+        "series_id": "NIKKEI_225",
+        "cnbc_symbol": ".N225",
+        "country": "JP",
+        "name": "Nikkei 225",
+        "category": "equity_index",
+        "currency": "JPY",
+    },
+    {
+        "series_id": "HANG_SENG",
+        "cnbc_symbol": ".HSI",
+        "country": "HK",
+        "name": "Hang Seng Index",
+        "category": "equity_index",
+        "currency": "HKD",
+    },
+    {
+        "series_id": "SSE_COMPOSITE",
+        "cnbc_symbol": ".SSEC",
+        "country": "CN",
+        "name": "Shanghai Composite Index",
+        "category": "equity_index",
+        "currency": "CNY",
+    },
+    {
+        "series_id": "US_DOLLAR_INDEX",
+        "cnbc_symbol": ".DXY",
+        "country": "US",
+        "name": "US Dollar Index",
+        "category": "fx_index",
+        "currency": "USD",
+    },
+]
+CNBC_RATE_SERIES = [
+    {
+        "series_id": "US_TREASURY_2Y",
+        "cnbc_symbol": "US2Y",
+        "country": "US",
+        "name": "U.S. 2 Year Treasury",
+        "frequency": "D",
+        "tenor": "2Y",
+        "unit": "percent",
+    },
+    {
+        "series_id": "US_TREASURY_10Y",
+        "cnbc_symbol": "US10Y",
+        "country": "US",
+        "name": "U.S. 10 Year Treasury",
+        "frequency": "D",
+        "tenor": "10Y",
+        "unit": "percent",
+    },
+    {
+        "series_id": "US_TREASURY_30Y",
+        "cnbc_symbol": "US30Y",
+        "country": "US",
+        "name": "U.S. 30 Year Treasury",
+        "frequency": "D",
+        "tenor": "30Y",
+        "unit": "percent",
+    },
+    {
+        "series_id": "KR_GOVT_5Y",
+        "cnbc_symbol": "KR5Y",
+        "country": "KR",
+        "name": "Korea Treasury Bond 5-Year Yield",
+        "frequency": "D",
+        "tenor": "5Y",
+        "unit": "percent",
+    },
+    {
+        "series_id": "KR_GOVT_10Y_DAILY",
+        "cnbc_symbol": "KR10Y",
+        "country": "KR",
+        "name": "Korea Treasury Bond 10-Year Yield",
+        "frequency": "D",
+        "tenor": "10Y",
+        "unit": "percent",
+    },
+    {
+        "series_id": "JP_GOVT_10Y",
+        "cnbc_symbol": "JP10Y",
+        "country": "JP",
+        "name": "Japan 10 Year Treasury",
+        "frequency": "D",
+        "tenor": "10Y",
+        "unit": "percent",
+    },
+    {
+        "series_id": "DE_GOVT_10Y",
+        "cnbc_symbol": "DE10Y",
+        "country": "DE",
+        "name": "Germany 10 Year Bund",
+        "frequency": "D",
+        "tenor": "10Y",
+        "unit": "percent",
+    },
+    {
+        "series_id": "FR_GOVT_10Y",
+        "cnbc_symbol": "FR10Y",
+        "country": "FR",
+        "name": "France 10 Year Bond",
+        "frequency": "D",
+        "tenor": "10Y",
+        "unit": "percent",
+    },
+    {
+        "series_id": "GB_GOVT_10Y",
+        "cnbc_symbol": "GB10Y",
+        "country": "GB",
+        "name": "British 10 Year Gilt",
+        "frequency": "D",
+        "tenor": "10Y",
+        "unit": "percent",
+    },
+]
+CNBC_COMMODITY_SERIES = [
+    {
+        "series_id": "GOLD_USD_OZ",
+        "cnbc_symbol": "@GC.1",
+        "name": "Gold COMEX",
+        "commodity": "gold",
+        "unit": "troy_oz",
+        "currency": "USD",
+    },
+    {
+        "series_id": "SILVER_USD_OZ",
+        "cnbc_symbol": "@SI.1",
+        "name": "Silver COMEX",
+        "commodity": "silver",
+        "unit": "troy_oz",
+        "currency": "USD",
+    },
+    {
+        "series_id": "WTI_USD_BBL",
+        "cnbc_symbol": "@CL.1",
+        "name": "WTI Crude",
+        "commodity": "wti",
+        "unit": "barrel",
+        "currency": "USD",
+    },
+    {
+        "series_id": "BRENT_USD_BBL",
+        "cnbc_symbol": "@LCO.1",
+        "name": "ICE Brent Crude",
+        "commodity": "brent",
+        "unit": "barrel",
+        "currency": "USD",
+    },
+]
+CNBC_FX_SERIES = [
+    {
+        "series_id": "USD_KRW",
+        "cnbc_symbol": "KRW=",
+        "base_currency": "USD",
+        "quote_currency": "KRW",
+    },
+    {
+        "series_id": "EUR_KRW",
+        "cnbc_symbol": "EURKRW=",
+        "base_currency": "EUR",
+        "quote_currency": "KRW",
+    },
+    {
+        "series_id": "JPY_KRW",
+        "cnbc_symbol": "JPYKRW=",
+        "base_currency": "JPY",
+        "quote_currency": "KRW",
+    },
+    {
+        "series_id": "CNY_KRW",
+        "cnbc_symbol": "CNYKRW=",
+        "base_currency": "CNY",
+        "quote_currency": "KRW",
+    },
+    {
+        "series_id": "AUD_KRW",
+        "cnbc_symbol": "AUDKRW=",
+        "base_currency": "AUD",
+        "quote_currency": "KRW",
+    },
+    {
+        "series_id": "USD_VND",
+        "cnbc_symbol": "VND=",
+        "base_currency": "USD",
+        "quote_currency": "VND",
+    },
+]
+CNBC_DERIVED_FX_SERIES = [
+    {
+        "series_id": "VND_KRW",
+        "numerator_symbol": "KRW=",
+        "denominator_symbol": "VND=",
+        "base_currency": "VND",
+        "quote_currency": "KRW",
     },
 ]
 
@@ -1623,8 +2345,8 @@ def _run_daily_ingest(
                 paths.root,
                 None,
                 1,
-                0.05,
-                50,
+                settings.kis_daily_sleep_seconds,
+                settings.kis_daily_ticker_batch_size,
             )
         except Exception as exc:  # noqa: BLE001
             failures.append(f"KIS universe price ingest failed: {exc}")
@@ -1719,6 +2441,36 @@ def _ingest_macro(
         except Exception as exc:  # noqa: BLE001
             failures.append(f"Macro {series['series_id']} ingest failed: {exc}")
 
+    if settings.ecos_api_key:
+        for series in ECOS_CPI_SERIES:
+            try:
+                rows = _fetch_ecos_cpi_rows(series, since, until, settings.ecos_api_key)
+                if rows:
+                    macro_frames["cpi"].append(pl.DataFrame(rows))
+            except Exception as exc:  # noqa: BLE001
+                failures.append(f"Macro {series['series_id']} ingest failed: {exc}")
+        for series in ECOS_RATE_SERIES:
+            try:
+                rows = _fetch_ecos_rate_rows(series, since, until, settings.ecos_api_key)
+                if rows:
+                    macro_frames["rates"].append(pl.DataFrame(rows))
+            except Exception as exc:  # noqa: BLE001
+                failures.append(f"Macro {series['series_id']} ingest failed: {exc}")
+        for series in ECOS_FX_SERIES:
+            try:
+                rows = _fetch_ecos_fx_rows(series, since, until, settings.ecos_api_key)
+                if rows:
+                    macro_frames["fx"].append(pl.DataFrame(rows))
+            except Exception as exc:  # noqa: BLE001
+                failures.append(f"Macro {series['series_id']} ingest failed: {exc}")
+        for series in ECOS_ECONOMIC_SERIES:
+            try:
+                rows = _fetch_ecos_indicator_rows(series, since, until, settings.ecos_api_key)
+                if rows:
+                    macro_frames["economic_indicators"].append(pl.DataFrame(rows))
+            except Exception as exc:  # noqa: BLE001
+                failures.append(f"Macro {series['series_id']} ingest failed: {exc}")
+
     for series in YAHOO_INDEX_SERIES:
         try:
             rows = _fetch_yahoo_index_rows(series, since, until)
@@ -1729,6 +2481,13 @@ def _ingest_macro(
     for series in YAHOO_RATE_SERIES:
         try:
             rows = _fetch_yahoo_rate_rows(series, since, until)
+            if rows:
+                macro_frames["rates"].append(pl.DataFrame(rows))
+        except Exception as exc:  # noqa: BLE001
+            failures.append(f"Macro {series['series_id']} ingest failed: {exc}")
+    for series in KRX_BOND_RATE_SERIES:
+        try:
+            rows = _fetch_krx_bond_rate_rows(series, since, until)
             if rows:
                 macro_frames["rates"].append(pl.DataFrame(rows))
         except Exception as exc:  # noqa: BLE001
@@ -1747,6 +2506,37 @@ def _ingest_macro(
                 macro_frames["fx"].append(pl.DataFrame(rows))
         except Exception as exc:  # noqa: BLE001
             failures.append(f"Macro {series['series_id']} ingest failed: {exc}")
+    for series in YAHOO_DERIVED_FX_SERIES:
+        try:
+            rows = _fetch_yahoo_derived_fx_rows(series, since, until)
+            if rows:
+                macro_frames["fx"].append(pl.DataFrame(rows))
+        except Exception as exc:  # noqa: BLE001
+            failures.append(f"Macro {series['series_id']} ingest failed: {exc}")
+    try:
+        cnbc_quotes = _fetch_cnbc_quotes(
+            [
+                *[series["cnbc_symbol"] for series in CNBC_INDEX_SERIES],
+                *[series["cnbc_symbol"] for series in CNBC_RATE_SERIES],
+                *[series["cnbc_symbol"] for series in CNBC_COMMODITY_SERIES],
+                *[series["cnbc_symbol"] for series in CNBC_FX_SERIES],
+            ]
+        )
+    except Exception as exc:  # noqa: BLE001
+        cnbc_quotes = {}
+        failures.append(f"Macro CNBC quote ingest failed: {exc}")
+    if cnbc_quotes:
+        for table, rows in {
+            "indices": _cnbc_index_rows(CNBC_INDEX_SERIES, cnbc_quotes, since, until),
+            "rates": _cnbc_rate_rows(CNBC_RATE_SERIES, cnbc_quotes, since, until),
+            "commodities": _cnbc_commodity_rows(CNBC_COMMODITY_SERIES, cnbc_quotes, since, until),
+            "fx": [
+                *_cnbc_fx_rows(CNBC_FX_SERIES, cnbc_quotes, since, until),
+                *_cnbc_derived_fx_rows(CNBC_DERIVED_FX_SERIES, cnbc_quotes, since, until),
+            ],
+        }.items():
+            if rows:
+                macro_frames[table].append(pl.DataFrame(rows))
 
     for table, frames in macro_frames.items():
         if not frames:
@@ -1892,7 +2682,185 @@ def _fetch_fred_indicator_rows(
     ]
 
 
-def _cpi_rows(series: dict[str, str], values: list[tuple[date, float]]) -> list[dict[str, object]]:
+def _fetch_ecos_cpi_rows(
+    series: dict[str, object],
+    since: date,
+    until: date,
+    api_key: str,
+) -> list[dict[str, object]]:
+    values = _fetch_ecos_values(series, since, until, api_key)
+    return _cpi_rows(
+        {
+            "country": str(series["country"]),
+            "series_id": str(series["series_id"]),
+            "name": str(series["name"]),
+            "frequency": str(series["frequency"]),
+            "index_base": str(series["index_base"]),
+        },
+        values,
+        source="bok_ecos",
+    )
+
+
+def _fetch_ecos_rate_rows(
+    series: dict[str, object],
+    since: date,
+    until: date,
+    api_key: str,
+) -> list[dict[str, object]]:
+    return [
+        {
+            "date": logical_date,
+            "country": series["country"],
+            "series_id": series["series_id"],
+            "name": series["name"],
+            "frequency": series["frequency"],
+            "tenor": series["tenor"],
+            "value": value,
+            "unit": series["unit"],
+            "source": "bok_ecos",
+            "updated_at": datetime.now(UTC),
+        }
+        for logical_date, value in _fetch_ecos_values(series, since, until, api_key)
+    ]
+
+
+def _fetch_ecos_fx_rows(
+    series: dict[str, object],
+    since: date,
+    until: date,
+    api_key: str,
+) -> list[dict[str, object]]:
+    return [
+        {
+            "date": logical_date,
+            "series_id": series["series_id"],
+            "base_currency": series["base_currency"],
+            "quote_currency": series["quote_currency"],
+            "value": value,
+            "source": "bok_ecos",
+            "updated_at": datetime.now(UTC),
+        }
+        for logical_date, value in _fetch_ecos_values(series, since, until, api_key)
+    ]
+
+
+def _fetch_ecos_indicator_rows(
+    series: dict[str, object],
+    since: date,
+    until: date,
+    api_key: str,
+) -> list[dict[str, object]]:
+    return [
+        {
+            "date": logical_date,
+            "country": series["country"],
+            "series_id": series["series_id"],
+            "name": series["name"],
+            "category": series["category"],
+            "frequency": series["frequency"],
+            "value": value,
+            "unit": series["unit"],
+            "source": "bok_ecos",
+            "updated_at": datetime.now(UTC),
+        }
+        for logical_date, value in _fetch_ecos_values(series, since, until, api_key)
+    ]
+
+
+def _fetch_ecos_values(
+    series: dict[str, object],
+    since: date,
+    until: date,
+    api_key: str,
+) -> list[tuple[date, float]]:
+    stat_code = str(series["stat_code"])
+    cycle = str(series["cycle"])
+    items = tuple(str(item) for item in series["items"])  # type: ignore[index]
+    start_period = _ecos_period(since, cycle)
+    end_period = _ecos_period(until, cycle)
+    encoded_items = "/".join(quote(item, safe="") for item in items)
+    base_url = "https://ecos.bok.or.kr/api/StatisticSearch"
+    page_size = 1000
+    start_index = 1
+    rows: list[dict[str, object]] = []
+    while True:
+        end_index = start_index + page_size - 1
+        url = (
+            f"{base_url}/{api_key}/json/kr/{start_index}/{end_index}"
+            f"/{stat_code}/{cycle}/{start_period}/{end_period}/{encoded_items}"
+        )
+        request = Request(url, headers={"User-Agent": "finance-pi/0.1"})
+        with urlopen(request, timeout=ECOS_TIMEOUT_SECONDS) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        if "RESULT" in payload:
+            result = payload["RESULT"]
+            code = result.get("CODE")
+            message = result.get("MESSAGE")
+            if code == "INFO-200":
+                break
+            raise ValueError(f"ECOS {stat_code} {items}: {code} {message}")
+        table = payload.get("StatisticSearch")
+        if not isinstance(table, dict):
+            raise ValueError(f"ECOS {stat_code} response is malformed")
+        batch = table.get("row") or []
+        if not isinstance(batch, list):
+            raise ValueError(f"ECOS {stat_code} rows response is malformed")
+        rows.extend(row for row in batch if isinstance(row, dict))
+        total_count = int(table.get("list_total_count") or len(rows))
+        if len(rows) >= total_count or len(batch) < page_size:
+            break
+        start_index += page_size
+
+    values: list[tuple[date, float]] = []
+    for row in rows:
+        raw_time = row.get("TIME")
+        raw_value = row.get("DATA_VALUE")
+        if raw_time in (None, "") or raw_value in (None, ""):
+            continue
+        logical_date = _parse_ecos_period(str(raw_time), cycle)
+        if logical_date < since or logical_date > until:
+            continue
+        values.append((logical_date, float(str(raw_value).replace(",", ""))))
+    return sorted(values, key=lambda point: point[0])
+
+
+def _ecos_period(value: date, cycle: str) -> str:
+    if cycle == "D":
+        return value.strftime("%Y%m%d")
+    if cycle == "M":
+        return value.strftime("%Y%m")
+    if cycle == "Q":
+        quarter = (value.month - 1) // 3 + 1
+        return f"{value.year}Q{quarter}"
+    if cycle == "A":
+        return str(value.year)
+    raise ValueError(f"unsupported ECOS cycle: {cycle}")
+
+
+def _parse_ecos_period(value: str, cycle: str) -> date:
+    if cycle == "D":
+        return date(int(value[:4]), int(value[4:6]), int(value[6:8]))
+    if cycle == "M":
+        return date(int(value[:4]), int(value[4:6]), 1)
+    if cycle == "Q":
+        match = re.fullmatch(r"(\d{4})Q([1-4])", value)
+        if match is None:
+            raise ValueError(f"invalid ECOS quarter: {value}")
+        year = int(match.group(1))
+        month = (int(match.group(2)) - 1) * 3 + 1
+        return date(year, month, 1)
+    if cycle == "A":
+        return date(int(value[:4]), 1, 1)
+    raise ValueError(f"unsupported ECOS cycle: {cycle}")
+
+
+def _cpi_rows(
+    series: dict[str, str],
+    values: list[tuple[date, float]],
+    *,
+    source: str = "fred",
+) -> list[dict[str, object]]:
     by_date = {logical_date: value for logical_date, value in values}
     rows: list[dict[str, object]] = []
     for logical_date, value in values:
@@ -1909,7 +2877,7 @@ def _cpi_rows(series: dict[str, str], values: list[tuple[date, float]]) -> list[
                 "index_base": series["index_base"],
                 "yoy_pct": _pct_change(value, by_date.get(previous_year)),
                 "mom_pct": _pct_change(value, by_date.get(previous_month)),
-                "source": "fred",
+                "source": source,
                 "updated_at": datetime.now(UTC),
             }
         )
@@ -1989,6 +2957,43 @@ def _fetch_yahoo_rate_rows(
     ]
 
 
+def _fetch_krx_bond_rate_rows(
+    series: dict[str, str],
+    since: date,
+    until: date,
+    fetcher: object | None = None,
+) -> list[dict[str, object]]:
+    if fetcher is None:
+        from pykrx import bond  # type: ignore[import-untyped]
+
+        fetcher = bond.get_otc_treasury_yields
+    frame = fetcher(since.strftime("%Y%m%d"), until.strftime("%Y%m%d"), series["krx_kind"])
+    rows = []
+    for row in frame.reset_index().to_dict("records"):
+        raw_date = row.get("일자") or row.get("date") or row.get("Date")
+        raw_value = row.get("수익률") or row.get("yield") or row.get("Yield")
+        if raw_date is None or raw_value is None:
+            continue
+        logical_date = _parse_compact_or_iso_date(raw_date)
+        if logical_date < since or logical_date > until:
+            continue
+        rows.append(
+            {
+                "date": logical_date,
+                "country": series["country"],
+                "series_id": series["series_id"],
+                "name": series["name"],
+                "frequency": series["frequency"],
+                "tenor": series["tenor"],
+                "value": float(raw_value),
+                "unit": series["unit"],
+                "source": "pykrx",
+                "updated_at": datetime.now(UTC),
+            }
+        )
+    return rows
+
+
 def _fetch_yahoo_fx_rows(
     series: dict[str, str],
     since: date,
@@ -2006,6 +3011,238 @@ def _fetch_yahoo_fx_rows(
         }
         for logical_date, close in _fetch_yahoo_daily_closes(series["symbol"], since, until)
     ]
+
+
+def _fetch_yahoo_derived_fx_rows(
+    series: dict[str, str],
+    since: date,
+    until: date,
+) -> list[dict[str, object]]:
+    numerator = dict(_fetch_yahoo_daily_closes(series["numerator_symbol"], since, until))
+    denominator = dict(_fetch_yahoo_daily_closes(series["denominator_symbol"], since, until))
+    rows = []
+    for logical_date in sorted(set(numerator) & set(denominator)):
+        denominator_value = denominator[logical_date]
+        if denominator_value == 0:
+            continue
+        rows.append(
+            {
+                "date": logical_date,
+                "series_id": series["series_id"],
+                "base_currency": series["base_currency"],
+                "quote_currency": series["quote_currency"],
+                "value": numerator[logical_date] / denominator_value,
+                "source": "yahoo_derived",
+                "updated_at": datetime.now(UTC),
+            }
+        )
+    return rows
+
+
+def _fetch_cnbc_quotes(symbols: list[str]) -> dict[str, dict[str, str]]:
+    if not symbols:
+        return {}
+    encoded_symbols = quote("|".join(symbols), safe="")
+    url = (
+        "https://quote.cnbc.com/quote-html-webservice/quote.htm"
+        f"?symbols={encoded_symbols}"
+        "&requestMethod=quick"
+        "&exthrs=1"
+        "&noform=1"
+        "&partnerId=2"
+        "&fund=1"
+        "&output=json"
+    )
+    request = Request(url, headers={"User-Agent": "finance-pi/0.1"})
+    with urlopen(request, timeout=YAHOO_TIMEOUT_SECONDS) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    quotes = payload.get("QuickQuoteResult", {}).get("QuickQuote", [])
+    if isinstance(quotes, dict):
+        quotes = [quotes]
+    result = {}
+    for item in quotes:
+        if not isinstance(item, dict):
+            continue
+        symbol = item.get("symbol")
+        if symbol and item.get("code") == "0" and item.get("last"):
+            result[str(symbol)] = item
+    return result
+
+
+def _cnbc_index_rows(
+    series_list: list[dict[str, str]],
+    quotes: dict[str, dict[str, str]],
+    since: date,
+    until: date,
+) -> list[dict[str, object]]:
+    rows = []
+    for series in series_list:
+        quote_item = quotes.get(series["cnbc_symbol"])
+        parsed = _cnbc_quote_date_value(quote_item, since, until)
+        if parsed is None:
+            continue
+        logical_date, value = parsed
+        rows.append(
+            {
+                "date": logical_date,
+                "country": series["country"],
+                "series_id": series["series_id"],
+                "name": quote_item.get("name") or series["name"],
+                "frequency": "D",
+                "category": series["category"],
+                "value": value,
+                "currency": series["currency"],
+                "return_1d": _cnbc_return_1d(quote_item, value),
+                "return_1m": None,
+                "source": "cnbc",
+                "updated_at": datetime.now(UTC),
+            }
+        )
+    return rows
+
+
+def _cnbc_rate_rows(
+    series_list: list[dict[str, str]],
+    quotes: dict[str, dict[str, str]],
+    since: date,
+    until: date,
+) -> list[dict[str, object]]:
+    rows = []
+    for series in series_list:
+        quote_item = quotes.get(series["cnbc_symbol"])
+        parsed = _cnbc_quote_date_value(quote_item, since, until)
+        if parsed is None:
+            continue
+        logical_date, value = parsed
+        rows.append(
+            {
+                "date": logical_date,
+                "country": series["country"],
+                "series_id": series["series_id"],
+                "name": quote_item.get("name") or series["name"],
+                "frequency": series["frequency"],
+                "tenor": series["tenor"],
+                "value": value,
+                "unit": series["unit"],
+                "source": "cnbc",
+                "updated_at": datetime.now(UTC),
+            }
+        )
+    return rows
+
+
+def _cnbc_commodity_rows(
+    series_list: list[dict[str, str]],
+    quotes: dict[str, dict[str, str]],
+    since: date,
+    until: date,
+) -> list[dict[str, object]]:
+    rows = []
+    for series in series_list:
+        quote_item = quotes.get(series["cnbc_symbol"])
+        parsed = _cnbc_quote_date_value(quote_item, since, until)
+        if parsed is None:
+            continue
+        logical_date, value = parsed
+        rows.append(
+            {
+                "date": logical_date,
+                "series_id": series["series_id"],
+                "name": quote_item.get("name") or series["name"],
+                "commodity": series["commodity"],
+                "value": value,
+                "unit": series["unit"],
+                "currency": series["currency"],
+                "source": "cnbc",
+                "updated_at": datetime.now(UTC),
+            }
+        )
+    return rows
+
+
+def _cnbc_fx_rows(
+    series_list: list[dict[str, str]],
+    quotes: dict[str, dict[str, str]],
+    since: date,
+    until: date,
+) -> list[dict[str, object]]:
+    rows = []
+    for series in series_list:
+        quote_item = quotes.get(series["cnbc_symbol"])
+        parsed = _cnbc_quote_date_value(quote_item, since, until)
+        if parsed is None:
+            continue
+        logical_date, value = parsed
+        rows.append(
+            {
+                "date": logical_date,
+                "series_id": series["series_id"],
+                "base_currency": series["base_currency"],
+                "quote_currency": series["quote_currency"],
+                "value": value,
+                "source": "cnbc",
+                "updated_at": datetime.now(UTC),
+            }
+        )
+    return rows
+
+
+def _cnbc_derived_fx_rows(
+    series_list: list[dict[str, str]],
+    quotes: dict[str, dict[str, str]],
+    since: date,
+    until: date,
+) -> list[dict[str, object]]:
+    rows = []
+    for series in series_list:
+        numerator = _cnbc_quote_date_value(quotes.get(series["numerator_symbol"]), since, until)
+        denominator = _cnbc_quote_date_value(
+            quotes.get(series["denominator_symbol"]),
+            since,
+            until,
+        )
+        if numerator is None or denominator is None:
+            continue
+        numerator_date, numerator_value = numerator
+        denominator_date, denominator_value = denominator
+        if numerator_date != denominator_date or denominator_value == 0:
+            continue
+        rows.append(
+            {
+                "date": numerator_date,
+                "series_id": series["series_id"],
+                "base_currency": series["base_currency"],
+                "quote_currency": series["quote_currency"],
+                "value": numerator_value / denominator_value,
+                "source": "cnbc_derived",
+                "updated_at": datetime.now(UTC),
+            }
+        )
+    return rows
+
+
+def _cnbc_quote_date_value(
+    quote_item: dict[str, str] | None,
+    since: date,
+    until: date,
+) -> tuple[date, float] | None:
+    if quote_item is None:
+        return None
+    raw_date = quote_item.get("last_time") or quote_item.get("reg_last_time")
+    raw_value = quote_item.get("last")
+    if raw_date is None or raw_value is None:
+        return None
+    logical_date = _parse_cnbc_datetime(raw_date).date()
+    if logical_date < since or logical_date > until:
+        return None
+    return logical_date, _parse_number(raw_value)
+
+
+def _cnbc_return_1d(quote_item: dict[str, str], value: float) -> float | None:
+    previous = quote_item.get("previous_day_closing") or quote_item.get("prev_prev_closing")
+    if previous is None:
+        return None
+    return _pct_change(value, _parse_number(previous))
 
 
 def _fetch_yahoo_daily_closes(
@@ -2084,6 +3321,26 @@ def _pct_change(value: float, previous: float | None) -> float | None:
     if previous in (None, 0):
         return None
     return (value / previous - 1.0) * 100.0
+
+
+def _parse_compact_or_iso_date(value: object) -> date:
+    if isinstance(value, date):
+        return value
+    text = str(value)
+    if len(text) == 8 and text.isdigit():
+        return date(int(text[:4]), int(text[4:6]), int(text[6:8]))
+    return date.fromisoformat(text[:10])
+
+
+def _parse_cnbc_datetime(value: str) -> datetime:
+    try:
+        return datetime.strptime(value, "%Y-%m-%dT%H:%M:%S.%f%z")
+    except ValueError:
+        return datetime.fromisoformat(value)
+
+
+def _parse_number(value: object) -> float:
+    return float(str(value).replace(",", ""))
 
 
 def _add_months(value: date, months: int) -> date:
@@ -2385,7 +3642,7 @@ def _catchup_dates(data_root: Path, since: date | None, until: date) -> tuple[da
         since = latest + timedelta(days=1)
     if until < since:
         return ()
-    return TradingCalendar.weekdays(since, until).dates
+    return TradingCalendar.krx_trading_days(since, until).dates
 
 
 def _latest_gold_price_date(data_root: Path) -> date | None:
@@ -3076,8 +4333,8 @@ def _parse_dart_financial_report(report_nm: str, rcept_dt: date) -> tuple[int, s
 
 def _previous_weekday(value: date) -> date:
     current = value
-    if current.weekday() >= 5:
-        current -= timedelta(days=current.weekday() - 4)
+    while not TradingCalendar.is_krx_trading_day(current):
+        current -= timedelta(days=1)
     return current
 
 

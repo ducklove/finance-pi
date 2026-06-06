@@ -19,6 +19,7 @@ from finance_pi.admin.server import (
     _is_local_admin_client,
     _job_command,
 )
+from finance_pi.cli import app as cli_app
 from finance_pi.storage import DataLakeLayout, ParquetDatasetWriter
 
 
@@ -1045,6 +1046,8 @@ def test_admin_api_docs_describe_price_endpoints(tmp_path) -> None:
 
     assert payload["endpoints"]["close_prices"]["path"] == "/api/prices/close"
     assert payload["endpoints"]["daily_prices"]["path"] == "/api/prices/daily"
+    assert payload["endpoints"]["quotes"]["path"] == "/api/quotes"
+    assert payload["endpoints"]["security_search"]["path"] == "/api/securities/search"
     assert payload["endpoints"]["basic_fundamentals"]["path"] == "/api/fundamentals/basic"
     assert (
         payload["endpoints"]["capital_actions"]["path"]
@@ -1054,8 +1057,10 @@ def test_admin_api_docs_describe_price_endpoints(tmp_path) -> None:
     assert payload["endpoints"]["cpi"]["path"] == "/api/macro/cpi"
     assert payload["endpoints"]["rates"]["path"] == "/api/macro/rates"
     assert payload["endpoints"]["indices"]["path"] == "/api/macro/indices"
+    assert payload["endpoints"]["daily_indices"]["path"] == "/api/daily-indices"
     assert payload["endpoints"]["commodities"]["path"] == "/api/macro/commodities"
     assert payload["endpoints"]["fx"]["path"] == "/api/macro/fx"
+    assert payload["endpoints"]["realtime_indicators"]["path"] == "/api/realtime/indicators"
     assert (
         payload["endpoints"]["economic_indicators"]["path"]
         == "/api/macro/economic-indicators"
@@ -1226,6 +1231,41 @@ def test_admin_macro_tables_return_filtered_rows(tmp_path) -> None:
             [
                 {
                     "date": date(2024, 1, 2),
+                    "country": "US",
+                    "series_id": "SP500",
+                    "name": "S&P 500 Index",
+                    "frequency": "D",
+                    "category": "equity_index",
+                    "value": 4750.0,
+                    "currency": "USD",
+                    "return_1d": 0.5,
+                    "return_1m": None,
+                    "source": "test",
+                    "updated_at": None,
+                },
+                {
+                    "date": date(2024, 1, 2),
+                    "country": "JP",
+                    "series_id": "NIKKEI_225",
+                    "name": "Nikkei 225",
+                    "frequency": "D",
+                    "category": "equity_index",
+                    "value": 33000.0,
+                    "currency": "JPY",
+                    "return_1d": 0.4,
+                    "return_1m": None,
+                    "source": "test",
+                    "updated_at": None,
+                },
+            ]
+        ),
+        layout.singleton_path("macro.indices"),
+    )
+    writer.write(
+        pl.DataFrame(
+            [
+                {
+                    "date": date(2024, 1, 2),
                     "series_id": "GOLD_USD_OZ",
                     "name": "Gold spot",
                     "commodity": "gold",
@@ -1301,18 +1341,155 @@ def test_admin_macro_tables_return_filtered_rows(tmp_path) -> None:
     state = AdminState(tmp_path)
 
     cpi = state.cpi({"country": ["KR"], "since": ["2024-01-01"]})
+    daily_indices = state.daily_indices({"series_id": ["SP500"]})
     gold = state.commodities({"commodity": ["gold"]})
     fx = state.fx({"base_currency": ["USD"], "quote_currency": ["KRW"]})
     labor = state.economic_indicators({"category": ["labor"]})
 
     assert cpi["count"] == 1
     assert cpi["cpi"][0]["series_id"] == "KOR_CPI_ALL"
+    assert daily_indices["count"] == 1
+    assert daily_indices["indices"][0]["series_id"] == "SP500"
     assert gold["count"] == 1
     assert gold["commodities"][0]["series_id"] == "GOLD_USD_OZ"
     assert fx["count"] == 1
     assert fx["fx"][0]["value"] == 1320.0
     assert labor["count"] == 1
     assert labor["economic_indicators"][0]["series_id"] == "UNRATE"
+
+
+def test_admin_realtime_indicators_fetches_cnbc_snapshot(tmp_path, monkeypatch) -> None:
+    calls = []
+
+    def fake_fetch(symbols: list[str]) -> dict[str, dict[str, str]]:
+        calls.append(tuple(symbols))
+        return {
+            ".SPX": {
+                "symbol": ".SPX",
+                "code": "0",
+                "last": "7,599.96",
+                "previous_day_closing": "7,580.06",
+                "name": "S&P 500 Index",
+                "last_time": "2026-06-01T16:58:18.000-0400",
+            }
+        }
+
+    monkeypatch.setattr(cli_app, "_fetch_cnbc_quotes", fake_fetch)
+
+    state = AdminState(tmp_path)
+    payload = state.realtime_indicators({"category": ["indices"], "series_id": ["SP500"]})
+    cached = state.realtime_indicators({"category": ["indices"], "series_id": ["SP500"]})
+
+    assert payload == cached
+    assert len(calls) == 1
+    assert ".SPX" in calls[0]
+    assert payload["source"] == "cnbc"
+    assert payload["count"] == 1
+    assert payload["indicators"]["indices"][0]["series_id"] == "SP500"
+    assert payload["indicators"]["indices"][0]["value"] == 7599.96
+
+
+def test_admin_quotes_return_domestic_and_cnbc_snapshots(tmp_path, monkeypatch) -> None:
+    data_root = tmp_path / "data"
+    layout = DataLakeLayout(data_root)
+    layout.ensure_base_dirs()
+    ParquetDatasetWriter().write(
+        pl.DataFrame(
+            [
+                {
+                    "snapshot_dt": date(2026, 6, 1),
+                    "ticker": "005930",
+                    "name": "Samsung Electronics",
+                    "market": "KOSPI",
+                    "close": 80000,
+                    "change_abs": 1200,
+                    "change_rate_pct": 1.52,
+                    "par_value": 100,
+                    "market_cap": 1_000_000,
+                    "listed_shares": 1_000,
+                    "foreign_ownership_pct": 50.0,
+                    "volume": 123456,
+                    "per": 10.0,
+                    "roe": 9.0,
+                }
+            ]
+        ),
+        layout.partition_path("bronze.naver_summary_raw", date(2026, 6, 1)),
+    )
+
+    def fake_fetch(symbols: list[str]) -> dict[str, dict[str, str]]:
+        assert symbols == ["AAPL"]
+        return {
+            "AAPL": {
+                "symbol": "AAPL",
+                "code": "0",
+                "last": "200.50",
+                "change": "1.25",
+                "change_pct": "0.627",
+                "volume": "123,000",
+                "name": "Apple Inc",
+                "exchange": "NASDAQ",
+                "countryCode": "US",
+                "assetType": "EQUITY",
+                "currencyCode": "USD",
+                "last_time": "2026-06-01T16:00:00.000-0400",
+            }
+        }
+
+    monkeypatch.setattr(cli_app, "_fetch_cnbc_quotes", fake_fetch)
+
+    payload = AdminState(tmp_path).quotes({"symbols": ["005930,AAPL"]})
+
+    assert payload["count"] == 2
+    assert payload["quotes"][0]["symbol"] == "005930"
+    assert payload["quotes"][0]["price"] == 80000
+    assert payload["quotes"][0]["change"] == 1200
+    assert payload["quotes"][0]["volume"] == 123456
+    assert payload["quotes"][1]["symbol"] == "AAPL"
+    assert payload["quotes"][1]["price"] == 200.50
+    assert payload["quotes"][1]["volume"] == 123000.0
+
+
+def test_admin_security_search_batches_local_and_cnbc(tmp_path, monkeypatch) -> None:
+    data_root = tmp_path / "data"
+    layout = DataLakeLayout(data_root)
+    layout.ensure_base_dirs()
+    (data_root / "gold").mkdir(parents=True, exist_ok=True)
+    pl.DataFrame(
+        [
+            {
+                "security_id": "S005930",
+                "ticker": "005930",
+                "name": "Samsung Electronics",
+                "market": "KOSPI",
+                "share_class": "common",
+                "security_type": "equity",
+            }
+        ]
+    ).write_parquet(data_root / "gold" / "security_master.parquet")
+
+    def fake_fetch(symbols: list[str]) -> dict[str, dict[str, str]]:
+        assert "AAPL" in symbols
+        return {
+            "AAPL": {
+                "symbol": "AAPL",
+                "code": "0",
+                "last": "200.50",
+                "name": "Apple Inc",
+                "exchange": "NASDAQ",
+                "countryCode": "US",
+                "assetType": "EQUITY",
+            }
+        }
+
+    monkeypatch.setattr(cli_app, "_fetch_cnbc_quotes", fake_fetch)
+
+    payload = AdminState(tmp_path).security_search({"queries": ["Samsung,AAPL"], "limit": ["5"]})
+
+    assert payload["count"] == 2
+    assert payload["results"]["Samsung"][0]["symbol"] == "005930"
+    assert payload["results"]["AAPL"][0]["symbol"] == "AAPL"
+    assert payload["results"]["AAPL"][0]["name"] == "Apple Inc"
 
 
 def test_admin_job_command_is_allowlisted(tmp_path) -> None:
