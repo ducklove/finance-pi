@@ -17,6 +17,7 @@ class DataLakeLayout:
             "bronze/kis_daily",
             "bronze/naver_daily",
             "bronze/naver_summary",
+            "bronze/nps_holdings",
             "bronze/marcap",
             "bronze/dart_filings",
             "bronze/dart_financials",
@@ -29,11 +30,13 @@ class DataLakeLayout:
             "silver/corporate_actions",
             "silver/dividends",
             "silver/share_counts",
+            "silver/nps_holdings",
             "silver/security_identity",
             "gold/daily_prices_adj",
             "gold/daily_market_caps",
             "gold/fundamentals_pit",
             "gold/universe_history",
+            "gold/nps_universe",
             "macro/cpi",
             "macro/rates",
             "macro/indices",
@@ -62,6 +65,8 @@ class DataLakeLayout:
                 return self.root / "bronze" / "kis_daily" / f"dt={dt}" / "part.parquet"
             case "bronze.naver_summary_raw":
                 return self.root / "bronze" / "naver_summary" / f"dt={dt}" / "part.parquet"
+            case "bronze.nps_holdings_raw":
+                return self.root / "bronze" / "nps_holdings" / f"dt={dt}" / "part.parquet"
             case "bronze.dart_filings_raw":
                 return self.root / "bronze" / "dart_filings" / f"dt={dt}" / "part.parquet"
             case "bronze.dart_financials_raw":
@@ -111,6 +116,8 @@ class DataLakeLayout:
                     / f"fiscal_year={dt[:4]}"
                     / "part.parquet"
                 )
+            case "silver.nps_holdings":
+                return self.root / "silver" / "nps_holdings" / f"dt={dt}" / "part.parquet"
             case "gold.daily_prices_adj":
                 return self.root / "gold" / "daily_prices_adj" / f"dt={dt}" / "part.parquet"
             case "gold.daily_market_caps":
@@ -119,6 +126,8 @@ class DataLakeLayout:
                 return self.root / "gold" / "fundamentals_pit" / f"dt={dt}" / "part.parquet"
             case "gold.universe_history":
                 return self.root / "gold" / "universe_history" / f"dt={dt}" / "part.parquet"
+            case "gold.nps_universe":
+                return self.root / "gold" / "nps_universe" / f"dt={dt}" / "part.parquet"
             case _:
                 raise ValueError(f"{dataset} is not date-partitioned")
 

@@ -169,6 +169,78 @@ def _empty_naver_summary() -> str:
     """
 
 
+def _empty_nps_holdings_raw() -> str:
+    return """
+    SELECT
+        CAST(NULL AS DATE) AS date,
+        CAST(NULL AS VARCHAR) AS stock_code,
+        CAST(NULL AS VARCHAR) AS stock_name,
+        CAST(NULL AS BIGINT) AS shares,
+        CAST(NULL AS DOUBLE) AS ownership_pct,
+        CAST(NULL AS DOUBLE) AS price,
+        CAST(NULL AS DOUBLE) AS market_value,
+        CAST(NULL AS DOUBLE) AS change_pct,
+        CAST(NULL AS BIGINT) AS rank,
+        CAST(NULL AS VARCHAR) AS source,
+        CAST(NULL AS DATE) AS source_date,
+        CAST(NULL AS DOUBLE) AS source_market_value,
+        CAST(NULL AS DOUBLE) AS source_weight_pct,
+        CAST(NULL AS VARCHAR) AS shares_source,
+        CAST(NULL AS DATE) AS price_date,
+        CAST(NULL AS BOOLEAN) AS is_exact_price,
+        CAST(NULL AS TIMESTAMP) AS _ingested_at,
+        CAST(NULL AS VARCHAR) AS _source,
+        CAST(NULL AS VARCHAR) AS _source_request_hash
+    WHERE FALSE
+    """
+
+
+def _empty_nps_holdings_silver() -> str:
+    return """
+    SELECT
+        CAST(NULL AS DATE) AS date,
+        CAST(NULL AS VARCHAR) AS security_id,
+        CAST(NULL AS VARCHAR) AS listing_id,
+        CAST(NULL AS VARCHAR) AS stock_code,
+        CAST(NULL AS VARCHAR) AS stock_name,
+        CAST(NULL AS BIGINT) AS shares,
+        CAST(NULL AS DOUBLE) AS ownership_pct,
+        CAST(NULL AS DOUBLE) AS price,
+        CAST(NULL AS DOUBLE) AS market_value,
+        CAST(NULL AS DOUBLE) AS change_pct,
+        CAST(NULL AS BIGINT) AS source_rank,
+        CAST(NULL AS VARCHAR) AS source,
+        CAST(NULL AS DATE) AS source_date,
+        CAST(NULL AS DOUBLE) AS source_market_value,
+        CAST(NULL AS DOUBLE) AS source_weight_pct,
+        CAST(NULL AS VARCHAR) AS shares_source,
+        CAST(NULL AS DATE) AS price_date,
+        CAST(NULL AS BOOLEAN) AS is_exact_price
+    WHERE FALSE
+    """
+
+
+def _empty_nps_universe() -> str:
+    return """
+    SELECT
+        CAST(NULL AS DATE) AS date,
+        CAST(NULL AS DATE) AS as_of,
+        CAST(NULL AS BIGINT) AS rank,
+        CAST(NULL AS VARCHAR) AS security_id,
+        CAST(NULL AS VARCHAR) AS listing_id,
+        CAST(NULL AS VARCHAR) AS stock_code,
+        CAST(NULL AS VARCHAR) AS stock_name,
+        CAST(NULL AS BIGINT) AS shares,
+        CAST(NULL AS DOUBLE) AS ownership_pct,
+        CAST(NULL AS DOUBLE) AS price,
+        CAST(NULL AS DOUBLE) AS market_value,
+        CAST(NULL AS DOUBLE) AS change_pct,
+        CAST(NULL AS VARCHAR) AS source,
+        CAST(NULL AS DATE) AS source_date
+    WHERE FALSE
+    """
+
+
 def _empty_marcap_raw() -> str:
     return """
     SELECT
@@ -433,6 +505,12 @@ dataset_registry: dict[str, DatasetSpec] = {
         "bronze/naver_summary/dt=*/part.parquet",
         _empty_naver_summary(),
     ),
+    "bronze.nps_holdings_raw": DatasetSpec(
+        "bronze.nps_holdings_raw",
+        "bronze",
+        "bronze/nps_holdings/dt=*/part.parquet",
+        _empty_nps_holdings_raw(),
+    ),
     "bronze.marcap_raw": DatasetSpec(
         "bronze.marcap_raw",
         "bronze",
@@ -513,6 +591,12 @@ dataset_registry: dict[str, DatasetSpec] = {
         "silver/share_counts/fiscal_year=*/part.parquet",
         _empty_share_counts(),
     ),
+    "silver.nps_holdings": DatasetSpec(
+        "silver.nps_holdings",
+        "silver",
+        "silver/nps_holdings/dt=*/part.parquet",
+        _empty_nps_holdings_silver(),
+    ),
     "silver.security_identity": DatasetSpec(
         "silver.security_identity",
         "silver",
@@ -546,6 +630,12 @@ dataset_registry: dict[str, DatasetSpec] = {
         "gold",
         "gold/universe_history/dt=*/part.parquet",
         _empty_universe_history(),
+    ),
+    "gold.nps_universe": DatasetSpec(
+        "gold.nps_universe",
+        "gold",
+        "gold/nps_universe/dt=*/part.parquet",
+        _empty_nps_universe(),
     ),
     "gold.security_master": DatasetSpec(
         "gold.security_master",

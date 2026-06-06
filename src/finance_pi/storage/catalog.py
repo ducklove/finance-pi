@@ -139,6 +139,27 @@ class CatalogBuilder:
         )
         conn.execute(
             """
+            CREATE OR REPLACE VIEW analytics.nps_universe AS
+            SELECT
+                date,
+                as_of,
+                rank,
+                security_id,
+                listing_id,
+                stock_code AS ticker,
+                stock_name AS name,
+                shares,
+                ownership_pct,
+                price,
+                market_value,
+                change_pct,
+                source,
+                source_date
+            FROM gold.nps_universe
+            """
+        )
+        conn.execute(
+            """
             CREATE OR REPLACE VIEW analytics.securities AS
             SELECT * FROM gold.security_master
             """

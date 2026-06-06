@@ -1295,6 +1295,20 @@ class AdminState:
             "results": results,
         }
 
+    def nps_universe(self, params: dict[str, list[str]]) -> dict[str, Any]:
+        requested_date = _optional_date_param(params, "date") or date.today()
+        top = _optional_int_param(params, "top") or 100
+        if top < 1 or top > 1000:
+            raise ValueError("top must be between 1 and 1000")
+        as_of, rows = self._run_nps_universe_query(requested_date, top)
+        return {
+            "date": requested_date.isoformat(),
+            "as_of": as_of.isoformat() if as_of else None,
+            "top": top,
+            "count": len(rows),
+            "universe": rows,
+        }
+
     def basic_fundamentals(self, params: dict[str, list[str]]) -> dict[str, Any]:
         tickers = _ticker_params(params)
         as_of = _optional_date_param(params, "as_of") or date.today()
@@ -1496,6 +1510,17 @@ class AdminState:
         self._acquire_data_query_slot("macro", [], since, until)
         try:
             return _query_macro_table(self.paths, table, since, until, filters)
+        finally:
+            self._price_query_slots.release()
+
+    def _run_nps_universe_query(
+        self,
+        requested_date: date,
+        top: int,
+    ) -> tuple[date | None, list[dict[str, Any]]]:
+        self._acquire_data_query_slot("nps_universe", [], requested_date, top)
+        try:
+            return _query_nps_universe(self.paths, requested_date, top)
         finally:
             self._price_query_slots.release()
 
@@ -1707,6 +1732,10 @@ def _handler_for(state: AdminState) -> type[BaseHTTPRequestHandler]:
                     if not self._authorized():
                         return
                     self._send_json(state.security_search(parse_qs(parsed.query)))
+                elif parsed.path == "/api/universe/nps":
+                    if not self._authorized():
+                        return
+                    self._send_json(state.nps_universe(parse_qs(parsed.query)))
                 elif parsed.path == "/api/fundamentals/basic":
                     if not self._authorized():
                         return
@@ -2008,6 +2037,19 @@ def _api_docs_payload(state: AdminState) -> dict[str, Any]:
                 "examples": [
                     f"{base_url}/securities/search?q=삼성전자&q=000660",
                     f"{base_url}/securities/search?queries=AAPL,MSFT,.SPX&limit=5",
+                ],
+            },
+            "nps_universe": {
+                "method": "GET",
+                "path": f"{base_url}/universe/nps",
+                "description": "Point-in-time NPS holdings universe ranked by market value.",
+                "query": {
+                    "date": "Optional requested date as YYYY-MM-DD. Uses the latest NPS snapshot on or before this date.",
+                    "top": "Optional max rows, 1..1000. Defaults to 100.",
+                },
+                "examples": [
+                    f"{base_url}/universe/nps?date=2024-12-31&top=100",
+                    f"{base_url}/universe/nps?date=2026-04-30&top=50",
                 ],
             },
             "basic_fundamentals": {
@@ -2385,6 +2427,127 @@ def _validate_price_request(tickers: list[str], since: date, until: date) -> Non
     days = (until - since).days + 1
     if days > _admin_max_price_days():
         raise ValueError(f"date range is too large; max days is {_admin_max_price_days()}")
+
+
+def _query_nps_universe(
+    paths: ProjectPaths,
+    requested_date: date,
+    top: int,
+) -> tuple[date | None, list[dict[str, Any]]]:
+    partition = _latest_nps_universe_partition(paths.data_root, requested_date)
+    if partition is not None:
+        as_of, path = partition
+        frame = (
+            pl.read_parquet(path, hive_partitioning=True)
+            .sort("rank")
+            .head(top)
+            .select(
+                "rank",
+                "stock_code",
+                "stock_name",
+                "security_id",
+                "listing_id",
+                "shares",
+                "ownership_pct",
+                "price",
+                "market_value",
+                "change_pct",
+                "source",
+                "source_date",
+            )
+        )
+        return as_of, [_nps_universe_row_dict(row) for row in frame.iter_rows(named=True)]
+
+    if not paths.catalog_path.exists():
+        return None, []
+
+    with duckdb.connect(str(paths.catalog_path), read_only=True) as conn:
+        rows = conn.execute(
+            """
+            WITH chosen AS (
+                SELECT max(date) AS as_of
+                FROM gold.nps_universe
+                WHERE date <= ?
+            )
+            SELECT rank, stock_code, stock_name, security_id, listing_id,
+                   shares, ownership_pct, price, market_value, change_pct,
+                   source, source_date, date
+            FROM gold.nps_universe
+            WHERE date = (SELECT as_of FROM chosen)
+            ORDER BY rank
+            LIMIT ?
+            """,
+            (requested_date, top),
+        ).fetchall()
+    if not rows:
+        return None, []
+    as_of = rows[0][12]
+    return _coerce_date(as_of), [
+        _nps_universe_row_dict(
+            {
+                "rank": row[0],
+                "stock_code": row[1],
+                "stock_name": row[2],
+                "security_id": row[3],
+                "listing_id": row[4],
+                "shares": row[5],
+                "ownership_pct": row[6],
+                "price": row[7],
+                "market_value": row[8],
+                "change_pct": row[9],
+                "source": row[10],
+                "source_date": row[11],
+            }
+        )
+        for row in rows
+    ]
+
+
+def _latest_nps_universe_partition(
+    data_root: Path,
+    requested_date: date,
+) -> tuple[date, Path] | None:
+    candidates: list[tuple[date, Path]] = []
+    for path in data_root.glob("gold/nps_universe/dt=*/part.parquet"):
+        partition_date = _partition_date(path, "dt")
+        if partition_date is not None and partition_date <= requested_date:
+            candidates.append((partition_date, path))
+    return max(candidates, key=lambda item: item[0]) if candidates else None
+
+
+def _nps_universe_row_dict(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "rank": row.get("rank"),
+        "stock_code": row.get("stock_code"),
+        "stock_name": row.get("stock_name"),
+        "security_id": row.get("security_id"),
+        "listing_id": row.get("listing_id"),
+        "shares": row.get("shares"),
+        "ownership_pct": row.get("ownership_pct"),
+        "price": row.get("price"),
+        "market_value": row.get("market_value"),
+        "change_pct": row.get("change_pct"),
+        "source": row.get("source"),
+        "source_date": _format_date_like(row.get("source_date")),
+    }
+
+
+def _coerce_date(value: Any) -> date | None:
+    if isinstance(value, date):
+        return value
+    if value is None:
+        return None
+    with suppress(ValueError):
+        return date.fromisoformat(str(value))
+    return None
+
+
+def _format_date_like(value: Any) -> str | None:
+    if value is None:
+        return None
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return str(value)
 
 
 def _query_daily_prices_batch(

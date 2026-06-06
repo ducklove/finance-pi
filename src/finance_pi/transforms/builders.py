@@ -31,6 +31,8 @@ def build_all_iter(data_root: Path) -> Iterable[BuildSummary]:
         build_universe_history,
         build_daily_prices_adj,
         build_daily_market_caps,
+        build_nps_holdings_silver,
+        build_nps_universe,
         build_financials_silver,
         build_fundamentals_pit,
     ]:
@@ -149,6 +151,128 @@ def build_universe_history(
         )
     )
     return _write_by_date(data_root, "gold.universe_history", universe, "date")
+
+
+def build_nps_holdings_silver(
+    data_root: Path,
+    dates: Iterable[date] | None = None,
+) -> list[BuildSummary]:
+    selected_dates = set(dates) if dates is not None else None
+    bronze = (
+        _read_partition_dates(data_root, "bronze.nps_holdings_raw", selected_dates)
+        if selected_dates is not None
+        else _read_optional(data_root / "bronze/nps_holdings/dt=*/part.parquet")
+    )
+    if bronze is None or bronze.is_empty():
+        return [BuildSummary("silver.nps_holdings", 0, 0)]
+
+    holdings = _normalize_nps_holdings(bronze)
+    if selected_dates is not None:
+        holdings = holdings.filter(pl.col("date").is_in(selected_dates))
+    if holdings.is_empty():
+        return [BuildSummary("silver.nps_holdings", 0, 0)]
+
+    master = _read_optional(data_root / "gold/security_master.parquet")
+    if master is not None and not master.is_empty():
+        identity = master.select(
+            pl.col("ticker").cast(pl.String).alias("stock_code"),
+            "security_id",
+            "listing_id",
+        ).unique(subset=["stock_code"], keep="last")
+        holdings = holdings.join(identity, on="stock_code", how="left")
+    else:
+        holdings = holdings.with_columns(
+            pl.lit(None, dtype=pl.String).alias("security_id"),
+            pl.lit(None, dtype=pl.String).alias("listing_id"),
+        )
+
+    holdings = (
+        holdings.with_columns(
+            pl.when(pl.col("security_id").is_null())
+            .then(pl.concat_str([pl.lit("S"), pl.col("stock_code")]))
+            .otherwise(pl.col("security_id"))
+            .alias("security_id"),
+            pl.when(pl.col("listing_id").is_null())
+            .then(pl.concat_str([pl.lit("L"), pl.col("stock_code")]))
+            .otherwise(pl.col("listing_id"))
+            .alias("listing_id"),
+        )
+        .select(
+            [
+                "date",
+                "security_id",
+                "listing_id",
+                "stock_code",
+                "stock_name",
+                "shares",
+                "ownership_pct",
+                "price",
+                "market_value",
+                "change_pct",
+                "source_rank",
+                "source",
+                "source_date",
+                "source_market_value",
+                "source_weight_pct",
+                "shares_source",
+                "price_date",
+                "is_exact_price",
+            ]
+        )
+        .sort(["date", "stock_code"])
+        .unique(subset=["date", "stock_code"], keep="last")
+    )
+    return _write_by_date(data_root, "silver.nps_holdings", holdings, "date")
+
+
+def build_nps_universe(
+    data_root: Path,
+    dates: Iterable[date] | None = None,
+) -> list[BuildSummary]:
+    selected_dates = set(dates) if dates is not None else None
+    holdings = (
+        _read_partition_dates(data_root, "silver.nps_holdings", selected_dates)
+        if selected_dates is not None
+        else _read_optional(data_root / "silver/nps_holdings/dt=*/part.parquet")
+    )
+    if holdings is None or holdings.is_empty():
+        return [BuildSummary("gold.nps_universe", 0, 0)]
+
+    universe = (
+        holdings.filter(pl.col("market_value").is_not_null())
+        .sort(["date", "market_value", "stock_code"], descending=[False, True, False])
+        .with_columns(
+            pl.col("market_value")
+            .rank(method="ordinal", descending=True)
+            .over("date")
+            .cast(pl.Int64)
+            .alias("rank"),
+            pl.col("date").alias("as_of"),
+        )
+        .select(
+            [
+                "date",
+                "as_of",
+                "rank",
+                "security_id",
+                "listing_id",
+                "stock_code",
+                "stock_name",
+                "shares",
+                "ownership_pct",
+                "price",
+                "market_value",
+                "change_pct",
+                "source",
+                "source_date",
+            ]
+        )
+    )
+    if selected_dates is not None:
+        universe = universe.filter(pl.col("date").is_in(selected_dates))
+    if universe.is_empty():
+        return [BuildSummary("gold.nps_universe", 0, 0)]
+    return _write_by_date(data_root, "gold.nps_universe", universe, "date")
 
 
 def build_daily_prices_adj(
@@ -360,6 +484,51 @@ def build_fundamentals_pit(data_root: Path) -> list[BuildSummary]:
         total_rows += pit.height
         total_files += 1
     return [BuildSummary("gold.fundamentals_pit", total_rows, total_files)]
+
+
+def _normalize_nps_holdings(frame: pl.DataFrame) -> pl.DataFrame:
+    columns = set(frame.columns)
+    source_name = "stock_name" if "stock_name" in columns else "name"
+    if source_name not in columns:
+        frame = frame.with_columns(pl.lit(None, dtype=pl.String).alias("stock_name"))
+        source_name = "stock_name"
+    if "rank" not in columns:
+        frame = frame.with_columns(pl.lit(None, dtype=pl.Int64).alias("rank"))
+    for column in (
+        "source",
+        "shares_source",
+        "source_date",
+        "source_market_value",
+        "source_weight_pct",
+        "price_date",
+        "is_exact_price",
+    ):
+        if column not in frame.columns:
+            frame = frame.with_columns(pl.lit(None).alias(column))
+
+    return (
+        _cast_dates(frame, ["date", "source_date", "price_date"])
+        .with_columns(
+            _nps_ticker_expr("stock_code").alias("stock_code"),
+            pl.col(source_name).cast(pl.String).str.strip_chars().alias("stock_name"),
+            pl.col("shares").cast(pl.Int64, strict=False).fill_null(0),
+            pl.col("ownership_pct").cast(pl.Float64, strict=False),
+            pl.col("price").cast(pl.Float64, strict=False),
+            pl.col("market_value").cast(pl.Float64, strict=False),
+            pl.col("change_pct").cast(pl.Float64, strict=False),
+            pl.col("rank").cast(pl.Int64, strict=False).alias("source_rank"),
+            pl.col("source").cast(pl.String),
+            pl.col("source_market_value").cast(pl.Float64, strict=False),
+            pl.col("source_weight_pct").cast(pl.Float64, strict=False),
+            pl.col("shares_source").cast(pl.String),
+            pl.col("is_exact_price").cast(pl.Boolean, strict=False).fill_null(False),
+        )
+        .filter(
+            pl.col("date").is_not_null()
+            & pl.col("stock_code").is_not_null()
+            & (pl.col("stock_code").str.len_chars() > 0)
+        )
+    )
 
 
 def _normalize_price_frame(frame: pl.DataFrame, source: str) -> pl.DataFrame:
@@ -1027,6 +1196,15 @@ def _preferred_expr() -> pl.Expr:
 
 def _ticker_expr(column: str) -> pl.Expr:
     return pl.col(column).cast(pl.String).str.strip_chars().str.to_uppercase().str.zfill(6)
+
+
+def _nps_ticker_expr(column: str) -> pl.Expr:
+    normalized = pl.col(column).cast(pl.String).str.strip_chars().str.to_uppercase()
+    return (
+        pl.when(normalized.str.contains(r"^\d+$"))
+        .then(normalized.str.zfill(6))
+        .otherwise(normalized)
+    )
 
 
 def _cast_dates(frame: pl.DataFrame, columns: list[str]) -> pl.DataFrame:

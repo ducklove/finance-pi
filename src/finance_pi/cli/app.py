@@ -8,6 +8,7 @@ import os
 import platform
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 from concurrent import futures
@@ -47,6 +48,7 @@ from finance_pi.sources.naver import (
     NaverFinanceClient,
     NaverSummaryAdapter,
 )
+from finance_pi.sources.nps import NpsHoldingsAdapter, NpsHoldingsClient
 from finance_pi.sources.opendart import (
     DartCompanyAdapter,
     DartFilingsAdapter,
@@ -65,6 +67,8 @@ from finance_pi.transforms import (
     build_daily_prices_adj,
     build_financials_silver,
     build_fundamentals_pit,
+    build_nps_holdings_silver,
+    build_nps_universe,
     build_security_master,
     build_silver_market_caps,
     build_silver_prices,
@@ -1632,6 +1636,44 @@ def ingest_naver_summary(
     _print_results(IngestOrchestrator([adapter]).run(parsed, parsed))
 
 
+@ingest_app.command("nps-holdings")
+def ingest_nps_holdings(
+    since: str | None = typer.Option(None, help="Start snapshot date as YYYY-MM-DD"),
+    until: str | None = typer.Option(None, help="End snapshot date as YYYY-MM-DD"),
+    root: Path = typer.Option(Path("."), help="Workspace root"),
+    from_sqlite: Path | None = typer.Option(
+        None,
+        help="Import legacy value-invest cache.db nps_holdings rows instead of scraping",
+    ),
+    discover_public_csv: bool = typer.Option(
+        False,
+        "--discover-public-csv/--fallback-public-csv",
+        help="Discover the current data.go.kr CSV URL from the public metadata page",
+    ),
+    force: bool = typer.Option(False, help="Overwrite existing NPS bronze partitions"),
+) -> None:
+    paths = ProjectPaths(root=root)
+    settings = RuntimeSettings.load(paths.root)
+    start = _parse_report_date(since)
+    end = _parse_report_date(until) if until else start
+    if end < start:
+        raise typer.BadParameter("until must be on or after since")
+    layout = DataLakeLayout(paths.data_root)
+    layout.ensure_base_dirs()
+    adapter = NpsHoldingsAdapter(
+        layout=layout,
+        writer=ParquetDatasetWriter(),
+        client=NpsHoldingsClient(
+            paths.data_root,
+            user_agent=settings.naver_finance_user_agent,
+            discover_public_csv=discover_public_csv,
+        ),
+        legacy_sqlite_path=from_sqlite,
+        force=force,
+    )
+    _run_and_print([adapter], start, end)
+
+
 @ingest_app.command("marcap")
 def ingest_marcap(
     start_year: int = typer.Option(1995, help="First marcap year to ingest"),
@@ -2063,6 +2105,48 @@ def build_cmd_financials(root: Path = typer.Option(Path("."), help="Workspace ro
 @build_app.command("fundamentals-pit")
 def build_cmd_fundamentals_pit(root: Path = typer.Option(Path("."), help="Workspace root")) -> None:
     _print_summaries(build_fundamentals_pit(ProjectPaths(root=root).data_root))
+
+
+@build_app.command("nps")
+def build_cmd_nps(root: Path = typer.Option(Path("."), help="Workspace root")) -> None:
+    data_root = ProjectPaths(root=root).data_root
+    _print_summaries(build_nps_holdings_silver(data_root))
+    _print_summaries(build_nps_universe(data_root))
+
+
+@app.command("nps-shadow")
+def verify_nps_shadow(
+    snapshot_date: str = typer.Option(..., "--date", help="Snapshot date as YYYY-MM-DD"),
+    root: Path = typer.Option(Path("."), help="Workspace root"),
+    sqlite_path: Path = typer.Option(
+        Path("D:/Work/value-invest/cache.db"),
+        help="value-invest cache.db path",
+    ),
+    top: int = typer.Option(100, help="Top N rows to compare"),
+    tolerance: float = typer.Option(1.0, help="Allowed absolute market_value difference"),
+) -> None:
+    target = _parse_report_date(snapshot_date)
+    paths = ProjectPaths(root=root)
+    as_of, finance_rows = _nps_universe_shadow_rows(paths.data_root, target, top)
+    legacy_rows = _legacy_nps_shadow_rows(sqlite_path, target, top)
+    result = _compare_nps_shadow(finance_rows, legacy_rows, tolerance)
+    typer.echo(
+        "NPS shadow: "
+        f"date={target.isoformat()} as_of={as_of.isoformat() if as_of else '--'} "
+        f"finance={len(finance_rows)} legacy={len(legacy_rows)} status={result['status']}"
+    )
+    if result["missing"]:
+        typer.echo(f"missing_in_finance: {', '.join(result['missing'][:20])}")
+    if result["extra"]:
+        typer.echo(f"extra_in_finance: {', '.join(result['extra'][:20])}")
+    if result["order_mismatches"]:
+        sample = ", ".join(result["order_mismatches"][:10])
+        typer.echo(f"order_mismatches: {sample}")
+    if result["value_mismatches"]:
+        sample = ", ".join(result["value_mismatches"][:10])
+        typer.echo(f"value_mismatches: {sample}")
+    if result["status"] != "pass":
+        raise typer.Exit(code=1)
 
 
 @backtest_app.command("run")
@@ -3378,6 +3462,8 @@ def _run_full_builds(data_root: Path, include_fundamentals_pit: bool) -> list:
         build_security_master,
         build_universe_history,
         build_daily_prices_adj,
+        build_nps_holdings_silver,
+        build_nps_universe,
         build_financials_silver,
     ]
     if include_fundamentals_pit:
@@ -3615,6 +3701,112 @@ def _partition_dates(files) -> tuple[date, ...]:
             with suppress(ValueError):
                 values.append(date.fromisoformat(part.removeprefix("dt=")))
     return tuple(sorted(set(values)))
+
+
+def _nps_universe_shadow_rows(
+    data_root: Path,
+    target: date,
+    top: int,
+) -> tuple[date | None, list[dict[str, object]]]:
+    candidates: list[tuple[date, Path]] = []
+    for path in data_root.glob("gold/nps_universe/dt=*/part.parquet"):
+        for part in path.parts:
+            if not part.startswith("dt="):
+                continue
+            with suppress(ValueError):
+                logical_date = date.fromisoformat(part.removeprefix("dt="))
+                if logical_date <= target:
+                    candidates.append((logical_date, path))
+            break
+    if not candidates:
+        return None, []
+    as_of, path = max(candidates, key=lambda item: item[0])
+    frame = (
+        pl.read_parquet(path, hive_partitioning=True)
+        .sort("rank")
+        .head(max(1, top))
+        .select("rank", "stock_code", "stock_name", "market_value")
+    )
+    return as_of, list(frame.iter_rows(named=True))
+
+
+def _legacy_nps_shadow_rows(
+    sqlite_path: Path,
+    target: date,
+    top: int,
+) -> list[dict[str, object]]:
+    if not sqlite_path.exists():
+        raise typer.BadParameter(f"value-invest cache.db not found: {sqlite_path}")
+    with sqlite3.connect(sqlite_path) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT stock_code, stock_name, market_value
+            FROM nps_holdings
+            WHERE date = ?
+            ORDER BY market_value DESC, stock_code
+            LIMIT ?
+            """,
+            (target.isoformat(), max(1, top)),
+        ).fetchall()
+    return [
+        {
+            "rank": index,
+            "stock_code": str(row["stock_code"]),
+            "stock_name": row["stock_name"],
+            "market_value": row["market_value"],
+        }
+        for index, row in enumerate(rows, start=1)
+    ]
+
+
+def _compare_nps_shadow(
+    finance_rows: list[dict[str, object]],
+    legacy_rows: list[dict[str, object]],
+    tolerance: float,
+) -> dict[str, object]:
+    finance_by_code = {str(row["stock_code"]): row for row in finance_rows}
+    legacy_by_code = {str(row["stock_code"]): row for row in legacy_rows}
+    finance_codes = list(finance_by_code)
+    legacy_codes = list(legacy_by_code)
+    missing = [code for code in legacy_codes if code not in finance_by_code]
+    extra = [code for code in finance_codes if code not in legacy_by_code]
+    order_mismatches = [
+        f"{left}!={right}"
+        for left, right in zip(finance_codes, legacy_codes, strict=False)
+        if left != right
+    ]
+    value_mismatches: list[str] = []
+    for code in sorted(set(finance_by_code) & set(legacy_by_code)):
+        finance_value = _float_or_none(finance_by_code[code].get("market_value"))
+        legacy_value = _float_or_none(legacy_by_code[code].get("market_value"))
+        if finance_value is None or legacy_value is None:
+            if finance_value != legacy_value:
+                value_mismatches.append(f"{code}: {finance_value}!={legacy_value}")
+            continue
+        if abs(finance_value - legacy_value) > tolerance:
+            value_mismatches.append(f"{code}: {finance_value:.0f}!={legacy_value:.0f}")
+    status = (
+        "pass"
+        if not missing and not extra and not order_mismatches and not value_mismatches
+        else "fail"
+    )
+    return {
+        "status": status,
+        "missing": missing,
+        "extra": extra,
+        "order_mismatches": order_mismatches,
+        "value_mismatches": value_mismatches,
+    }
+
+
+def _float_or_none(value: object) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _count_parquet_rows(files: list[Path]) -> int:
