@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime
 
 import polars as pl
 
@@ -1362,6 +1362,7 @@ def test_admin_realtime_indicators_fetches_cnbc_snapshot(tmp_path, monkeypatch) 
     calls = []
 
     def fake_fetch(symbols: list[str]) -> dict[str, dict[str, str]]:
+        now_text = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.000%z")
         calls.append(tuple(symbols))
         return {
             ".SPX": {
@@ -1370,7 +1371,7 @@ def test_admin_realtime_indicators_fetches_cnbc_snapshot(tmp_path, monkeypatch) 
                 "last": "7,599.96",
                 "previous_day_closing": "7,580.06",
                 "name": "S&P 500 Index",
-                "last_time": "2026-06-01T16:58:18.000-0400",
+                "last_time": now_text,
             }
         }
 
