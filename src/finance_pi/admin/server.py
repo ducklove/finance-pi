@@ -4010,8 +4010,8 @@ def _dividend_row_dict(row: tuple[Any, ...]) -> dict[str, Any]:
 # value-invest 허브가 라이브로 호출하며, finance-pi 자체에는 결과를 저장하지 않는다.
 
 # 스크리너에서 pivot 할 재무 계정. BASIC_FUNDAMENTAL_METRICS 의 부분집합 —
-# ROE/영업이익률/부채비율/PBR 계산에 필요한 네 가지.
-_SCREENER_FUNDAMENTAL_METRICS = ("revenue", "operating_profit", "net_income", "equity")
+# ROE/영업이익률/부채비율/PBR 계산에 필요한 다섯 가지(liabilities 가 부채비율용).
+_SCREENER_FUNDAMENTAL_METRICS = ("revenue", "operating_profit", "net_income", "equity", "liabilities")
 
 
 def _screener_account_ids() -> list[str]:
