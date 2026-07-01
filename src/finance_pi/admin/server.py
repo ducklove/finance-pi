@@ -1366,6 +1366,12 @@ class AdminState:
             "dividends": dividends,
         }
 
+    def screener(self, params: dict[str, list[str]]) -> dict[str, Any]:
+        # 전 유니버스 스냅샷 — ticker 파라미터가 필요 없다(다른 endpoints 와 다름).
+        # 최신 거래일 기준 KOSPI/KOSDAQ 전 종목에서 가치 지표를 계산한다.
+        as_of = _optional_date_param(params, "as_of") or date.today()
+        return self._run_screener_query(as_of)
+
     def cpi(self, params: dict[str, list[str]]) -> dict[str, Any]:
         return self._macro_payload("cpi", params)
 
@@ -1497,6 +1503,13 @@ class AdminState:
         self._acquire_data_query_slot("dividends", tickers, start_year, end_year)
         try:
             return _query_dividends_batch(self.paths, tickers, as_of, start_year, end_year)
+        finally:
+            self._price_query_slots.release()
+
+    def _run_screener_query(self, as_of: date) -> dict[str, Any]:
+        self._acquire_data_query_slot("screener", [], as_of, None)
+        try:
+            return _query_screener_batch(self.paths, as_of)
         finally:
             self._price_query_slots.release()
 
@@ -1748,6 +1761,10 @@ def _handler_for(state: AdminState) -> type[BaseHTTPRequestHandler]:
                     if not self._authorized():
                         return
                     self._send_json(state.dividends(parse_qs(parsed.query)))
+                elif parsed.path == "/api/fundamentals/screener":
+                    if not self._authorized():
+                        return
+                    self._send_json(state.screener(parse_qs(parsed.query)))
                 elif parsed.path == "/api/macro/cpi":
                     if not self._authorized():
                         return
@@ -3985,6 +4002,403 @@ def _dividend_row_dict(row: tuple[Any, ...]) -> dict[str, Any]:
         "source": row[16],
         "is_estimated": row[17],
     }
+
+
+# --- Screener endpoint -----------------------------------------------------
+# 가치 스크리너용 전 유니버스 스냅샷. 최신 거래일의 KOSPI/KOSDAQ 전 종목에서
+# PER/PBR/ROE/배당수익률/영업이익률/부채비율/시가총액을 한 번에 계산해 반환한다.
+# value-invest 허브가 라이브로 호출하며, finance-pi 자체에는 결과를 저장하지 않는다.
+
+# 스크리너에서 pivot 할 재무 계정. BASIC_FUNDAMENTAL_METRICS 의 부분집합 —
+# ROE/영업이익률/부채비율/PBR 계산에 필요한 네 가지.
+_SCREENER_FUNDAMENTAL_METRICS = ("revenue", "operating_profit", "net_income", "equity")
+
+
+def _screener_account_ids() -> list[str]:
+    return _basic_fundamental_account_ids(
+        {m: BASIC_FUNDAMENTAL_METRICS[m] for m in _SCREENER_FUNDAMENTAL_METRICS}
+    )
+
+
+def _screener_metric_for_account(account_id: str) -> str | None:
+    for metric in _SCREENER_FUNDAMENTAL_METRICS:
+        if account_id in BASIC_FUNDAMENTAL_METRICS[metric]:
+            return metric
+    return None
+
+
+def _query_screener_batch(
+    paths: ProjectPaths,
+    as_of: date,
+) -> dict[str, Any]:
+    """전 KOSPI/KOSDAQ 유니버스의 가치 지표 스냅샷.
+
+    catalog 가 있으면 DuckDB 뷰(analytics.daily_prices + silver.*)로 한 번에
+    조인하고, 없으면 parquet 직접 scan 으로 폴백한다. 유니버스는 최신 거래일의
+    analytics.daily_prices 에서 market IN (KOSPI, KOSDAQ) 이고 SPAC/리츠가 아닌
+    종목으로 정한다.
+    """
+    account_ids = _screener_account_ids()
+    if paths.catalog_path.exists():
+        rows = _query_screener_rows_catalog(paths, account_ids, as_of)
+    else:
+        rows = _query_screener_rows_parquet(paths, account_ids, as_of)
+    snapshot_date = as_of.isoformat()
+    results: list[dict[str, Any]] = []
+    for row in rows:
+        results.append(_build_screener_row(row, snapshot_date))
+    return {
+        "as_of": snapshot_date,
+        "count": len(results),
+        "rows": results,
+    }
+
+
+def _build_screener_row(row: dict[str, Any], as_of_text: str) -> dict[str, Any]:
+    """쿼리 결과 한 행(이미 pivot 된 정규화 필드)을 스크리너 응답으로 다듬는다.
+
+    파생 지표를 우선순위와 함께 계산한다:
+      - per: naver 원본값 우선, 없으면 market_cap / net_income
+      - roe: naver 원본값 우선, 없으면 net_income / equity * 100
+      - pbr: market_cap / equity (equity 없으면 null)
+      - operating_margin: operating_profit / revenue * 100
+      - debt_ratio: liabilities / equity * 100 (liability 는 별도 조인 없이
+        equity 와 함께 fundamentals_pit 에서 가져올 수도 있지만, 스크리너의
+        주 관심사는 아니므로 row 에 있을 때만 채운다)
+    """
+    close = row.get("close")
+    market_cap = row.get("market_cap")
+    equity = row.get("equity")
+    net_income = row.get("net_income")
+    operating_profit = row.get("operating_profit")
+    revenue = row.get("revenue")
+
+    per_naver = row.get("per_naver")
+    roe_naver = row.get("roe_naver")
+
+    per = per_naver
+    if per is None and market_cap and net_income and net_income != 0:
+        per = market_cap / net_income
+
+    roe = roe_naver
+    if roe is None and net_income is not None and equity and equity != 0:
+        roe = net_income / equity * 100
+
+    pbr = None
+    if market_cap and equity and equity != 0:
+        pbr = market_cap / equity
+
+    operating_margin = None
+    if operating_profit is not None and revenue and revenue != 0:
+        operating_margin = operating_profit / revenue * 100
+
+    liabilities = row.get("liabilities")
+    debt_ratio = None
+    if liabilities is not None and equity and equity != 0:
+        debt_ratio = liabilities / equity * 100
+
+    return {
+        "ticker": row["ticker"],
+        "name": row.get("name"),
+        "market": row.get("market"),
+        "close": close,
+        "per": _round_or_none(per),
+        "pbr": _round_or_none(pbr),
+        "roe": _round_or_none(roe),
+        "market_cap": market_cap,
+        "dividend_yield": row.get("dividend_yield"),
+        "operating_margin": _round_or_none(operating_margin),
+        "debt_ratio": _round_or_none(debt_ratio),
+        "revenue": revenue,
+        "operating_profit": operating_profit,
+        "net_income": net_income,
+        "equity": equity,
+        "as_of": as_of_text,
+    }
+
+
+def _round_or_none(value: Any, ndigits: int = 4) -> float | None:
+    if value is None:
+        return None
+    try:
+        return round(float(value), ndigits)
+    except (TypeError, ValueError):
+        return None
+
+
+def _query_screener_rows_catalog(
+    paths: ProjectPaths,
+    account_ids: list[str],
+    as_of: date,
+) -> list[dict[str, Any]]:
+    """catalog 경로: analytics.daily_prices + silver.financials/dividends + naver.
+
+    전체를 하나의 DuckDB 쿼리로 조인한다. 유니버스(최신 거래일 daily_prices)를
+    베이스로 LEFT JOIN 하므로, 재무/배당 데이터가 없는 종목도 시세·PER(naver)
+    는 노출된다.
+    """
+    params: list[Any] = [as_of, *account_ids, as_of, as_of]
+    with duckdb.connect(str(paths.catalog_path), read_only=True) as conn:
+        rows = conn.execute(
+            f"""
+            WITH latest_day AS (
+                SELECT MAX(date) AS d FROM analytics.daily_prices
+                WHERE date <= ?
+            ),
+            prices AS (
+                SELECT
+                    dp.ticker,
+                    dp.name,
+                    dp.market,
+                    dp.security_type,
+                    dp.close_adj AS close,
+                    dp.market_cap
+                FROM analytics.daily_prices AS dp, latest_day
+                WHERE dp.date = latest_day.d
+                  AND dp.market IN ('KOSPI', 'KOSDAQ')
+                  AND dp.security_type IS DISTINCT FROM 'spac_pre'
+                  AND dp.ticker IS NOT NULL
+                  AND dp.name NOT LIKE '%리츠%'
+                  AND dp.name NOT ILIKE '%reit%'
+            ),
+            fin AS (
+                SELECT
+                    sm.ticker,
+                    f.account_id,
+                    f.amount
+                FROM silver.financials AS f
+                JOIN analytics.securities AS sm
+                    ON f.security_id = sm.security_id
+                WHERE f.account_id IN ({_sql_placeholders(account_ids)})
+                  AND f.available_date <= ?
+                QUALIFY ROW_NUMBER() OVER (
+                    PARTITION BY sm.ticker, f.account_id
+                    ORDER BY f.available_date DESC, f.fiscal_period_end DESC
+                ) = 1
+            ),
+            fin_pivot AS (
+                SELECT ticker,
+                       MAX(CASE WHEN account_id LIKE '%Revenue%' THEN amount END) AS revenue,
+                       MAX(CASE WHEN account_id = 'dart_OperatingIncomeLoss' THEN amount END) AS operating_profit,
+                       MAX(CASE WHEN account_id LIKE '%ProfitLoss%' THEN amount END) AS net_income,
+                       MAX(CASE WHEN account_id LIKE '%Equity%' THEN amount END) AS equity,
+                       MAX(CASE WHEN account_id LIKE '%Liabilities%' THEN amount END) AS liabilities
+                FROM fin
+                GROUP BY ticker
+            ),
+            div AS (
+                SELECT ticker, MAX(cash_dividend_yield_pct) AS dividend_yield
+                FROM silver.dividends
+                WHERE available_date <= ?
+                GROUP BY ticker
+            ),
+            naver AS (
+                SELECT ticker, per, roe
+                FROM (
+                    SELECT ticker, per, roe,
+                           ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY snapshot_dt DESC) AS rn
+                    FROM bronze.naver_summary
+                ) WHERE rn = 1
+            )
+            SELECT
+                p.ticker,
+                p.name,
+                p.market,
+                p.close,
+                p.market_cap,
+                fp.revenue,
+                fp.operating_profit,
+                fp.net_income,
+                fp.equity,
+                fp.liabilities,
+                div.dividend_yield,
+                nv.per AS per_naver,
+                nv.roe AS roe_naver
+            FROM prices AS p
+            LEFT JOIN fin_pivot AS fp ON p.ticker = fp.ticker
+            LEFT JOIN div ON p.ticker = div.ticker
+            LEFT JOIN naver AS nv ON p.ticker = nv.ticker
+            ORDER BY p.ticker
+            """,
+            params,
+        ).fetchall()
+        columns = [d[0] for d in conn.description] if conn.description else []
+    return [dict(zip(columns, r, strict=False)) for r in rows]
+
+
+def _query_screener_rows_parquet(
+    paths: ProjectPaths,
+    account_ids: list[str],
+    as_of: date,
+) -> list[dict[str, Any]]:
+    """catalog 미구축 시 parquet 직접 scan 폴백.
+
+    daily_prices_adj + security_master + silver/financials + silver/dividends +
+    bronze/naver_summary(최신 파티션) 를 메모리 DuckDB 에서 조인한다.
+    데이터가 전혀 없으면 빈 리스트.
+    """
+    price_glob = paths.data_root / "gold/daily_prices_adj/dt=*/part.parquet"
+    master_path = paths.data_root / "gold/security_master.parquet"
+    fin_glob = paths.data_root / "silver/financials/fiscal_year=*/part.parquet"
+    div_glob = paths.data_root / "silver/dividends/fiscal_year=*/part.parquet"
+    if not glob(price_glob.as_posix()) or not master_path.exists():
+        return []
+
+    sql_price = _duckdb_path(price_glob)
+    sql_master = _duckdb_path(master_path)
+
+    has_fin = glob(fin_glob.as_posix())
+    has_div = glob(div_glob.as_posix())
+    sql_fin = _duckdb_path(fin_glob)
+    sql_div = _duckdb_path(div_glob)
+
+    # naver_summary 최신 파티션.
+    naver_files = sorted(paths.data_root.glob("bronze/naver_summary/dt=*/part.parquet"))
+    sql_naver = _duckdb_path(naver_files[-1]) if naver_files else None
+    naver_cte = ""
+    naver_join = ""
+    naver_cols = "NULL AS per_naver, NULL AS roe_naver"
+    if sql_naver:
+        naver_cte = f"""
+            , naver AS (
+                SELECT ticker, per, roe
+                FROM (
+                    SELECT ticker, per, roe,
+                           ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY snapshot_dt DESC) AS rn
+                    FROM read_parquet('{sql_naver}', union_by_name = true)
+                ) WHERE rn = 1
+            )
+        """
+        naver_join = "LEFT JOIN naver AS nv ON p.ticker = nv.ticker"
+        naver_cols = "nv.per AS per_naver, nv.roe AS roe_naver"
+
+    # financials / dividends 가 없으면 빈 CTE 로 대체 — read_parquet(glob) 가
+    # 매칭 파일이 없을 때 IO 에러를 뱉기 때문에 미리 체크한다.
+    if has_fin:
+        fin_cte = f"""
+            , fin AS (
+                SELECT
+                    sm.ticker,
+                    f.account_id,
+                    f.amount
+                FROM read_parquet('{sql_fin}', hive_partitioning = true, union_by_name = true) AS f
+                LEFT JOIN read_parquet('{sql_master}', union_by_name = true) AS sm
+                    ON f.security_id = sm.security_id
+                WHERE f.account_id IN ({_sql_placeholders(account_ids)})
+                  AND f.available_date <= ?
+                QUALIFY ROW_NUMBER() OVER (
+                    PARTITION BY sm.ticker, f.account_id
+                    ORDER BY f.available_date DESC, f.fiscal_period_end DESC
+                ) = 1
+            )
+            , fin_pivot AS (
+                SELECT ticker,
+                       MAX(CASE WHEN account_id LIKE '%Revenue%' THEN amount END) AS revenue,
+                       MAX(CASE WHEN account_id = 'dart_OperatingIncomeLoss' THEN amount END) AS operating_profit,
+                       MAX(CASE WHEN account_id LIKE '%ProfitLoss%' THEN amount END) AS net_income,
+                       MAX(CASE WHEN account_id LIKE '%Equity%' THEN amount END) AS equity,
+                       MAX(CASE WHEN account_id LIKE '%Liabilities%' THEN amount END) AS liabilities
+                FROM fin
+                GROUP BY ticker
+            )
+        """
+        fin_params: list[Any] = [*account_ids, as_of]
+    else:
+        fin_cte = """
+            , fin_pivot AS (
+                SELECT CAST(NULL AS VARCHAR) AS ticker,
+                       CAST(NULL AS DOUBLE) AS revenue,
+                       CAST(NULL AS DOUBLE) AS operating_profit,
+                       CAST(NULL AS DOUBLE) AS net_income,
+                       CAST(NULL AS DOUBLE) AS equity,
+                       CAST(NULL AS DOUBLE) AS liabilities
+                WHERE FALSE
+            )
+        """
+        fin_params = []
+
+    if has_div:
+        div_cte = f"""
+            , div AS (
+                SELECT ticker, MAX(cash_dividend_yield_pct) AS dividend_yield
+                FROM read_parquet('{sql_div}', hive_partitioning = true, union_by_name = true)
+                WHERE available_date <= ?
+                GROUP BY ticker
+            )
+        """
+        div_params: list[Any] = [as_of]
+    else:
+        div_cte = """
+            , div AS (
+                SELECT CAST(NULL AS VARCHAR) AS ticker,
+                       CAST(NULL AS DOUBLE) AS dividend_yield
+                WHERE FALSE
+            )
+        """
+        div_params = []
+
+    params: list[Any] = [as_of, *fin_params, *div_params]
+    with duckdb.connect(":memory:") as conn:
+        rows = conn.execute(
+            f"""
+            WITH prices_raw AS (
+                SELECT
+                    p.security_id,
+                    sm.ticker,
+                    sm.name,
+                    sm.market,
+                    sm.security_type,
+                    p.close_adj AS close,
+                    p.market_cap,
+                    p.date
+                FROM read_parquet('{sql_price}', hive_partitioning = true, union_by_name = true) AS p
+                LEFT JOIN read_parquet('{sql_master}', union_by_name = true) AS sm
+                    ON p.security_id = sm.security_id
+                WHERE p.date <= ?
+                  AND sm.market IN ('KOSPI', 'KOSDAQ')
+                  AND sm.security_type IS DISTINCT FROM 'spac_pre'
+                  AND sm.ticker IS NOT NULL
+                  AND sm.name NOT LIKE '%리츠%'
+                  AND sm.name NOT ILIKE '%reit%'
+            ),
+            latest_per_ticker AS (
+                SELECT security_id, ticker, name, market, security_type, close, market_cap
+                FROM (
+                    SELECT *,
+                           ROW_NUMBER() OVER (PARTITION BY security_id ORDER BY date DESC) AS rn
+                    FROM prices_raw
+                ) WHERE rn = 1
+            ),
+            prices AS (
+                SELECT ticker, name, market, security_type, close, market_cap
+                FROM latest_per_ticker
+            )
+            {fin_cte}
+            {div_cte}
+            {naver_cte}
+            SELECT
+                p.ticker,
+                p.name,
+                p.market,
+                p.close,
+                p.market_cap,
+                fp.revenue,
+                fp.operating_profit,
+                fp.net_income,
+                fp.equity,
+                fp.liabilities,
+                div.dividend_yield,
+                {naver_cols}
+            FROM prices AS p
+            LEFT JOIN fin_pivot AS fp ON p.ticker = fp.ticker
+            LEFT JOIN div ON p.ticker = div.ticker
+            {naver_join}
+            ORDER BY p.ticker
+            """,
+            params,
+        ).fetchall()
+        columns = [d[0] for d in conn.description] if conn.description else []
+    return [dict(zip(columns, r, strict=False)) for r in rows]
 
 
 def _query_fundamental_rows(
