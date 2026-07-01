@@ -4197,7 +4197,7 @@ def _query_screener_rows_catalog(
                 FROM (
                     SELECT ticker, per, roe,
                            ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY snapshot_dt DESC) AS rn
-                    FROM bronze.naver_summary
+                    FROM bronze.naver_summary_raw
                 ) WHERE rn = 1
             )
             SELECT
