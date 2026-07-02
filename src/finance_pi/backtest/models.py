@@ -20,6 +20,7 @@ class BacktestConfig(BaseModel):
     drop_after_missing: bool = True
     exclude_flagged: bool = True
     charge_final_liquidation: bool = False
+    share_classes: tuple[str, ...] = ("common",)
 
     @model_validator(mode="after")
     def ordered_dates(self) -> BacktestConfig:

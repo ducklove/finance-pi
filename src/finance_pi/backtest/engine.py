@@ -32,6 +32,7 @@ class BacktestEngine:
 
     def run(self, factor: Factor, ctx: FactorContext, config: BacktestConfig) -> BacktestResult:
         scores = factor.compute(ctx).collect()
+        direction = getattr(factor, "direction", 1)
         universe = ctx.scan("gold.universe_history").collect()
         prices = ctx.scan("gold.daily_prices_adj").collect()
 
@@ -50,10 +51,13 @@ class BacktestEngine:
             else:
                 exit_date = config.end
             active = _active_universe(universe, signal_date, config)
+            # Rank by score * direction so direction=-1 factors select the lowest raw scores.
             candidates = (
                 scores.filter((pl.col("date") == signal_date) & pl.col("score").is_finite())
                 .join(active, on="security_id", how="inner")
-                .sort("score", descending=True)
+                .with_columns((pl.col("score") * direction).alias("_ranking_score"))
+                .sort("_ranking_score", descending=True)
+                .drop("_ranking_score")
             )
             count = candidates.height
             selected_count = min(count, max(1, ceil(count * config.top_fraction))) if count else 0
@@ -176,7 +180,7 @@ def _active_universe(
     predicate = (
         (pl.col("date") == signal_date)
         & pl.col("is_active")
-        & (pl.col("share_class") == "common")
+        & pl.col("share_class").is_in(list(config.share_classes))
         & (pl.col("is_spac_pre").fill_null(False).not_())
     )
     if config.exclude_flagged:

@@ -22,6 +22,10 @@ class StaticScoreFactor(Factor):
         return ctx.scan("scores")
 
 
+class InverseScoreFactor(StaticScoreFactor):
+    direction = -1
+
+
 # Sparse calendar spanning three month-ends: rebalances land on Jan 31,
 # Feb 29 and Mar 5 (last date), with default lags entry_date == rebalance.
 SPARSE_DATES = (
@@ -224,6 +228,30 @@ def test_missing_price_applies_missing_return_then_drops() -> None:
     assert abs(kept_by_date[date(2024, 2, 29)]["gross_return"] - 0.5 * -0.3) < 1e-15
 
 
+def test_direction_negative_selects_lowest_scores() -> None:
+    dates = SPARSE_DATES[:6]
+    calendar = TradingCalendar.from_dates(dates)
+    sids = ["S001", "S002", "S003", "S004"]
+    scores = _scores_frame(
+        {
+            **{(d, "S001"): 1.0 for d in SIGNAL_DATES[:2]},
+            **{(d, "S002"): 2.0 for d in SIGNAL_DATES[:2]},
+            **{(d, "S003"): 3.0 for d in SIGNAL_DATES[:2]},
+            # NaN must stay excluded even though NaN * -1 could sort anywhere.
+            **{(d, "S004"): float("nan") for d in SIGNAL_DATES[:2]},
+        }
+    )
+    returns = {(d, sid): 0.0 for d in dates for sid in sids}
+    ctx = _ctx(scores, _universe_frame(dates, sids), _prices_frame(returns))
+    config = BacktestConfig(start=date(2024, 1, 30), end=date(2024, 2, 29), top_fraction=0.25)
+
+    inverse = BacktestEngine(calendar).run(InverseScoreFactor(), ctx, config)
+    assert set(inverse.positions.get_column("security_id").to_list()) == {"S001"}
+
+    baseline = BacktestEngine(calendar).run(StaticScoreFactor(), ctx, config)
+    assert set(baseline.positions.get_column("security_id").to_list()) == {"S003"}
+
+
 def test_non_finite_scores_are_never_selected() -> None:
     dates = SPARSE_DATES[:6]
     calendar = TradingCalendar.from_dates(dates)
@@ -398,3 +426,40 @@ def test_engine_arithmetic_matches_hand_computed_nav() -> None:
         assert abs(row["cost"] - cost) < 1e-15
     assert result.ledger.get_column("turnover").to_list() == [1.0, 1.0, 0.0]
     assert abs(nav.get_column("nav").to_list()[-1] - expected_nav) < 1e-12
+
+
+def test_share_classes_config_admits_preferred_universe() -> None:
+    calendar = TradingCalendar.weekdays(date(2024, 1, 1), date(2024, 2, 29))
+    dates = list(calendar.dates)
+    scores = pl.DataFrame(
+        [{"date": d, "security_id": "S001", "score": 1.0} for d in dates]
+        + [{"date": d, "security_id": "S002", "score": 2.0} for d in dates]
+    )
+    universe = _universe_frame(dates, ["S001", "S002"]).with_columns(
+        pl.when(pl.col("security_id") == "S002")
+        .then(pl.lit("preferred"))
+        .otherwise(pl.lit("common"))
+        .alias("share_class")
+    )
+    prices = _prices_frame({(d, sid): 0.001 for d in dates for sid in ["S001", "S002"]})
+    ctx = _ctx(scores, universe, prices)
+    engine = BacktestEngine(calendar)
+
+    common_only = engine.run(
+        StaticScoreFactor(),
+        ctx,
+        BacktestConfig(start=date(2024, 1, 1), end=date(2024, 2, 29), top_fraction=1.0),
+    )
+    assert set(common_only.positions["security_id"].unique()) == {"S001"}
+
+    preferred_only = engine.run(
+        StaticScoreFactor(),
+        ctx,
+        BacktestConfig(
+            start=date(2024, 1, 1),
+            end=date(2024, 2, 29),
+            top_fraction=1.0,
+            share_classes=("preferred",),
+        ),
+    )
+    assert set(preferred_only.positions["security_id"].unique()) == {"S002"}

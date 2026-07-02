@@ -14,6 +14,8 @@ class FactorContext(Protocol):
 class Factor(ABC):
     requires: ClassVar[list[str]] = []
     rebalance: ClassVar[str] = "monthly"
+    # 1 = higher score is better, -1 = lower is better (selection ranks score * direction).
+    direction: ClassVar[int] = 1
 
     @abstractmethod
     def compute(self, ctx: FactorContext) -> pl.LazyFrame:
@@ -42,6 +44,18 @@ class FactorRegistry:
 
     def names(self) -> tuple[str, ...]:
         return tuple(sorted(self._registry))
+
+    def describe(self) -> list[dict[str, object]]:
+        """Metadata rows for listing surfaces: name, rebalance, direction, requires."""
+        return [
+            {
+                "name": name,
+                "rebalance": cls.rebalance,
+                "direction": cls.direction,
+                "requires": list(cls.requires),
+            }
+            for name, cls in sorted(self._registry.items())
+        ]
 
 
 factor_registry = FactorRegistry()
