@@ -167,12 +167,21 @@ def _write_price_rows_by_date(
         if path.exists():
             existing = _align_price_frame(pl.read_parquet(path))
             output = (
-                pl.concat([existing, new_frame], how="diagonal_relaxed")
-                .sort(["date", "ticker"])
+                pl.concat(
+                    [
+                        existing.with_columns(pl.lit(0).alias("_recency")),
+                        new_frame.with_columns(pl.lit(1).alias("_recency")),
+                    ],
+                    how="diagonal_relaxed",
+                )
+                .sort(["date", "ticker", "_recency"])
                 .unique(subset=["date", "ticker"], keep="last")
+                .drop("_recency")
+                .sort(["date", "ticker"])
             )
             new_rows = max(output.height - existing.height, 0)
-            if new_rows == 0:
+            unchanged = output.equals(existing.sort(["date", "ticker"]))
+            if unchanged:
                 skipped_dates += 1
                 continue
             mode = "overwrite"
@@ -190,16 +199,16 @@ def _write_price_rows_by_date(
         total_new_rows += new_rows
 
     reason = None
-    if total_new_rows == 0:
-        reason = "bronze partitions already contain requested KIS rows"
-    elif merged_dates:
+    if merged_dates:
         reason = f"merged existing KIS partitions: {merged_dates}"
+    elif total_new_rows == 0:
+        reason = "bronze partitions already contain requested KIS rows"
     elif skipped_dates:
         reason = f"skipped existing KIS partitions: {skipped_dates}"
     return WriteResult(
         path=last_path,
         rows=total_new_rows,
-        skipped=total_new_rows == 0,
+        skipped=merged_dates == 0 and total_new_rows == 0,
         reason=reason,
     )
 

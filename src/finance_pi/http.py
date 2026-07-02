@@ -15,6 +15,10 @@ class SourceApiError(RuntimeError):
         self.payload = payload
 
 
+class RetryableApiError(SourceApiError):
+    """HTTP 429/5xx: transient, safe to retry with backoff."""
+
+
 @dataclass(frozen=True)
 class HttpJsonClient:
     source: str
@@ -33,7 +37,9 @@ class HttpJsonClient:
         reraise=True,
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=0.5, min=0.5, max=5),
-        retry=retry_if_exception_type((httpx.TimeoutException, httpx.TransportError)),
+        retry=retry_if_exception_type(
+            (httpx.TimeoutException, httpx.TransportError, RetryableApiError)
+        ),
     )
     def get_json(
         self,
@@ -52,7 +58,9 @@ class HttpJsonClient:
         reraise=True,
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=0.5, min=0.5, max=5),
-        retry=retry_if_exception_type((httpx.TimeoutException, httpx.TransportError)),
+        retry=retry_if_exception_type(
+            (httpx.TimeoutException, httpx.TransportError, RetryableApiError)
+        ),
     )
     def get_bytes(
         self,
@@ -67,7 +75,9 @@ class HttpJsonClient:
         reraise=True,
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=0.5, min=0.5, max=5),
-        retry=retry_if_exception_type((httpx.TimeoutException, httpx.TransportError)),
+        retry=retry_if_exception_type(
+            (httpx.TimeoutException, httpx.TransportError, RetryableApiError)
+        ),
     )
     def get_text(
         self,
@@ -82,7 +92,9 @@ class HttpJsonClient:
         reraise=True,
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=0.5, min=0.5, max=5),
-        retry=retry_if_exception_type((httpx.TimeoutException, httpx.TransportError)),
+        retry=retry_if_exception_type(
+            (httpx.TimeoutException, httpx.TransportError, RetryableApiError)
+        ),
     )
     def post_json(
         self,
@@ -91,6 +103,21 @@ class HttpJsonClient:
         json: dict[str, Any],
         headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
+        response = self._request("POST", path, json=json, headers=headers)
+        data = response.json()
+        if not isinstance(data, dict):
+            raise SourceApiError(self.source, "expected JSON object", payload=data)
+        return data
+
+    def post_json_no_retry(
+        self,
+        path: str,
+        *,
+        json: dict[str, Any],
+        headers: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """Like post_json but never retries. Use for endpoints where retrying on
+        429/5xx is unsafe (e.g. KIS token issuance, which allows one call/minute)."""
         response = self._request("POST", path, json=json, headers=headers)
         data = response.json()
         if not isinstance(data, dict):
@@ -152,7 +179,10 @@ def _raise_for_status(source: str, response: httpx.Response) -> None:
         response.raise_for_status()
     except httpx.HTTPStatusError as exc:
         body = response.text[:500]
-        raise SourceApiError(
-            source,
-            f"HTTP {response.status_code} {response.reason_phrase} for {response.url}; body={body}",
-        ) from exc
+        message = (
+            f"HTTP {response.status_code} {response.reason_phrase} "
+            f"for {response.url}; body={body}"
+        )
+        if response.status_code == 429 or response.status_code >= 500:
+            raise RetryableApiError(source, message) from exc
+        raise SourceApiError(source, message) from exc

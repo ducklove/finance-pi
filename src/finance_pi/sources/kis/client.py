@@ -2,11 +2,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date
+from time import sleep
 from typing import Any
 
 from finance_pi.config import format_yyyymmdd
 from finance_pi.http import HttpJsonClient, SourceApiError
 from finance_pi.sources.parsing import parse_date, parse_float, parse_int, value_for
+
+_RATE_LIMIT_MSG_CD = "EGW00201"
+_RATE_LIMIT_BACKOFF_SECONDS = (1, 2)
 
 
 @dataclass(frozen=True)
@@ -17,26 +21,7 @@ class KisDailyPriceClient:
     access_token: str
 
     def fetch_daily_prices(self, ticker: str, since: date, until: date) -> list[dict[str, Any]]:
-        payload = self.http.get_json(
-            "/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice",
-            headers={
-                "authorization": f"Bearer {self.access_token}",
-                "appkey": self.app_key,
-                "appsecret": self.app_secret,
-                "tr_id": "FHKST03010100",
-                "custtype": "P",
-            },
-            params={
-                "FID_COND_MRKT_DIV_CODE": "J",
-                "FID_INPUT_ISCD": ticker,
-                "FID_INPUT_DATE_1": format_yyyymmdd(since),
-                "FID_INPUT_DATE_2": format_yyyymmdd(until),
-                "FID_PERIOD_DIV_CODE": "D",
-                "FID_ORG_ADJ_PRC": "1",
-            },
-        )
-        if str(payload.get("rt_cd", "0")) != "0":
-            raise SourceApiError("kis", str(payload.get("msg1", "request failed")), payload=payload)
+        payload = self._fetch_daily_prices_payload(ticker, since, until)
         metadata = payload.get("output1", {})
         metadata = metadata if isinstance(metadata, dict) else {}
         rows = payload.get("output2", [])
@@ -47,6 +32,38 @@ class KisDailyPriceClient:
             for row in rows
             if isinstance(row, dict)
         ]
+
+    def _fetch_daily_prices_payload(
+        self, ticker: str, since: date, until: date
+    ) -> dict[str, Any]:
+        for backoff in (*_RATE_LIMIT_BACKOFF_SECONDS, None):
+            payload = self.http.get_json(
+                "/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice",
+                headers={
+                    "authorization": f"Bearer {self.access_token}",
+                    "appkey": self.app_key,
+                    "appsecret": self.app_secret,
+                    "tr_id": "FHKST03010100",
+                    "custtype": "P",
+                },
+                params={
+                    "FID_COND_MRKT_DIV_CODE": "J",
+                    "FID_INPUT_ISCD": ticker,
+                    "FID_INPUT_DATE_1": format_yyyymmdd(since),
+                    "FID_INPUT_DATE_2": format_yyyymmdd(until),
+                    "FID_PERIOD_DIV_CODE": "D",
+                    "FID_ORG_ADJ_PRC": "1",
+                },
+            )
+            if str(payload.get("rt_cd", "0")) == "0":
+                return payload
+            if str(payload.get("msg_cd", "")) == _RATE_LIMIT_MSG_CD and backoff is not None:
+                sleep(backoff)
+                continue
+            raise SourceApiError(
+                "kis", str(payload.get("msg1", "request failed")), payload=payload
+            )
+        raise AssertionError("unreachable")  # pragma: no cover
 
 
 def normalize_kis_daily_row(ticker: str, row: dict[str, Any]) -> dict[str, Any]:

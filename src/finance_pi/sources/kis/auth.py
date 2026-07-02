@@ -64,7 +64,9 @@ class KisAuthClient:
             "appkey": self.app_key,
             "appsecret": self.app_secret,
         }
-        data = HttpJsonClient("kis", self.base_url).post_json("/oauth2/tokenP", json=payload)
+        data = HttpJsonClient("kis", self.base_url).post_json_no_retry(
+            "/oauth2/tokenP", json=payload
+        )
         expires_in = int(data.get("expires_in", 0))
         return KisToken(
             access_token=data["access_token"],
