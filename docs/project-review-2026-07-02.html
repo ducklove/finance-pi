@@ -1,0 +1,585 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>finance-pi 프로젝트 종합 검토 보고서 — 2026-07-02</title>
+<style>
+  :root {
+    --bg: #f7f8fa;
+    --card: #ffffff;
+    --ink: #1a2233;
+    --muted: #5b6474;
+    --line: #e3e7ee;
+    --accent: #2456d6;
+    --accent-soft: #eaf0ff;
+    --crit: #c62b3e;
+    --crit-bg: #fdeef0;
+    --high: #c96a10;
+    --high-bg: #fdf3e6;
+    --med: #a3830a;
+    --med-bg: #fbf6df;
+    --low: #4a7a3a;
+    --low-bg: #eef6ea;
+    --good: #1d7a4f;
+    --mono: "Cascadia Code", "D2Coding", Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 0;
+    font-family: "Pretendard", "Malgun Gothic", "Apple SD Gothic Neo", sans-serif;
+    background: var(--bg); color: var(--ink);
+    line-height: 1.65; font-size: 15px;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 32px 24px 80px; }
+  header.hero {
+    background: linear-gradient(135deg, #16233f 0%, #23406e 60%, #2456d6 100%);
+    color: #fff; border-radius: 14px; padding: 36px 40px; margin-bottom: 28px;
+  }
+  header.hero h1 { margin: 0 0 6px; font-size: 27px; letter-spacing: -0.5px; }
+  header.hero .sub { opacity: .85; font-size: 14.5px; }
+  .chips { margin-top: 18px; display: flex; flex-wrap: wrap; gap: 8px; }
+  .chip {
+    background: rgba(255,255,255,.14); border: 1px solid rgba(255,255,255,.25);
+    border-radius: 999px; padding: 3px 13px; font-size: 12.5px;
+  }
+  h2 {
+    font-size: 20px; margin: 44px 0 14px; padding-bottom: 8px;
+    border-bottom: 2px solid var(--line); letter-spacing: -0.3px;
+  }
+  h2 .no { color: var(--accent); margin-right: 8px; }
+  h3 { font-size: 16px; margin: 26px 0 10px; }
+  p { margin: 8px 0; }
+  code {
+    font-family: var(--mono); font-size: 12.5px;
+    background: #eef1f6; border: 1px solid var(--line);
+    border-radius: 4px; padding: 1px 5px; word-break: break-all;
+  }
+  .card {
+    background: var(--card); border: 1px solid var(--line);
+    border-radius: 12px; padding: 20px 24px; margin: 14px 0;
+  }
+  /* summary verdict */
+  .verdict { display: grid; grid-template-columns: 190px 1fr; gap: 24px; align-items: center; }
+  .score-ring { text-align: center; }
+  .score-ring .big { font-size: 46px; font-weight: 800; color: var(--accent); line-height: 1; }
+  .score-ring .of { font-size: 15px; color: var(--muted); }
+  .score-ring .label { margin-top: 6px; font-size: 12.5px; color: var(--muted); }
+  .verdict ul { margin: 6px 0 0; padding-left: 20px; }
+  .verdict li { margin: 4px 0; }
+  /* metric cards */
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(155px, 1fr)); gap: 12px; }
+  .metric {
+    background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+    padding: 14px 16px;
+  }
+  .metric .v { font-size: 22px; font-weight: 700; letter-spacing: -0.5px; }
+  .metric .k { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .metric .note { font-size: 11.5px; color: var(--muted); margin-top: 4px; }
+  /* score bars */
+  table.scores { width: 100%; border-collapse: collapse; }
+  table.scores td { padding: 8px 6px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+  table.scores td.name { width: 200px; font-weight: 600; font-size: 14px; }
+  table.scores td.val { width: 56px; text-align: right; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .bar { background: #edf0f5; border-radius: 6px; height: 12px; overflow: hidden; }
+  .bar > i { display: block; height: 100%; border-radius: 6px; }
+  .why { font-size: 12.5px; color: var(--muted); margin-top: 3px; }
+  /* general tables */
+  table.data { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+  table.data th {
+    text-align: left; background: #f0f3f8; padding: 8px 10px;
+    border-bottom: 2px solid var(--line); font-size: 12.5px; white-space: nowrap;
+  }
+  table.data td { padding: 7px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  table.data tr:last-child td { border-bottom: none; }
+  /* findings */
+  .finding {
+    background: var(--card); border: 1px solid var(--line); border-left-width: 5px;
+    border-radius: 10px; padding: 16px 20px; margin: 12px 0;
+  }
+  .finding.crit { border-left-color: var(--crit); }
+  .finding.high { border-left-color: var(--high); }
+  .finding.med  { border-left-color: var(--med); }
+  .finding.low  { border-left-color: var(--low); }
+  .finding .head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+  .finding .head b { font-size: 15px; }
+  .sev {
+    font-size: 11px; font-weight: 700; border-radius: 5px; padding: 2px 8px;
+    letter-spacing: .4px; white-space: nowrap;
+  }
+  .sev.crit { color: var(--crit); background: var(--crit-bg); }
+  .sev.high { color: var(--high); background: var(--high-bg); }
+  .sev.med  { color: var(--med);  background: var(--med-bg); }
+  .sev.low  { color: var(--low);  background: var(--low-bg); }
+  .effort {
+    font-size: 11px; color: var(--muted); border: 1px solid var(--line);
+    border-radius: 5px; padding: 2px 8px; white-space: nowrap;
+  }
+  .loc { font-family: var(--mono); font-size: 12px; color: var(--accent); }
+  .finding p { font-size: 14px; }
+  .fix {
+    background: var(--accent-soft); border-radius: 8px; padding: 10px 14px;
+    font-size: 13.5px; margin-top: 8px;
+  }
+  .fix::before { content: "수정안 · "; font-weight: 700; color: var(--accent); }
+  pre {
+    background: #10182b; color: #dce4f5; border-radius: 8px;
+    padding: 12px 16px; font-family: var(--mono); font-size: 12px;
+    overflow-x: auto; line-height: 1.55; margin: 8px 0;
+  }
+  pre .cm { color: #7f92b8; }
+  /* long-term cards */
+  .lt {
+    background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+    padding: 20px 24px; margin: 14px 0;
+  }
+  .lt .head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 4px; }
+  .lt .head b { font-size: 16px; }
+  .tag {
+    font-size: 11px; font-weight: 700; color: #6b3fa0; background: #f3ecfb;
+    border-radius: 5px; padding: 2px 8px; white-space: nowrap;
+  }
+  .lt dl { margin: 8px 0 0; }
+  .lt dt { font-weight: 700; font-size: 13px; color: var(--accent); margin-top: 8px; }
+  .lt dd { margin: 2px 0 0; font-size: 14px; }
+  .roadmap li { margin: 8px 0; }
+  .footnote { color: var(--muted); font-size: 12.5px; margin-top: 30px; border-top: 1px solid var(--line); padding-top: 14px; }
+  .pill-ok { color: var(--good); font-weight: 700; }
+  .pill-warn { color: var(--high); font-weight: 700; }
+  .pill-bad { color: var(--crit); font-weight: 700; }
+  @media print {
+    body { background: #fff; }
+    .wrap { max-width: none; padding: 0; }
+    .finding, .card, .lt { break-inside: avoid; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="hero">
+  <h1>finance-pi 프로젝트 종합 검토 보고서</h1>
+  <div class="sub">한국 주식 데이터 파이프라인 &amp; Point-in-Time 팩터 백테스트 플랫폼 · 검토 기준일 2026-07-02 (커밋 <code style="background:rgba(255,255,255,.15);border:none;color:#fff">ec90f93</code>)</div>
+  <div class="chips">
+    <span class="chip">src 16,798줄 · tests 4,651줄 · scripts 2,182줄</span>
+    <span class="chip">테스트 104개 전부 통과 · 커버리지 63%</span>
+    <span class="chip">ruff 클린 · CI 구성</span>
+    <span class="chip">데이터 소스 5종 · CLI 45개 · API 22개 · 팩터 3종</span>
+  </div>
+</header>
+
+<!-- ===================== 1. 요약 ===================== -->
+<h2><span class="no">1</span>총평</h2>
+<div class="card verdict">
+  <div class="score-ring">
+    <div><span class="big">5.9</span><span class="of"> / 10</span></div>
+    <div class="label">8개 영역 평균 (아래 스코어카드)</div>
+  </div>
+  <div>
+    <p><b>“데이터 기반은 중상급, 그 위의 리서치 결과는 아직 믿을 수 없는 상태.”</b></p>
+    <ul>
+      <li><b>강점</b> — 메달리언(Bronze/Silver/Gold) 구조, 원자적 Parquet 쓰기, PIT 설계 철학, 밀도 높은 파이프라인 테스트, systemd/워치독/CI까지 갖춘 운영 체계, 572줄짜리 아키텍처 문서. 개인 프로젝트 수준을 넘는 설계 성숙도.</li>
+      <li><b>최대 리스크</b> — <code>silver.corporate_actions</code>를 생산하는 코드가 없어 <b>“수정주가”가 사실상 무보정 원가격</b>이고, 백테스트 엔진에 1일 look-ahead·순이익 이중 합산·상장폐지 무손실 처리가 겹쳐 있어 <b>현재 백테스트 수치는 투자 판단에 사용 불가</b>.</li>
+      <li><b>구조 부채</b> — <code>admin/server.py</code>(5,310줄) + <code>cli/app.py</code>(4,625줄) 두 파일이 src 전체의 59%를 차지하며 서로 private 심볼로 얽혀 있음.</li>
+      <li><b>보안</b> — 인젝션·경로 트래버설은 방어 확인됨. 단 사설망 토큰 우회 + CSRF로 LAN 내 임의 기기가 잡 실행 가능.</li>
+    </ul>
+  </div>
+</div>
+
+<!-- ===================== 2. 정량 지표 ===================== -->
+<h2><span class="no">2</span>정량 지표</h2>
+<div class="grid">
+  <div class="metric"><div class="v">23,631</div><div class="k">총 Python 줄수</div><div class="note">src 16,798 / tests 4,651 / scripts 2,182</div></div>
+  <div class="metric"><div class="v">104 / 104</div><div class="k">테스트 통과</div><div class="note">경고 2건(join_asof 정렬)</div></div>
+  <div class="metric"><div class="v">63%</div><div class="k">라인 커버리지</div><div class="note">6,363 stmt 중 2,363 미커버</div></div>
+  <div class="metric"><div class="v">0</div><div class="k">ruff 위반</div><div class="note">E,F,I,UP,B,SIM 규칙</div></div>
+  <div class="metric"><div class="v">39</div><div class="k">커밋 수</div><div class="note">2026-04-28 ~ 07-02 (약 9주)</div></div>
+  <div class="metric"><div class="v">45 / 22</div><div class="k">CLI 커맨드 / API 엔드포인트</div><div class="note">admin은 표준 http.server 기반</div></div>
+  <div class="metric"><div class="v">5</div><div class="k">데이터 소스 어댑터</div><div class="note">KRX·KIS·OpenDART·Naver·NPS (+macro)</div></div>
+  <div class="metric"><div class="v">3</div><div class="k">등록 팩터</div><div class="note">momentum_12_1, value_earnings_yield, quality_roa</div></div>
+</div>
+
+<h3>커버리지 취약 모듈 (하위 8개)</h3>
+<div class="card" style="padding:12px 16px">
+<table class="data">
+  <tr><th>모듈</th><th>구문 수</th><th>커버리지</th><th>비고</th></tr>
+  <tr><td><code>sources/opendart/client.py</code></td><td>90</td><td class="pill-bad">29%</td><td>재무 벌크 수집의 핵심 경로</td></tr>
+  <tr><td><code>sources/nps/client.py</code></td><td>264</td><td class="pill-bad">32%</td><td>최근 추가된 대형 클라이언트</td></tr>
+  <tr><td><code>cli/app.py</code></td><td>1,776</td><td class="pill-bad">39%</td><td>backtest/reports 커맨드 미검증</td></tr>
+  <tr><td><code>sources/krx/adapter.py</code></td><td>64</td><td class="pill-warn">48%</td><td>진단용으로 격하됐으나 잔존</td></tr>
+  <tr><td><code>admin/server.py</code></td><td>1,826</td><td class="pill-warn">63%</td><td>절대 규모(684 stmt 미커버)가 문제</td></tr>
+  <tr><td><code>sources/kis/client.py</code></td><td>26</td><td class="pill-warn">65%</td><td></td></tr>
+  <tr><td><code>pit/fundamentals.py</code></td><td>3</td><td class="pill-bad">0%</td><td>죽은 코드이자 함정 (ST-16 참고)</td></tr>
+  <tr><td><code>sources/pre2010/</code></td><td>14</td><td class="pill-bad">0%</td><td>스키마만 존재, 미구현 (LT-6 참고)</td></tr>
+</table>
+</div>
+
+<!-- ===================== 3. 스코어카드 ===================== -->
+<h2><span class="no">3</span>영역별 스코어카드</h2>
+<div class="card">
+<table class="scores">
+  <tr>
+    <td class="name">아키텍처 설계</td>
+    <td><div class="bar"><i style="width:80%;background:#1d7a4f"></i></div>
+      <div class="why">메달리언 구조·원자적 쓰기·PIT 원칙·request_hash 멱등성은 교과서적. 감점: 정교하게 설계된 identity 모듈이 실제로는 <code>"S"+ticker</code>로 우회됨, PIT 구현이 SQL/Polars 이중화.</div></td>
+    <td class="val">8.0</td>
+  </tr>
+  <tr>
+    <td class="name">문서화</td>
+    <td><div class="bar"><i style="width:80%;background:#1d7a4f"></i></div>
+      <div class="why">572줄 아키텍처 문서(리스크 레지스터 포함), Pi 런북, 연구 문서 4편, admin 내 docs 사이트 자동 발행. 감점: 문서상 원칙(R6 코퍼레이트 액션, R9 거래정지)과 실제 구현의 괴리.</div></td>
+    <td class="val">8.0</td>
+  </tr>
+  <tr>
+    <td class="name">운영 성숙도</td>
+    <td><div class="bar"><i style="width:70%;background:#4a9a4f"></i></div>
+      <div class="why">systemd 타이머+워치독, CI(lint+test), 연도별 백필 마커, 웹 admin, KIS 토큰 캐시. 감점: 부분 실패가 marker "ok"로 영구 누락되는 패턴 3곳(ST-6).</div></td>
+    <td class="val">7.0</td>
+  </tr>
+  <tr>
+    <td class="name">테스트</td>
+    <td><div class="bar"><i style="width:60%;background:#a3830a"></i></div>
+      <div class="why">104개 전부 통과, transforms/admin 테스트는 실데이터 형태로 밀도 높음. 감점: 백테스트 엔진 테스트 1개(스모크), value/quality 팩터는 한 번도 실행 안 됨, reports·calendar 전용 테스트 0개.</div></td>
+    <td class="val">6.0</td>
+  </tr>
+  <tr>
+    <td class="name">코드 품질</td>
+    <td><div class="bar"><i style="width:60%;background:#a3830a"></i></div>
+      <div class="why">ruff 클린, 타입 힌트, pydantic 검증. 감점: 2개 파일에 src의 59% 집중, 동일 함수 이중 정의 2건, admin→cli private 심볼 런타임 의존.</div></td>
+    <td class="val">6.0</td>
+  </tr>
+  <tr>
+    <td class="name">보안</td>
+    <td><div class="bar"><i style="width:50%;background:#c96a10"></i></div>
+      <div class="why">SQL 인젝션·경로 트래버설·subprocess 인젝션은 화이트리스트/파라미터 바인딩/resolve() 검사로 방어 확인. 감점: 사설망 전체 토큰 우회 + CSRF로 잡 실행 가능(ST-11), 미인증 health가 절대 경로 노출.</div></td>
+    <td class="val">5.0</td>
+  </tr>
+  <tr>
+    <td class="name">성능 (Pi 적합성)</td>
+    <td><div class="bar"><i style="width:40%;background:#c96a10"></i></div>
+      <div class="why">LazyFrame-first 원칙 선언과 달리 빌더는 전부 eager 전량 로드, silver.prices 4회 반복 읽기, fundamentals_pit 매회 전 기간 재계산, admin 응답 최대 185만 행 일괄 직렬화.</div></td>
+    <td class="val">4.0</td>
+  </tr>
+  <tr>
+    <td class="name">데이터 정합성 (백테스트 신뢰성)</td>
+    <td><div class="bar"><i style="width:30%;background:#c62b3e"></i></div>
+      <div class="why">corporate_actions 생산자 부재로 수정주가 미적용, 진입일 look-ahead, 순이익 이중 합산, 상폐 0% 처리, 수정/원주가 소스 혼합. 플랫폼의 존재 이유에 해당하는 영역이라 최우선 과제.</div></td>
+    <td class="val">3.0</td>
+  </tr>
+</table>
+</div>
+
+<!-- ===================== 4. 단기 과제 ===================== -->
+<h2><span class="no">4</span>단기 과제 — 코드 레벨 상세</h2>
+<p>세 갈래(백테스트·팩터 / 파이프라인 코어 / admin·CLI)로 나눠 전 소스를 검토한 뒤 병합했고, Critical급 발견은 본 보고서 작성 시 소스에서 직접 재확인했다. 작업량: <b>S</b>(반나절 이하) / <b>M</b>(1~2일) / <b>L</b>(3일+).</p>
+
+<h3>4.1 백테스트 신뢰성 (Critical)</h3>
+
+<div class="finding crit">
+  <div class="head"><span class="sev crit">CRITICAL</span><b>ST-1 · silver.corporate_actions 생산자 부재 — “수정주가”가 무보정 원가격</b><span class="effort">작업량 L</span></div>
+  <p><span class="loc">transforms/builders.py:1015-1038 · storage/datasets.py:568-581</span></p>
+  <p><code>_apply_price_adjustment_factors</code>는 <code>silver/corporate_actions/dt=*/part.parquet</code>를 읽지만, 이 데이터셋을 <b>쓰는 코드가 src 전체에 없다</b>(정의·읽기만 존재함을 grep으로 확인). 결과적으로 <code>gold.daily_prices_adj</code>의 <code>close_adj</code>는 원가격의 alias이고, 액면분할·병합 시점의 <code>return_1d</code>는 −50%, +400% 같은 가짜 수익률이 된다. 아키텍처 문서 리스크 R6("코퍼레이트 액션 누락 → false signal")이 그대로 현실화된 상태.</p>
+  <div class="fix">① DART 공시(<code>report_nm</code>의 주식분할·병합·감자 패턴) 또는 KRX 데이터에서 corporate_actions를 생성하는 빌더를 추가하고 <code>build_all_iter</code>에 등록. ② 새 action 감지 시 해당 종목의 gold 히스토리 전체를 강제 재빌드하는 invalidation 추가(증분 빌드는 선택 일자만 다시 쓰므로 신·구 보정이 뒤섞임). ③ 최소 방어로, corporate_actions가 비어 있으면 build 로그에 경고 출력.</div>
+</div>
+
+<div class="finding crit">
+  <div class="head"><span class="sev crit">CRITICAL</span><b>ST-2 · 진입일 수익률 귀속 — 1일 실행가격 look-ahead</b><span class="effort">작업량 S</span></div>
+  <p><span class="loc">backtest/engine.py:73, 127-137</span></p>
+  <p>신호는 signal_date 종가로 계산되는데, 포지션이 <code>calendar.between(entry_date, exit_date)</code>부터 시작해 entry_date의 <code>return_1d</code>(= signal_date 종가 → entry_date 종가 수익률)를 그대로 받는다. 즉 신호 계산에 쓴 바로 그 종가에 체결했다는 가정이며, 모멘텀류 팩터 성과가 체계적으로 과대평가된다. <code>reports/fraud.py:70-72</code>의 signal_entry_separation 체크가 PASS를 주는 것과 실제 동작이 모순.</p>
+  <div class="fix"><code>_compute_nav</code>에서 <code>date == entry_date</code> 행의 수익률을 제외(진입가 = entry_date 종가로 간주)하거나 포지션 시작을 <code>calendar.next(entry_date)</code>로 미룬다. 회귀 테스트: “entry_date 수익률이 NAV에 반영되지 않음”을 단언.</div>
+</div>
+
+<div class="finding crit">
+  <div class="head"><span class="sev crit">CRITICAL</span><b>ST-3 · 순이익 계정 이중 합산 — earnings yield·ROA 랭킹 왜곡</b><span class="effort">작업량 S</span></div>
+  <p><span class="loc">factors/library.py:34-39, 44-47 (ValueEarningsYield) · 63-68, 80-84 (QualityRoa)</span></p>
+  <p><code>net_income_accounts</code>에 <code>ifrs-full_ProfitLoss</code>와 <code>ifrs-full_ProfitLossAttributableToOwnersOfParent</code>가 함께 들어 있고 <code>amount.sum()</code>으로 집계한다. 연결재무제표에는 두 계정이 보통 동시에 존재하므로 순이익이 최대 2배로 계산되고, 두 계정을 모두 공시한 종목이 구조적으로 상위 편입된다.</p>
+  <pre><span class="cm"># 현재: 두 계정이 동시에 존재하면 합산됨</span>
+.agg(pl.col("amount").sum().alias("net_income"))
+<span class="cm"># 수정: 지배주주순이익 우선, 없으면 ProfitLoss 폴백</span>
+.agg(
+    pl.col("amount").filter(pl.col("account_id") == OWNERS).first().alias("ni_owners"),
+    pl.col("amount").filter(pl.col("account_id") == PROFIT_LOSS).first().alias("ni_total"),
+)
+.with_columns(pl.coalesce("ni_owners", "ni_total").alias("net_income"))</pre>
+  <div class="fix">우선순위 선택(coalesce)으로 교체하고, value/quality 팩터에 알려진 입력→기대 점수를 단언하는 단위 테스트 추가(현재 두 팩터는 테스트에서 한 번도 실행되지 않음).</div>
+</div>
+
+<div class="finding crit">
+  <div class="head"><span class="sev crit">CRITICAL</span><b>ST-4 · 상장폐지·가격결측이 0% 수익률 처리 — 생존편향</b><span class="effort">작업량 M</span></div>
+  <p><span class="loc">backtest/engine.py:134 · transforms/builders.py:134, 955</span></p>
+  <p>보유 중 가격이 사라지면 <code>fill_null(0.0)</code>으로 무손실 보유·청산한 셈이 된다. 게다가 <code>universe_history.is_active</code>는 항상 <code>lit(True)</code>, <code>delisted_date</code>는 항상 null이라 데이터 계층에도 방어가 없다. 정리매매 급락·상폐 손실이 전부 무시되므로 저PBR·저가주 전략이 특히 과대평가된다.</p>
+  <div class="fix">단기: 결측 수익률을 설정 가능한 delisting return(예: −30% 후 제외)으로 처리하고, 결측 발생 종목 수를 ledger에 기록해 fraud 리포트에 노출. 후속: <code>_security_master_from_prices</code>에서 <code>last_seen_date</code>가 최신 거래일보다 N일 이상 과거면 <code>delisted_date</code>를 실제로 기록(ST-19와 연계).</div>
+</div>
+
+<h3>4.2 데이터 완결성 (High)</h3>
+
+<div class="finding high">
+  <div class="head"><span class="sev high">HIGH</span><b>ST-5 · 수정주가(Naver)와 원주가(KRX/KIS) 소스 혼합</b><span class="effort">작업량 M</span></div>
+  <p><span class="loc">transforms/builders.py:680-701 · sources/kis/client.py:35 · sources/naver/client.py:74-86</span></p>
+  <p>KIS는 <code>FID_ORG_ADJ_PRC: "1"</code>(원주가), Naver siseJson은 분할 반영 수정주가를 반환한다. <code>_select_preferred_price_sources</code>가 (date, ticker)별 krx &gt; kis &gt; naver 우선순위로 한 행만 남기므로 소스 경계일에 가격 점프가 발생하고, ST-1의 adjustment factor가 생기면 Naver 구간은 <b>이중 보정</b>이 된다.</p>
+  <div class="fix">silver.prices에 소스별 가격 기준(adjusted/raw) 컬럼을 추가하고, Naver 구간을 인접 KRX/KIS 구간과의 종가 비율로 역보정(un-adjust)하거나 최소한 소스 경계일의 <code>return_1d</code>를 null 처리. 기존 연속성 휴리스틱(builders.py:603-641)을 소스 경계에 확장 적용 가능.</div>
+</div>
+
+<div class="finding high">
+  <div class="head"><span class="sev high">HIGH</span><b>ST-6 · 부분 실패가 marker/청크 존재로 영구 스킵 — 조용한 데이터 누락</b><span class="effort">작업량 M</span></div>
+  <p><span class="loc">sources/naver/adapter.py:87-88, 114-139 · sources/opendart/adapter.py:234, 278-301</span></p>
+  <p>Naver 백필은 티커별 실패를 삼키고 성공분만 청크 파일에 쓰는데, <code>list_pending</code>은 청크 파일 존재만 보고 스킵하므로 실패 티커는 재실행해도 영원히 재시도되지 않는다. DART 벌크도 동일하게 일부 실패에도 marker에 "ok"를 기록한다. OpenDART 일일 쿼터(20,000건) 초과로 배치 후반부가 전멸해도 다음 날 복구되지 않는다.</p>
+  <div class="fix">실패 존재 시 marker에 <code>"partial\n" + 실패 목록</code>을 기록하고 <code>list_pending</code>이 partial marker의 실패분만 재시도 유닛으로 생성. 최소 구현: 실패가 있으면 marker/청크를 아예 쓰지 않기(재시도 비용 &lt; 영구 누락).</div>
+</div>
+
+<div class="finding high">
+  <div class="head"><span class="sev high">HIGH</span><b>ST-7 · HTTP 재시도에 429/5xx 미포함 — KIS 레이트리밋에 무방비</b><span class="effort">작업량 S</span></div>
+  <p><span class="loc">http.py:32-37 (51-56, 66-71, 81-86 동일 패턴) · sources/kis/adapter.py:86-92</span></p>
+  <p>tenacity retry가 <code>TimeoutException, TransportError</code>만 재시도한다. KIS 초당 한도 초과(EGW00201)는 HTTP 500 또는 <code>rt_cd != 0</code>으로 도착해 즉시 실패 처리되고, adapter가 티커 단위로 삼켜 하루치 데이터가 조용히 빠진다. 고정 간격 0.05초(=20req/s)는 KIS 실전 한도와 정확히 같아 여유가 없다.</p>
+  <div class="fix"><code>_raise_for_status</code>에서 429/5xx를 <code>RetryableApiError</code>로 승격해 retry 조건에 추가, KIS <code>msg_cd == "EGW00201"</code>도 backoff 후 1-2회 재시도. 단 토큰 발급(kis/auth.py:67)은 "1분 1회" 정책상 재시도 제외 유지.</div>
+</div>
+
+<div class="finding high">
+  <div class="head"><span class="sev high">HIGH</span><b>ST-8 · KIS bronze 병합의 비결정적 dedup + 정정 데이터 폐기</b><span class="effort">작업량 S</span></div>
+  <p><span class="loc">sources/kis/adapter.py:167-179</span></p>
+  <p><code>concat([existing, new]).sort([date,ticker]).unique(keep="last")</code>에서 Polars sort는 기본 불안정 정렬이라 동일 키의 기존/신규 행 순서가 보장되지 않는다 — <b>어느 값이 남을지 비결정적</b>. 또 신규 키가 0이면 쓰기를 건너뛰므로 동일 키에 값이 수정된 행(정정)은 항상 폐기된다.</p>
+  <div class="fix">병합 전 <code>pl.lit(0/1).alias("_recency")</code> 부여 후 <code>sort([date,ticker,_recency])</code>로 결정화. 변경 감지는 행수 비교 대신 anti-join으로.</div>
+</div>
+
+<div class="finding high">
+  <div class="head"><span class="sev high">HIGH</span><b>ST-9 · TTM 부재 — 분기 누적치가 연간 이익 자리에 들어감</b><span class="effort">작업량 M</span></div>
+  <p><span class="loc">transforms/builders.py:462-474 · factors/library.py:41-54, 75-94</span></p>
+  <p>PIT 캐시가 계정당 최신 <code>fiscal_period_end</code> 1행만 남기고(<code>unique(keep="last")</code>) 팩터는 <code>report_type</code>을 보지 않으므로, 1분기보고서가 나오면 3개월 순이익이 직전 연간 순이익을 대체해 earnings yield가 분기마다 계단식으로 붕괴한다. <code>is_consolidated</code>(연결/별도) 동률 처리도 정렬 순서 의존적이라 비결정적.</p>
+  <div class="fix">1단계: 팩터에서 <code>report_type == "11011"</code>(사업보고서)로 필터해 연간 기준 통일 + PIT 정렬 키에 <code>is_consolidated</code> 추가(연결 우선 결정화). 2단계: 분기 누적치 차분으로 TTM 계산(admin의 eps_ttm 로직이 이미 같은 계산을 하므로 재사용 가능).</div>
+</div>
+
+<div class="finding high">
+  <div class="head"><span class="sev high">HIGH</span><b>ST-11 · 사설망 토큰 우회 + CSRF 잡 실행</b><span class="effort">작업량 S</span></div>
+  <p><span class="loc">admin/server.py:1681 (기본 host 0.0.0.0) · 1878-1888 (_authorized) · 1949-1956 · 1832-1846 (POST /api/jobs)</span></p>
+  <p><code>_is_local_admin_client</code>가 loopback뿐 아니라 <code>is_private</code> 대역 전체를 토큰 없이 통과시키고 서버는 기본 <code>0.0.0.0</code> 바인딩이다. 같은 LAN의 모든 기기가 무토큰으로 잡 실행·파일 읽기가 가능하고, CORS는 요청 전송을 막지 않으므로 LAN 사용자가 방문한 임의 웹페이지가 <code>fetch()</code>로 CSRF 잡 실행을 유발할 수 있다. (잡 커맨드는 고정 argv라 셸 인젝션은 없음 — 무단 트리거가 문제.)</p>
+  <div class="fix">① 상태 변경 엔드포인트(<code>POST /api/jobs</code>)는 LAN 우회 대상에서 제외하고 항상 토큰 요구. ② <code>Origin</code>/<code>Sec-Fetch-Site</code> 검증으로 CSRF 차단. ③ 미인증 <code>/api/health</code>의 절대 경로 노출 제거(최소 정보만).</div>
+</div>
+
+<h3>4.3 성능 — Raspberry Pi 적합성 (Medium)</h3>
+
+<div class="finding med">
+  <div class="head"><span class="sev med">MEDIUM</span><b>ST-12 · 빌더 전면 eager 로드 — silver.prices를 4회 반복 읽음</b><span class="effort">작업량 M</span></div>
+  <p><span class="loc">transforms/builders.py:764-772 (_read_optional) · 89-93 · 116-119 · 283-286 · 1110-1112 · 1247-1259</span></p>
+  <p>“Polars LazyFrame-first” 원칙과 달리 <code>_read_optional</code>이 <code>pl.read_parquet</code>(eager)로 전량을 올리고, 전체 빌드에서 silver.prices가 security_master·universe·prices_adj·market_caps 4개 빌더에서 각각 로드된다(10년×2,700종목이면 매회 수 GB). <code>_write_by_partition</code>은 파티션 값마다 전체 스캔을 반복(준-이차 비용).</p>
+  <div class="fix"><code>scan_parquet</code> 기반으로 전환해 필요한 컬럼만 select 후 collect, <code>_write_by_partition</code>은 <code>frame.partition_by(col, as_dict=True)</code> 1회로 대체, build_all에서 prices를 1회 로드해 빌더 간 공유하는 컨텍스트 도입.</div>
+</div>
+
+<div class="finding med">
+  <div class="head"><span class="sev med">MEDIUM</span><b>ST-13 · fundamentals_pit 매 실행 전 기간 전량 재계산</b><span class="effort">작업량 M</span></div>
+  <p><span class="loc">transforms/builders.py:429-486</span></p>
+  <p>모든 거래일 파티션을 순회하며 일자마다 전체 financials를 필터·조인·정렬해 overwrite한다. 산출물이 (일자 × 종목 × 계정) 스냅샷이라 연 수천만 행 규모 — Pi에서 build 한 번이 수 시간짜리가 된다. README도 이를 알고 daily에서 기본 스킵 중(증상 회피).</p>
+  <div class="fix">① 기존 gold 파티션 스킵 + 신규 공시가 있는 일자만 재빌드하는 <code>dates</code> 파라미터. ② 근본적으로는 일자별 스냅샷 물질화를 버리고 PIT를 DuckDB 카탈로그 뷰(query-time as-of join)로 전환.</div>
+</div>
+
+<div class="finding med">
+  <div class="head"><span class="sev med">MEDIUM</span><b>ST-14 · admin 메모리 스파이크 3종</b><span class="effort">작업량 S</span></div>
+  <p><span class="loc">admin/server.py:1591 (job_log) · 1257-1271 + 2570-2651 (daily-prices) · 1184 + 1564-1574 (jobs dict)</span></p>
+  <p>① <code>read_text()[-120_000:]</code>가 수백 MB 로그 전체를 읽은 뒤 자름. ② 가격 API 한도가 500티커 × 3,700일 곱연산이라 최대 185만 행을 dict로 쌓아 <code>json.dumps</code> 일괄 직렬화(+deepcopy 캐시). ③ 완료 잡이 <code>self.jobs</code>·로그 파일에서 영구 누적. 별개로 quotes/search는 캐시·동시성 슬롯 없이 요청 스레드에서 라이브 CNBC를 호출(server.py:2654-2663).</p>
+  <div class="fix">① <code>seek(size-120_000)</code> tail 읽기. ② 티커수×일수 곱에 셀 상한 두고 초과 시 400. ③ 잡 링버퍼(최근 50개) + 로그 정리. ④ quotes/search에 단기 캐시 + 슬롯 적용.</div>
+</div>
+
+<h3>4.4 잠복 버그·구조 부채 (Medium/Low)</h3>
+
+<div class="finding med">
+  <div class="head"><span class="sev med">MEDIUM</span><b>ST-15 · 동일 함수 이중 정의 2건 — 나중 정의가 앞 정의를 가림</b><span class="effort">작업량 S</span></div>
+  <p><span class="loc">cli/app.py:3803 vs 4329 (_float_or_none) · admin/server.py:4636 vs cli/app.py:4313 (_share_class_from_stock_kind)</span></p>
+  <p><code>_float_or_none</code>은 한 모듈에 로직이 다른 두 정의가 있어 앞 정의를 수정해도 효과가 없는 잠복 버그. <code>_share_class_from_stock_kind</code>는 server 버전만 "의결권 있는/종류" 패턴을 인식해, 기록 시(cli)와 조회 시(server)에 같은 종목의 share_class가 갈릴 수 있다.</p>
+  <div class="fix">각각 단일 정의로 통합하고 공용 모듈(<code>finance_pi/util</code> 또는 sources/opendart)로 이동해 양쪽에서 import.</div>
+</div>
+
+<div class="finding med">
+  <div class="head"><span class="sev med">MEDIUM</span><b>ST-16 · pit/fundamentals.py SQL이 Polars 빌더와 다른 의미론 — 죽은 코드이자 함정</b><span class="effort">작업량 S</span></div>
+  <p><span class="loc">pit/fundamentals.py:33-36 vs transforms/builders.py:474</span></p>
+  <p>SQL 버전은 PARTITION BY에 <code>fiscal_period_end</code>가 포함되어 날짜당 모든 과거 회계기간을 유지하는 반면, 실제 사용되는 Polars 빌더는 계정당 1행만 남긴다. 현재 SQL은 호출처가 없지만(커버리지 0%) export되어 있어, 이 뷰로 팩터를 만들면 순이익이 회계기간 수만큼 합산되는 사고가 난다.</p>
+  <div class="fix">삭제하거나 Polars 빌더와 동일 의미론으로 통일 + 두 구현의 동등성 테스트. (ST-13의 뷰 전환을 택하면 이 SQL을 고쳐서 단일 진실원천으로 승격.)</div>
+</div>
+
+<div class="finding med">
+  <div class="head"><span class="sev med">MEDIUM</span><b>ST-17 · KRX 캘린더가 2026년 공휴일만 하드코딩 — 시한폭탄</b><span class="effort">작업량 S</span></div>
+  <p><span class="loc">calendar/trading_calendar.py:8-27 · cli/app.py:4526-4530</span></p>
+  <p><code>KRX_HOLIDAYS</code>가 2026년 16일뿐이라 다른 연도에서 공휴일을 거래일로 오판한다. <code>_previous_weekday</code>가 이를 일일 파이프라인의 “직전 거래일” 판정에 쓰므로 2027년 설 연휴에 존재할 수 없는 파티션을 기다리며 실패한다. 백테스트 자체는 가격 기반 캘린더를 써서 안전.</p>
+  <div class="fix">연도별 dict로 확장 + 커버 범위 밖 연도 조회 시 명시적 경고/예외. 장기적으로 silver.prices 실거래일 집합에서 유도(<code>TradingCalendar.from_dates</code>가 이미 존재).</div>
+</div>
+
+<div class="finding med">
+  <div class="head"><span class="sev med">MEDIUM</span><b>ST-18 · 엔진 랭킹·유니버스 필터 강화 (NaN 점수 + 거래정지 플래그)</b><span class="effort">작업량 S</span></div>
+  <p><span class="loc">backtest/engine.py:45-48 · 38-43</span></p>
+  <p>① <code>is_not_null()</code>만 거르고 내림차순 정렬하는데 Polars는 NaN을 float 최댓값으로 정렬하므로 0/0·x/0에서 나온 NaN/inf가 무조건 최상위 편입된다. ② universe_history가 가진 <code>is_halted / is_designated / is_liquidation_window</code> 플래그를 엔진이 사용하지 않는다(현재는 빌더가 전부 False 하드코딩이라 no-op이지만, 값이 채워지는 순간의 방어선).</p>
+  <div class="fix">① 필터를 <code>pl.col("score").is_finite()</code>로 교체(null/NaN/inf 일괄 제거) + NaN 종목 미편입 회귀 테스트. ② 세 플래그 필터를 엔진에 추가(config로 opt-out).</div>
+</div>
+
+<div class="finding med">
+  <div class="head"><span class="sev med">MEDIUM</span><b>ST-19 · identity 모듈 우회 + 백필 restatement look-ahead</b><span class="effort">작업량 M</span></div>
+  <p><span class="loc">transforms/builders.py:540-541, 943-945, 955 · sources/opendart/client.py:110-133 · pit/fundamentals.py:32</span></p>
+  <p>① pydantic identity 모델이 있음에도 파이프라인은 <code>security_id = "S"+ticker</code> 문자열 결합을 써서 KRX 티커 재사용 시 다른 회사가 이어진다. ② 과거 연도 백필 시 <code>fnlttSinglAcntAll</code>이 “현재 기준 정정된 값”을 반환하는데 원 공시일로 스탬프되어 고전적 PIT 위반(일일 수집분은 안전). ③ <code>available_date &lt;= as_of</code>는 장중 공시를 당일 가용으로 취급 — 보수적으로 <code>&lt;</code>가 안전.</p>
+  <div class="fix">① 티커 재사용 감지(동일 티커 + 장기 공백 + name 급변)를 review 큐로. ② 백필 행에 <code>is_backfilled</code> 플래그 추가, filings의 <code>is_correction</code>(schemas.py:40-41, 이미 존재하나 미사용)을 available_date에 반영. ③ PIT 조건을 익영업일 가용으로 통일.</div>
+</div>
+
+<div class="finding low">
+  <div class="head"><span class="sev low">LOW</span><b>ST-20 · 대형 파일 분해 — server.py·app.py에서 ~3,000줄 즉시 추출 가능</b><span class="effort">작업량 M</span></div>
+  <p><span class="loc">admin/server.py:188-1147 (인라인 HTML/CSS/JS 960줄) · 1973-2266 (API 문서 리터럴) · cli/app.py:96-1173 (macro 시리즈 설정 1,080줄) · server.py:2807-2809, 4691-4736 (cli private 의존)</span></p>
+  <p>두 파일이 src의 59%. 프론트엔드 자산 3종을 정적 파일로, macro 시리즈 정의를 <code>sources/macro/series.py</code>로, CNBC fetch를 공용 모듈로 빼면 로직 변경 없이 약 3,000줄이 이동하고 admin→cli private 심볼 런타임 의존(<code>cli_app._fetch_cnbc_quotes</code> 등)도 끊어진다.</p>
+  <div class="fix">순서: ① CNBC/macro 상수·fetch를 <code>finance_pi/sources/cnbc.py</code>로 추출(결합 제거) → ② 인라인 자산을 <code>admin/assets/</code>로 → ③ API 문서 리터럴을 데이터 모듈로 → ④ 날짜/숫자 coercion 헬퍼를 <code>finance_pi/util</code>로 통합(ST-15와 함께).</div>
+</div>
+
+<div class="finding low">
+  <div class="head"><span class="sev low">LOW</span><b>ST-21 · 저위험 모음 (각각 작업량 S)</b></div>
+  <table class="data" style="margin-top:8px">
+    <tr><th>위치</th><th>내용</th></tr>
+    <tr><td><span class="loc">scripts/run_dq.py:6,14</span></td><td>스캐폴드용 <code>empty_data_quality_report</code>를 호출해 항상-PASS 리포트 생성(stale). 실제 검사(<code>build_data_quality_report</code>)로 교체 또는 삭제.</td></tr>
+    <tr><td><span class="loc">reports/fraud.py:94</span></td><td><code>size == 0</code>이면 tiny_universe가 PASS — 유니버스가 비어 있는데 통과. WARN으로 분리.</td></tr>
+    <tr><td><span class="loc">transforms/builders.py:816-830</span></td><td>증분 silver 빌드가 Naver bronze를 <code>request_dt={선택일}</code>로 glob — 과거에 백필한 데이터가 증분 실행에서 조용히 누락. 전체 glob 후 date 필터로 통일.</td></tr>
+    <tr><td><span class="loc">ingest/orchestrator.py:16-23</span></td><td>유닛별 예외 격리 없음 — 첫 예외가 전체 런 중단. try/except 후 skipped WriteResult로 계속.</td></tr>
+    <tr><td><span class="loc">cli/app.py:2321-2323, 3525</span></td><td><code>date.today()</code>가 로컬 TZ 기준 — Pi가 UTC면 KST 자정~09시 실행 시 스냅샷 일자가 하루 밀림. <code>ZoneInfo("Asia/Seoul")</code> 헬퍼로 통일.</td></tr>
+    <tr><td><span class="loc">backtest/costs.py:7-11</span></td><td>고정 10bps × turnover만 — 한국 매도측 증권거래세(0.15~0.30%) 미반영으로 실비용 2~3배 과소평가, 청산 비용 미부과. 매수/매도 분리 <code>KrxCostModel</code> + CLI 옵션 노출.</td></tr>
+    <tr><td><span class="loc">sources/nps/client.py:391-403</span></td><td><code>_close_lookup</code>이 gold(<code>close_adj</code>)와 silver(<code>close</code>)를 한 리스트로 읽어 보정/무보정 종가 혼합. 소스 하나로 통일.</td></tr>
+    <tr><td><span class="loc">admin/server.py:1623-1627</span></td><td>잡 예외 시 <code>write_text(str(exc))</code>가 스트리밍된 로그를 덮어씀 + returncode 미갱신. append + returncode=-1.</td></tr>
+    <tr><td><span class="loc">docs_site/builder.py:396-397, 344</span></td><td>파이프 2개면 테이블로 오검출, 중복 제목 시 중복 anchor id. 판정 강화 + 카운터 suffix.</td></tr>
+    <tr><td><span class="loc">silver.filings / ingest/cache.py</span></td><td>silver.filings는 빌더가 없어 영구 빈 뷰(0행을 "공시 없음"으로 오해 가능), ResponseCache는 미사용 + 비원자적 쓰기. 구현하거나 제거.</td></tr>
+  </table>
+</div>
+
+<h3>4.5 테스트 보강 (리서치 코어)</h3>
+<div class="card">
+  <p>파이프라인 쪽 테스트(transforms 724줄, admin 1,585줄)는 실질적인 반면, <b>리서치 코어는 사실상 스모크 테스트뿐</b>이다. ST-1~4의 버그가 전부 테스트를 통과한다는 사실이 그 증거. 우선순위:</p>
+  <table class="data">
+    <tr><th>대상</th><th>현재</th><th>추가할 테스트</th></tr>
+    <tr><td><code>backtest/engine.py</code></td><td>테스트 1개 (nav 비어있지 않음만)</td><td>알려진 가격 시계열 → NAV 최종값 손계산 대조, 비용 차감·turnover 수치 단언, 상폐 시나리오, NaN 점수 미편입</td></tr>
+    <tr><td><code>factors/library.py</code></td><td>momentum만 실행됨</td><td>value/quality에 알려진 입력 → 기대 점수, 이중 계상 회귀 테스트</td></tr>
+    <tr><td>PIT 전반</td><td>polars 빌더만 간접 검증</td><td>“signal_date 이후 데이터를 바꿔도 이전 신호 불변” no-lookahead 속성 테스트</td></tr>
+    <tr><td><code>reports/</code>, <code>calendar/</code></td><td>전용 테스트 0개</td><td>jump 검출·fraud 게이트 단위 테스트, 캘린더 경계(월말·연휴) 테스트</td></tr>
+  </table>
+</div>
+
+<h3>4.6 권장 착수 순서</h3>
+<div class="card">
+  <ol class="roadmap">
+    <li><b>스프린트 1 — “백테스트를 믿을 수 있게” (신뢰성 4종 + 회귀 테스트)</b><br>ST-2(진입일 look-ahead, S) → ST-3(이중 합산, S) → ST-18(NaN/필터, S) → ST-4(상폐 처리, M) + 4.5의 엔진 산술 테스트. 전부 백테스트 결과의 부호를 바꿀 수 있는 항목들이며 ST-1보다 작업량이 작아 먼저 끝낸다.</li>
+    <li><b>스프린트 2 — “가격 데이터를 바르게” (ST-1, L + ST-5, M)</b><br>corporate_actions 빌더와 소스 정규화. 가장 무겁지만 플랫폼 존재 이유에 해당. 완료 전까지 README에 “수정주가 미적용” 한계 명시 권장.</li>
+    <li><b>스프린트 3 — “수집 파이프라인 완결성” (ST-6, ST-7, ST-8 + ST-21 일부)</b><br>부분 실패 재시도, 레이트리밋 backoff, 병합 결정화. 매일 도는 코드라 조용한 누락의 복리 비용이 크다.</li>
+    <li><b>스프린트 4 — “Pi에서 오래 돌게” (ST-12~14) + 보안 (ST-11, S)</b><br>ST-11은 30분짜리 수정이므로 아무 스프린트에나 편입 가능 — 외부 노출 계획이 있다면 즉시.</li>
+    <li><b>스프린트 5 — 구조 정리 (ST-15~17, ST-20)</b><br>기능 작업이 잦아지기 전에 대형 파일 분해와 중복 제거를 끝내면 이후 모든 작업의 리뷰 단위가 작아진다.</li>
+  </ol>
+</div>
+
+<!-- ===================== 5. 장기 과제 ===================== -->
+<h2><span class="no">5</span>장기 과제 — 독창적 가치 확장 로드맵</h2>
+<p>이미 보유한 자산(NPS 지분 데이터, 우선주 괴리 연구, DART 공시 스트림, PIT 인프라, KIS 인증)을 지렛대로 쓰는 방향으로 선정했다. 대부분 상용 데이터 벤더도 제공하지 않는 한국 시장 특화 데이터셋·시그널이 산출물이 된다.</p>
+
+<div class="lt">
+  <div class="head"><b>LT-1 · 우선주–보통주 괴리 리서치 모듈: 스크립트 → 팩터 승격</b><span class="tag">한국 특화 · 기존 자산 직결</span></div>
+  <dl>
+    <dt>왜 독창적인가</dt><dd>우선주 괴리율(discount) 장기 시계열과 평균회귀 시그널은 국내에서도 체계적으로 관리되는 공개 데이터셋이 없다. 이 프로젝트는 우선주를 유니버스에 이미 포함하고(<code>naver_summary</code> 기반), <code>docs/preferred-discount-*</code> 연구 2편과 <code>scripts/preferred_discount_surge_analysis.py</code>에 분석 로직까지 있다 — 팩터화 직전 단계.</dd>
+    <dt>단계</dt><dd>① <code>silver.security_relations</code>(보통주↔우선주 매핑, 아키텍처 문서 4.2절에 이미 설계됨) 빌더 구현 → ② <code>gold.preferred_discount</code> 일별 괴리율 테이블 → ③ <code>preferred_discount_zscore</code> 팩터 등록 + 백테스트 → ④ admin에 괴리율 순위/차트 API. 부수 효과로 스크립트의 <code>sys.path</code> 해킹·private import 문제(검토에서 확인됨)도 해소.</dd>
+  </dl>
+</div>
+
+<div class="lt">
+  <div class="head"><b>LT-2 · NPS 스마트머니 팩터: 국민연금 지분 변동 추종 시그널</b><span class="tag">한국 특화 · 데이터 이미 수집 중</span></div>
+  <dl>
+    <dt>왜 독창적인가</dt><dd>NPS holdings ingest가 이미 돌고 있는데 유니버스 API로만 소비된다. 분기별 지분율 증감을 이벤트로 삼는 “연기금 순매수 팩터”는 학술적으로도 국내 초과수익 근거가 보고된 영역이고, 개인이 접근 가능한 구현은 드물다.</dd>
+    <dt>단계</dt><dd>① <code>gold.nps_holdings_delta</code>(분기 지분율 변화, 공시일 기준 PIT 스탬프) → ② 지분 증가 상위 종목의 사후 수익률 이벤트 스터디 → ③ <code>nps_flow</code> 팩터 등록 → ④ 대량보유(5%) 공시 일반화로 다른 기관투자자 추종까지 확장.</dd>
+  </dl>
+</div>
+
+<div class="lt">
+  <div class="head"><b>LT-3 · DART 공시 이벤트 스터디 엔진 (+ LLM 공시 분류)</b><span class="tag">확장성 최대</span></div>
+  <dl>
+    <dt>왜 독창적인가</dt><dd>공시 스트림(<code>dart-filings</code>)이 이미 수집되고 있고 PIT 인프라 위에서 “공시 유형별 초과수익률(CAR) 자동 산출”이 가능한 구조다. 자사주 매입·유상증자·CB 발행·최대주주 변경 등 유형별 이벤트 스터디를 재현 가능한 파이프라인으로 만들면 그 자체가 연구 플랫폼이 된다. <code>report_nm</code> 규칙 분류로 시작해 Claude API로 공시 본문 요약·정밀 분류(호재/악재/중립, 규모)를 붙이면 규칙으로 안 잡히는 이벤트까지 커버.</dd>
+    <dt>단계</dt><dd>① <code>silver.filings</code> 빌더 구현(현재 영구 빈 뷰 — ST-21과 연계) → ② 유형 분류기(규칙 기반) → ③ 이벤트 스터디 러너(이벤트일 ±N일 CAR, 시장 조정 수익률) → ④ LLM 분류 파이프라인(배치, 일 수백 건 규모라 비용 미미) → ⑤ 이벤트 팩터(예: 자사주 매입 공시 후 보유).</dd>
+  </dl>
+</div>
+
+<div class="lt">
+  <div class="head"><b>LT-4 · 멀티팩터 리서치 인프라: 팩터 3종 → 리서치 플랫폼</b><span class="tag">플랫폼 완성도</span></div>
+  <dl>
+    <dt>왜 가치가 큰가</dt><dd>현재는 팩터 인벤토리(3종)와 인프라(크로스섹션 유틸 전무, 엔진이 <code>Factor.rebalance</code>도 무시) 모두 초기 단계라, 인프라를 한 번 깔면 팩터 추가가 “정의 20줄”짜리 작업이 된다.</dd>
+    <dt>단계</dt><dd>① 크로스섹션 유틸(z-score, winsorize, rank, 섹터·사이즈 중립화) + 팩터 방향 메타데이터 → ② 신규 팩터: book-to-price·배당수익률(silver.dividends 이미 존재)·GP/A·발생액·저변동성·1M 반전·52주 신고가 근접도 → ③ 멀티팩터 결합기(동일가중 z-score부터) → ④ 팩터별 자동 tear sheet(IC 시계열, 분위수 수익률, 턴오버, 최대낙폭)를 기존 리포트 파이프라인(HTML)에 통합 → ⑤ 리밸런스 주기 파라미터화.</dd>
+  </dl>
+</div>
+
+<div class="lt">
+  <div class="head"><b>LT-5 · 백테스트 → 실행 브릿지: KIS 모의투자 페이퍼 트레이딩</b><span class="tag">차별화 기능</span></div>
+  <dl>
+    <dt>왜 독창적인가</dt><dd>KIS 인증·토큰 캐시 인프라가 이미 있으므로, 백테스트에서 검증된 전략을 KIS 모의투자 계좌에 자동 리밸런싱하는 루프까지의 거리가 짧다. “백테스트 플랫폼”이 “전략 운용 플랫폼”이 되는 단계 — 개인 프로젝트로서는 흔치 않은 완결성이며, 실체결 데이터로 백테스트 비용 모델(ST-21의 거래세 건)을 역검증하는 선순환도 생긴다.</dd>
+    <dt>단계</dt><dd>① 월간 리밸런싱 목표 포트폴리오 → 주문 시트 생성기(현 보유와의 diff) → ② KIS 모의투자 주문 API 어댑터 → ③ 체결·슬리피지 기록을 gold에 적재 → ④ 실전 계좌는 주문 시트 수동 승인 모드로만(안전장치). systemd 타이머 기반 월간 자동화.</dd>
+  </dl>
+</div>
+
+<div class="lt">
+  <div class="head"><b>LT-6 · pre-2010 백필 완성: 30년 장기 백테스트</b><span class="tag">데이터 해자</span></div>
+  <dl>
+    <dt>왜 가치가 큰가</dt><dd><code>sources/pre2010</code>은 스키마만 있고 미구현(커버리지 0%)이다. 하지만 <code>docs/kospi-top-removal-impact-1996-2025.md</code> 연구가 이미 1996년부터의 분석 수요를 증명했고, 아키텍처 문서 로드맵 9단계에도 계획되어 있다. 한국 시장의 1996~2010 구간(IMF·닷컴·카드사태)을 포함한 PIT 백테스트가 가능해지면 팩터 검증의 통계적 신뢰도가 질적으로 달라진다.</dd>
+    <dt>단계</dt><dd>① 커버리지 리포트(어느 소스가 어느 구간을 주는지) → ② 상폐 종목 포함 여부 검증(생존편향 — ST-4와 직결) → ③ identity 연속성(티커 재사용이 이 구간에서 특히 심함 — ST-19의 감지 로직이 선행 조건) → ④ 연도별 백필 파이프라인 재사용.</dd>
+  </dl>
+</div>
+
+<div class="lt">
+  <div class="head"><b>LT-7 · finance-pi MCP 서버: 자연어 리서치 코파일럿</b><span class="tag">독창성 최고</span></div>
+  <dl>
+    <dt>왜 독창적인가</dt><dd>DuckDB 카탈로그(<code>analytics.*</code> 뷰)와 PIT API가 이미 구조화되어 있으므로, 이를 MCP(Model Context Protocol) 서버로 노출하면 Claude 같은 LLM이 “2015년 이후 PBR 0.5 미만에서 1년 보유 수익률 분포 보여줘” 수준의 질의를 카탈로그 스키마를 보고 직접 SQL로 변환·실행하게 할 수 있다. 개인 데이터 레이크가 대화형 리서치 어시스턴트가 되는 구성으로, 국내 주식 PIT 데이터에 대해서는 전례가 거의 없다.</dd>
+    <dt>단계</dt><dd>① 읽기 전용 DuckDB 커넥션 + 스키마 카탈로그를 도구로 노출하는 MCP 서버(Python SDK, 소규모) → ② 안전장치: read-only·행수 상한·타임아웃 → ③ 백테스트 실행 도구(팩터명·기간 파라미터) 추가 → ④ 리포트 생성 도구(기존 HTML 리포트 파이프라인 재사용). admin의 <code>/api/docs</code> 스키마 문서가 도구 설명으로 재사용 가능.</dd>
+  </dl>
+</div>
+
+<div class="lt">
+  <div class="head"><b>LT-8 · 데이터 신뢰성 등급과 능동 알림: “조용한 실패”의 구조적 종식</b><span class="tag">운영 완성도</span></div>
+  <dl>
+    <dt>왜 필요한가</dt><dd>이번 검토에서 발견된 문제의 상당수(부분 실패 영구 누락, corporate_actions 부재, 빈 뷰)는 “실패가 조용하다”는 공통 원인을 가진다. 소스 간 cross-check(KIS vs Naver 종가 대사)와 데이터셋별 신선도·완결성 등급을 상시 계산하고, 임계 위반 시 텔레그램/디스코드로 능동 통지하면 같은 부류의 문제가 재발해도 하루 안에 드러난다.</dd>
+    <dt>단계</dt><dd>① 데이터셋별 SLA 정의(최신 파티션 나이, 행수 추세, 소스 대사 오차) → ② 기존 DQ 리포트를 일일 등급 테이블(<code>gold.dq_scorecard</code>)로 물질화 → ③ daily 잡 말미에 위반 시 웹훅 통지 → ④ admin 대시보드에 신뢰도 등급 배지 표시(스크리너 API 응답에도 데이터 신선도 메타 포함).</dd>
+  </dl>
+</div>
+
+<!-- ===================== 6. 부록 ===================== -->
+<h2><span class="no">6</span>부록</h2>
+
+<h3>6.1 팩터 인벤토리 (전체)</h3>
+<div class="card" style="padding:12px 16px">
+<table class="data">
+  <tr><th>등록명</th><th>정의</th><th>입력</th><th>상태</th></tr>
+  <tr><td><code>momentum_12_1</code></td><td>P(t−21)/P(t−252) − 1 — 수식 전개상 정확한 12-1 모멘텀</td><td>gold.daily_prices_adj</td><td class="pill-warn">정의 정상 · 단 행 오프셋 기반이라 장기 정지 종목에서 기간 왜곡, ST-1의 무보정 가격에 노출</td></tr>
+  <tr><td><code>value_earnings_yield</code></td><td>Σ순이익 / 시가총액</td><td>fundamentals_pit + prices</td><td class="pill-bad">ST-3 이중 합산 + ST-9 TTM 부재 · 테스트에서 미실행</td></tr>
+  <tr><td><code>quality_roa</code></td><td>Σ순이익 / Σ총자산</td><td>fundamentals_pit</td><td class="pill-bad">동일 문제 · 테스트에서 미실행</td></tr>
+</table>
+</div>
+
+<h3>6.2 테스트 커버리지 맵 (src 모듈 → 테스트)</h3>
+<div class="card" style="padding:12px 16px">
+<table class="data">
+  <tr><th>src 모듈</th><th>테스트</th><th>평가</th></tr>
+  <tr><td>transforms/builders.py</td><td>test_transforms.py (724줄, 10개)</td><td class="pill-ok">양호 — 수정주가·배당·PIT·시총 병합을 실데이터 형태로 검증</td></tr>
+  <tr><td>admin/server.py</td><td>test_admin.py (1,585줄) + test_screener.py</td><td class="pill-ok">양호</td></tr>
+  <tr><td>storage / ingest / identity / config / http / sources / nps</td><td>각 전용 테스트</td><td class="pill-ok">대체로 실로직 검증</td></tr>
+  <tr><td>backtest/engine.py</td><td>test_backtest.py (1개)</td><td class="pill-bad">스모크만 — 산식·비용·경계 미검증</td></tr>
+  <tr><td>factors/library.py</td><td>test_factors.py (모멘텀만)</td><td class="pill-bad">value/quality 미실행</td></tr>
+  <tr><td>reports/ (dq, fraud)</td><td>없음</td><td class="pill-bad">전용 테스트 0개</td></tr>
+  <tr><td>calendar/trading_calendar.py</td><td>간접 (test_cli_daily)</td><td class="pill-warn">경계 미검증 — 백테스트 스케줄의 근간</td></tr>
+  <tr><td>pit/fundamentals.py (SQL)</td><td>없음</td><td class="pill-bad">죽은 코드 (ST-16)</td></tr>
+  <tr><td>backtest/costs.py, models.py</td><td>직접 검증 없음</td><td class="pill-warn">수치 단언 부재</td></tr>
+</table>
+</div>
+
+<h3>6.3 scripts/ 처분 권고</h3>
+<div class="card" style="padding:12px 16px">
+<table class="data">
+  <tr><th>스크립트</th><th>분류</th><th>권고</th></tr>
+  <tr><td>audit_price_adjustments · quarantine_suspicious_price_returns · rebuild_gold_for_repaired_prices · repair_naver_duplicate_prices</td><td>데이터 수리 도구 세트</td><td><code>finance_pi.maintenance</code> 서브패키지로 승격 + 테스트 부여 (silver/gold를 직접 변조하는데 무테스트, private 함수 import 중)</td></tr>
+  <tr><td>backfill_dart_web_financials (357줄)</td><td>실질적 소스 어댑터</td><td><code>sources/dart_web/</code>으로 승격 (다른 스크립트가 sys.path 해킹으로 import하는 것이 승격 필요의 신호)</td></tr>
+  <tr><td>run_dq</td><td class="pill-bad">stale</td><td>ST-21 — 수정 또는 삭제</td></tr>
+  <tr><td>preferred_discount_surge_analysis · kospi_top_contributor_sim · listed_investment_holdings_report · audit_dart_backfill_universe</td><td>일회성 리서치</td><td>유지 (우선주 괴리 로직은 LT-1로 팩터화)</td></tr>
+  <tr><td>backfill · compact</td><td>래퍼/의도적 스텁</td><td>유지</td></tr>
+</table>
+</div>
+
+<h3>6.4 검토 방법론</h3>
+<div class="card">
+  <p>① 정량 지표는 로컬에서 직접 측정 (pytest 104개 실행, pytest-cov 라인 커버리지, ruff, git log, LOC 집계 — 2026-07-02, 커밋 <code>ec90f93</code> 기준). ② 코드 검토는 세 영역(admin·CLI 대형 파일 / 파이프라인 코어 / 백테스트·팩터·테스트)으로 나눠 전 파일 정독 후 병합. ③ Critical 발견 3건(ST-1 corporate_actions 부재, ST-2 진입일 look-ahead, ST-3 이중 합산)은 보고서 작성 시 소스에서 별도 재확인. ④ 보안 검토에서 SQL 인젝션(화이트리스트+파라미터 바인딩), 경로 트래버설(resolve()+allowed-roots), subprocess 인젝션(shell=False 고정 argv)은 <b>방어 확인됨</b> — 문제없는 항목도 명시해 둔다.</p>
+</div>
+
+<div class="footnote">
+  finance-pi 프로젝트 종합 검토 보고서 · 작성 2026-07-02 · 기준 커밋 ec90f93 (main) · 이 문서는 <code>docs/project-review-2026-07-02.html</code>로 저장되며 admin의 <code>/docs/</code> 사이트에서도 열람 가능.
+</div>
+
+</div>
+</body>
+</html>
