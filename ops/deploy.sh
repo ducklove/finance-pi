@@ -12,6 +12,8 @@
 #                   (first run is a full build, later runs are incremental).
 #   --skip-tests    Skip the pytest gate (not recommended).
 #   --no-restart    Do not restart the admin systemd service.
+#   --stash         Stash uncommitted local changes (with a labeled stash
+#                   entry) before pulling instead of aborting.
 #
 # Environment overrides:
 #   FINANCE_PI_ROOT   repo path      (default: $HOME/Works/finance-pi)
@@ -27,12 +29,14 @@ FULL_REBUILD=0
 PIT=0
 SKIP_TESTS=0
 NO_RESTART=0
+STASH=0
 for arg in "$@"; do
   case "$arg" in
     --full-rebuild) FULL_REBUILD=1 ;;
     --pit) PIT=1 ;;
     --skip-tests) SKIP_TESTS=1 ;;
     --no-restart) NO_RESTART=1 ;;
+    --stash) STASH=1 ;;
     *) echo "unknown option: $arg" >&2; exit 2 ;;
   esac
 done
@@ -48,6 +52,16 @@ PY="$VENV/bin/python"
 [ -x "$PY" ] || fail "venv not found at $VENV (see docs/raspberry-pi.md section 2)"
 
 log "1/7 update code ($BRANCH)"
+if ! git diff --quiet || ! git diff --cached --quiet; then
+  if [ "$STASH" -eq 1 ]; then
+    STASH_LABEL="deploy-autostash-$(date +%Y%m%d-%H%M%S)"
+    git stash push -m "$STASH_LABEL"
+    echo "  local changes stashed as '$STASH_LABEL' (restore: git stash pop)"
+  else
+    git status --short
+    fail "uncommitted local changes on the server. Commit them to a branch, or rerun with --stash to set them aside."
+  fi
+fi
 git fetch origin "$BRANCH"
 git checkout -q "$BRANCH"
 BEFORE=$(git rev-parse --short HEAD)

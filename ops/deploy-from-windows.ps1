@@ -14,6 +14,7 @@ param(
     [switch]$Pit,
     [switch]$SkipTests,
     [switch]$NoRestart,
+    [switch]$Stash,
     [switch]$SetupKey
 )
 
@@ -42,6 +43,7 @@ if ($FullRebuild) { $deployArgs += "--full-rebuild" }
 if ($Pit)         { $deployArgs += "--pit" }
 if ($SkipTests)   { $deployArgs += "--skip-tests" }
 if ($NoRestart)   { $deployArgs += "--no-restart" }
+if ($Stash)       { $deployArgs += "--stash" }
 $argLine = $deployArgs -join " "
 
 Write-Host "Deploying to $Target $argLine"
