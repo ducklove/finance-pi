@@ -29,6 +29,9 @@ dev = [
   "ruff>=0.6",
   "vcrpy>=6.0",
 ]
+mcp = [
+  "mcp>=1.0",
+]
 
 [project.scripts]
 finance-pi = "finance_pi.cli.app:app"
