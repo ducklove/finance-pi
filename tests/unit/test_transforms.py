@@ -13,6 +13,7 @@ from finance_pi.storage import DataLakeLayout, ParquetDatasetWriter
 from finance_pi.transforms import (
     build_all,
     build_corporate_actions,
+    build_daily_market_caps,
     build_daily_prices_adj,
     build_financials_silver,
     build_fundamentals_pit,
@@ -20,6 +21,7 @@ from finance_pi.transforms import (
     build_preferred_discount,
     build_security_master,
     build_security_relations,
+    build_silver_market_caps,
     build_silver_prices,
     build_universe_history,
 )
@@ -1459,6 +1461,238 @@ def test_incremental_silver_prices_picks_up_backfilled_naver_dates(tmp_path) -> 
     assert silver.height == 1
     assert silver.select("close").item() == 100.0
     assert silver.select("price_source").item() == "naver"
+
+
+def _bronze_price_row(
+    logical_date: date,
+    ticker: str,
+    *,
+    close: float,
+    volume: int,
+) -> dict:
+    return {
+        "date": logical_date,
+        "ticker": ticker,
+        "isin": None,
+        "name": ticker,
+        "market": "KOSPI",
+        "open": close,
+        "high": close,
+        "low": close,
+        "close": close,
+        "volume": volume,
+        "trading_value": None,
+        "market_cap": None,
+        "listed_shares": None,
+    }
+
+
+def _read_all_silver_prices(tmp_path) -> pl.DataFrame:
+    return pl.concat(
+        [
+            pl.read_parquet(path)
+            for path in sorted((tmp_path / "silver" / "prices").glob("dt=*/part.parquet"))
+        ],
+        how="diagonal_relaxed",
+    ).sort(["date", "ticker"])
+
+
+def test_full_rebuild_chunked_matches_one_shot_at_chunk_boundaries(
+    tmp_path, monkeypatch
+) -> None:
+    layout = DataLakeLayout(tmp_path)
+    layout.ensure_base_dirs()
+    writer = ParquetDatasetWriter()
+    chunk_a = [date(2023, 12, 26), date(2023, 12, 27), date(2023, 12, 28)]
+    chunk_b = [date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4)]
+
+    rows = []
+    # Ticker 111111: duplicate candidates on the FIRST date of chunk B; its
+    # only continuity anchors (singleton rows) sit at the tail of chunk A, so
+    # resolving the duplicate needs the backward context overlap. The bogus
+    # split-adjusted candidate comes first in the file on purpose.
+    rows.extend(_bronze_price_row(value, "111111", close=100.0, volume=100) for value in chunk_a)
+    rows.append(_bronze_price_row(date(2024, 1, 2), "111111", close=20.0, volume=500))
+    rows.append(_bronze_price_row(date(2024, 1, 2), "111111", close=101.0, volume=99))
+    # Ticker 222222: duplicate candidates on the LAST date of chunk A; its only
+    # anchors sit at the head of chunk B, exercising the forward context.
+    rows.append(_bronze_price_row(date(2023, 12, 28), "222222", close=50.0, volume=500))
+    rows.append(_bronze_price_row(date(2023, 12, 28), "222222", close=200.0, volume=99))
+    rows.append(_bronze_price_row(date(2024, 1, 2), "222222", close=201.0, volume=100))
+    rows.append(_bronze_price_row(date(2024, 1, 3), "222222", close=202.0, volume=100))
+    # Ticker 333333: naver row that the higher-priority KRX source must beat.
+    rows.append(_bronze_price_row(date(2024, 1, 2), "333333", close=999.0, volume=10))
+    naver_path = (
+        tmp_path
+        / "bronze"
+        / "naver_daily"
+        / "request_dt=2024-01-05"
+        / "chunk=000001"
+        / "part.parquet"
+    )
+    naver_path.parent.mkdir(parents=True)
+    pl.DataFrame(rows).write_parquet(naver_path)
+    for value in [*chunk_a, *chunk_b]:
+        writer.write(
+            pl.DataFrame([_bronze_price_row(value, "333333", close=300.0, volume=10)]),
+            layout.partition_path("bronze.krx_daily_raw", value),
+        )
+
+    # 2024-01-02 is 7 calendar days after 2023-12-26: two chunks, the boundary
+    # splitting each duplicate from its anchors.
+    monkeypatch.setattr(builders_module, "SILVER_PRICES_REBUILD_CHUNK_DAYS", 7)
+    chunked_summary = build_silver_prices(tmp_path)[0]
+    chunked = _read_all_silver_prices(tmp_path)
+    shutil.rmtree(tmp_path / "silver" / "prices")
+
+    monkeypatch.setattr(builders_module, "SILVER_PRICES_REBUILD_CHUNK_DAYS", 100_000)
+    one_shot_summary = build_silver_prices(tmp_path)[0]
+    one_shot = _read_all_silver_prices(tmp_path)
+
+    assert chunked_summary == one_shot_summary
+    assert (chunked_summary.rows, chunked_summary.files) == (13, 6)
+    assert chunked.equals(one_shot)
+    by_key = {(row["date"], row["ticker"]): row for row in chunked.iter_rows(named=True)}
+    boundary_dup = by_key[(date(2024, 1, 2), "111111")]
+    assert boundary_dup["close"] == 101.0
+    assert boundary_dup["volume"] == 99
+    assert by_key[(date(2023, 12, 28), "222222")]["close"] == 200.0
+    assert by_key[(date(2024, 1, 2), "333333")]["close"] == 300.0
+    assert by_key[(date(2024, 1, 2), "333333")]["price_source"] == "krx"
+
+
+def test_write_by_partition_slices_unsorted_frame_with_null_keys(tmp_path) -> None:
+    frame = pl.DataFrame(
+        {
+            "date": [
+                date(2024, 1, 3),
+                date(2024, 1, 2),
+                None,
+                date(2024, 1, 3),
+                date(2024, 1, 5),
+                date(2024, 1, 2),
+            ],
+            "value": [1, 2, 3, 4, 5, 6],
+        }
+    )
+
+    # 2024-01-05 exists in the frame but is not selected; nulls are skipped.
+    summaries = builders_module._write_by_partition(
+        tmp_path,
+        "silver.prices",
+        frame,
+        "date",
+        [date(2024, 1, 2), date(2024, 1, 3)],
+    )
+
+    assert summaries == [builders_module.BuildSummary("silver.prices", 4, 2)]
+    assert not (tmp_path / "silver" / "prices" / "dt=2024-01-05" / "part.parquet").exists()
+    second = pl.read_parquet(tmp_path / "silver" / "prices" / "dt=2024-01-02" / "part.parquet")
+    third = pl.read_parquet(tmp_path / "silver" / "prices" / "dt=2024-01-03" / "part.parquet")
+    # Original relative row order is preserved within each partition.
+    assert second["value"].to_list() == [2, 6]
+    assert third["value"].to_list() == [1, 4]
+
+
+def _silver_market_cap_row(logical_date: date, ticker: str, market_cap: int) -> dict:
+    return {
+        "date": logical_date,
+        "security_id": f"S{ticker}",
+        "listing_id": f"L{ticker}",
+        "ticker": ticker,
+        "name": f"Name {ticker}",
+        "market": "KOSPI",
+        "rank": 1,
+        "close": 100.0,
+        "trading_value": 1000,
+        "volume": 10,
+        "market_cap": market_cap,
+        "listed_shares": 10_000,
+        "market_cap_source": "marcap",
+        "is_estimated": False,
+    }
+
+
+def test_daily_market_caps_chunked_build_skips_existing_partitions(
+    tmp_path, monkeypatch
+) -> None:
+    layout = DataLakeLayout(tmp_path)
+    layout.ensure_base_dirs()
+    writer = ParquetDatasetWriter()
+    monkeypatch.setattr(builders_module, "DAILY_MARKET_CAPS_REBUILD_CHUNK_DAYS", 1)
+    for day, cap in [(2, 100), (3, 200), (4, 300)]:
+        writer.write(
+            pl.DataFrame([_silver_market_cap_row(date(2024, 1, day), "111111", cap)]),
+            layout.partition_path("silver.market_caps", date(2024, 1, day)),
+        )
+    _write_silver_prices(
+        tmp_path,
+        [
+            _silver_price_row(
+                date(2024, 1, 5),
+                "111111",
+                close=100.0,
+                listed_shares=10_000,
+                market_cap=1_000_000,
+            )
+        ],
+    )
+    # Pre-existing gold partition: append-only semantics must keep it intact.
+    writer.write(
+        pl.DataFrame([_silver_market_cap_row(date(2024, 1, 2), "111111", 999)]),
+        layout.partition_path("gold.daily_market_caps", date(2024, 1, 2)),
+    )
+
+    summary = build_daily_market_caps(tmp_path)[0]
+
+    assert summary.dataset == "gold.daily_market_caps"
+    assert (summary.rows, summary.files) == (3, 3)
+    kept = pl.read_parquet(tmp_path / "gold/daily_market_caps/dt=2024-01-02/part.parquet")
+    assert kept.select("market_cap").item() == 999
+    from_marcap = pl.read_parquet(tmp_path / "gold/daily_market_caps/dt=2024-01-03/part.parquet")
+    assert from_marcap.select("market_cap").item() == 200
+    from_prices = pl.read_parquet(tmp_path / "gold/daily_market_caps/dt=2024-01-05/part.parquet")
+    assert from_prices.select("market_cap").item() == 1_000_000
+    assert from_prices.select("market_cap_source").item() == "krx"
+
+
+def test_build_silver_market_caps_processes_year_files_independently(tmp_path) -> None:
+    for year, close in [(2023, 100), (2024, 200)]:
+        path = tmp_path / "bronze" / "marcap" / f"year={year}" / "part.parquet"
+        path.parent.mkdir(parents=True)
+        pl.DataFrame(
+            [
+                {
+                    "Date": date(year, 1, 2),
+                    "Rank": 1,
+                    "Code": "005930",
+                    "Name": "삼성전자",
+                    "Open": 100,
+                    "High": 110,
+                    "Low": 90,
+                    "Close": close,
+                    "Volume": 10,
+                    "Amount": 1000,
+                    "Changes": 0,
+                    "ChangeCode": "0",
+                    "ChagesRatio": 0.0,
+                    "Marcap": 1_000_000,
+                    "Stocks": 10_000,
+                    "MarketId": "STK",
+                    "Market": "KOSPI",
+                    "Dept": "",
+                }
+            ]
+        ).write_parquet(path)
+
+    summary = build_silver_market_caps(tmp_path)[0]
+
+    assert summary.dataset == "silver.market_caps"
+    assert (summary.rows, summary.files) == (2, 2)
+    first = pl.read_parquet(tmp_path / "silver/market_caps/dt=2023-01-02/part.parquet")
+    second = pl.read_parquet(tmp_path / "silver/market_caps/dt=2024-01-02/part.parquet")
+    assert first.select("close").item() == 100.0
+    assert second.select("close").item() == 200.0
 
 
 def _pit_universe_row(as_of: date) -> dict:

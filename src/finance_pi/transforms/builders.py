@@ -26,6 +26,24 @@ DELISTING_BUFFER_TRADING_DAYS = 10
 # manual identity review (security_id semantics stay ticker-derived).
 TICKER_REUSE_GAP_TRADING_DAYS = 250
 
+# Full-history silver.prices rebuilds (dates=None) process the bronze sources
+# in date chunks spanning at most this many calendar days (~one trading year),
+# so peak memory stays proportional to a chunk instead of the multi-decade
+# union (which OOM-killed a 16GB host at ~15M rows).
+SILVER_PRICES_REBUILD_CHUNK_DAYS = 366
+# Rows for this many extra trading days on each side of a chunk are loaded as
+# dedup context but never written: _deduplicate_price_candidates anchors
+# duplicate (date, ticker) candidates against the nearest singleton row per
+# ticker via join_asof, and a duplicate at a chunk edge may anchor into the
+# neighbouring chunk. A duplicate whose nearest anchor sits further away than
+# this many trading days can score differently from a one-shot rebuild; that
+# far-off an anchor carries little continuity signal anyway.
+SILVER_PRICES_REBUILD_CONTEXT_TRADING_DAYS = 10
+
+# Full gold.daily_market_caps builds chunk the new (not yet written) dates the
+# same way; the merge is date-local, so chunking cannot change the output.
+DAILY_MARKET_CAPS_REBUILD_CHUNK_DAYS = 366
+
 # Corporate-action detection: listed_shares must jump by at least this ratio
 # (or its inverse) between consecutive observed rows to be a candidate event.
 SHARES_JUMP_MIN_RATIO = 1.5
@@ -163,6 +181,15 @@ _FINANCIALS_COLUMNS = [
     "is_backfilled",
 ]
 
+# Bronze price sources feeding silver.prices, in priority order (see
+# _price_source_priority_expr for how ties are broken at selection time).
+_BRONZE_PRICE_SOURCES: list[tuple[str, str]] = [
+    ("krx", "bronze/krx_daily/dt=*/part.parquet"),
+    ("kis", "bronze/kis_daily/dt=*/part.parquet"),
+    ("naver", "bronze/naver_daily/request_dt=*/chunk=*/part.parquet"),
+    ("pre2010", "bronze/pre2010/source=*/dt=*/part.parquet"),
+]
+
 
 @dataclass(frozen=True)
 class BuildSummary:
@@ -178,16 +205,17 @@ def build_all(data_root: Path) -> list[BuildSummary]:
 def build_all_iter(data_root: Path) -> Iterable[BuildSummary]:
     yield from build_silver_market_caps(data_root)
     yield from build_silver_prices(data_root)
-    # Load silver.prices once (all columns) and share it with every downstream
-    # consumer instead of re-reading the multi-GB history once per builder.
-    prices = _read_optional(data_root / "silver/prices/dt=*/part.parquet")
-    yield from build_security_master(data_root, prices=prices)
-    yield from build_security_relations(data_root, prices=prices)
-    yield from build_universe_history(data_root, prices=prices)
-    yield from build_corporate_actions(data_root, prices=prices)
-    yield from build_daily_prices_adj(data_root, prices=prices)
-    yield from build_daily_market_caps(data_root, prices=prices)
-    del prices
+    # Each builder re-reads silver.prices itself (prices=None) with its own
+    # pruned column set, so at most one builder's working set is resident at a
+    # time. Sharing one all-column frame here pinned the entire multi-GB
+    # history in RAM underneath every downstream builder and OOMed a 16GB
+    # host; the ``prices`` keywords stay for callers that already hold a frame.
+    yield from build_security_master(data_root)
+    yield from build_security_relations(data_root)
+    yield from build_universe_history(data_root)
+    yield from build_corporate_actions(data_root)
+    yield from build_daily_prices_adj(data_root)
+    yield from build_daily_market_caps(data_root)
     yield from build_preferred_discount(data_root)
     yield from build_nps_holdings_silver(data_root)
     yield from build_nps_universe(data_root)
@@ -200,29 +228,16 @@ def build_silver_prices(
     data_root: Path,
     dates: Iterable[date] | None = None,
 ) -> list[BuildSummary]:
-    selected_dates = set(dates) if dates is not None else None
+    if dates is None:
+        return _build_silver_prices_full(data_root)
+    selected_dates = set(dates)
     frames: list[pl.DataFrame] = []
     naver_summary = _naver_summary_frame(data_root, selected_dates)
     market_caps = _market_caps_frame(data_root, selected_dates)
-    for source, pattern in [
-        ("krx", "bronze/krx_daily/dt=*/part.parquet"),
-        ("kis", "bronze/kis_daily/dt=*/part.parquet"),
-        ("naver", "bronze/naver_daily/request_dt=*/chunk=*/part.parquet"),
-        ("pre2010", "bronze/pre2010/source=*/dt=*/part.parquet"),
-    ]:
-        frame = (
-            _read_price_source_dates(data_root, source, selected_dates)
-            if selected_dates is not None
-            else _read_optional(data_root / pattern, columns=_BRONZE_PRICE_COLUMNS)
-        )
+    for source, _pattern in _BRONZE_PRICE_SOURCES:
+        frame = _read_price_source_dates(data_root, source, selected_dates)
         if frame is not None and not frame.is_empty():
-            prices = _normalize_price_frame(frame, source)
-            if naver_summary is not None:
-                prices = _enrich_prices_with_naver(prices, naver_summary)
-            if market_caps is not None:
-                prices = _enrich_prices_with_market_caps(prices, market_caps)
-            prices = _deduplicate_price_candidates(prices)
-            frames.append(prices)
+            frames.append(_prepare_price_candidates(frame, source, naver_summary, market_caps))
     if not frames:
         return [BuildSummary("silver.prices", 0, 0)]
 
@@ -230,12 +245,110 @@ def build_silver_prices(
     return _write_by_date(data_root, "silver.prices", prices, "date")
 
 
+def _build_silver_prices_full(data_root: Path) -> list[BuildSummary]:
+    """Full-history rebuild of silver.prices in memory-bounded date chunks.
+
+    The distinct data dates across all bronze price sources are split into
+    chunks of at most ``SILVER_PRICES_REBUILD_CHUNK_DAYS`` calendar days. Each
+    chunk loads its own rows plus ``SILVER_PRICES_REBUILD_CONTEXT_TRADING_DAYS``
+    surrounding trading days of context (so duplicate candidates near a chunk
+    edge keep their join_asof continuity anchors) but writes only its own
+    dates, keeping peak memory proportional to one chunk instead of the whole
+    history. Source selection and enrichment are date-local, so the chunked
+    output matches a one-shot rebuild row for row.
+    """
+    all_dates = _bronze_price_source_dates(data_root)
+    if not all_dates:
+        return [BuildSummary("silver.prices", 0, 0)]
+    chunks = _chunk_dates_by_span(all_dates, SILVER_PRICES_REBUILD_CHUNK_DAYS)
+    context = SILVER_PRICES_REBUILD_CONTEXT_TRADING_DAYS
+    logger.info(
+        "silver.prices: full rebuild over %d trading dates in %d chunk(s)",
+        len(all_dates),
+        len(chunks),
+    )
+    rows = 0
+    files = 0
+    position = 0
+    for index, chunk in enumerate(chunks, start=1):
+        start, end = position, position + len(chunk)
+        position = end
+        load_dates = [
+            *all_dates[max(0, start - context) : start],
+            *chunk,
+            *all_dates[end : end + context],
+        ]
+        load_set = set(load_dates)
+        naver_summary = _naver_summary_frame(data_root, load_set)
+        market_caps = _market_caps_frame(data_root, load_set)
+        frames: list[pl.DataFrame] = []
+        for source, pattern in _BRONZE_PRICE_SOURCES:
+            frame = _read_price_source_chunk(data_root / pattern, load_dates)
+            if frame is not None and not frame.is_empty():
+                frames.append(
+                    _prepare_price_candidates(frame, source, naver_summary, market_caps)
+                )
+        del naver_summary, market_caps
+        if not frames:
+            continue
+        prices = _select_preferred_price_sources(pl.concat(frames, how="diagonal_relaxed"))
+        del frames
+        prices = prices.filter(pl.col("date").is_in(chunk))
+        summary = _write_by_date(data_root, "silver.prices", prices, "date")[0]
+        rows += summary.rows
+        files += summary.files
+        logger.info(
+            "silver.prices: chunk %d/%d (%s..%s) wrote %d rows across %d partitions",
+            index,
+            len(chunks),
+            chunk[0].isoformat(),
+            chunk[-1].isoformat(),
+            summary.rows,
+            summary.files,
+        )
+    return [BuildSummary("silver.prices", rows, files)]
+
+
+def _prepare_price_candidates(
+    frame: pl.DataFrame,
+    source: str,
+    naver_summary: pl.DataFrame | None,
+    market_caps: pl.DataFrame | None,
+) -> pl.DataFrame:
+    prices = _normalize_price_frame(frame, source)
+    if naver_summary is not None:
+        prices = _enrich_prices_with_naver(prices, naver_summary)
+    if market_caps is not None:
+        prices = _enrich_prices_with_market_caps(prices, market_caps)
+    return _deduplicate_price_candidates(prices)
+
+
 def build_silver_market_caps(data_root: Path) -> list[BuildSummary]:
-    frame = _read_optional(data_root / "bronze/marcap/year=*/part.parquet", columns=_MARCAP_COLUMNS)
-    if frame is None or frame.is_empty():
+    files = sorted(glob((data_root / "bronze/marcap/year=*/part.parquet").as_posix()))
+    if not files:
         return [BuildSummary("silver.market_caps", 0, 0)]
-    market_caps = _normalize_marcap_frame(frame)
-    return _write_by_date(data_root, "silver.market_caps", market_caps, "date")
+    rows = 0
+    written = 0
+    # One bronze marcap file per calendar year: normalizing and writing per
+    # file keeps peak memory at one year of rows instead of the full history,
+    # and the (date, ticker) dedupe cannot span year files because each
+    # calendar date lives in exactly one of them.
+    for file in files:
+        frame = pl.read_parquet(file, hive_partitioning=True)
+        frame = frame.select([column for column in _MARCAP_COLUMNS if column in frame.columns])
+        if frame.is_empty():
+            continue
+        market_caps = _normalize_marcap_frame(frame)
+        summary = _write_by_date(data_root, "silver.market_caps", market_caps, "date")[0]
+        rows += summary.rows
+        written += summary.files
+        logger.info(
+            "silver.market_caps: %s wrote %d rows across %d partitions",
+            Path(file).parent.name,
+            summary.rows,
+            summary.files,
+        )
+    return [BuildSummary("silver.market_caps", rows, written)]
 
 
 def build_security_master(
@@ -1001,6 +1114,9 @@ def build_daily_prices_adj(
             _write_corporate_actions_state(data_root, actions)
             return [BuildSummary("gold.daily_prices_adj", rebuilt_rows, rebuilt_files)]
     adjusted = _adjusted_price_frame(prices, actions)
+    # The raw frame (15 columns over the full history on a rebuild) is no
+    # longer needed; release it before the partitioned write allocates.
+    del prices
     if output_dates is not None:
         adjusted = adjusted.filter(pl.col("date").is_in(output_dates))
     summary = _write_by_date(data_root, "gold.daily_prices_adj", adjusted, "date")[0]
@@ -1216,29 +1332,68 @@ def build_daily_market_caps(
     *,
     prices: pl.DataFrame | None = None,
 ) -> list[BuildSummary]:
-    market_caps = _read_optional(data_root / "silver/market_caps/dt=*/part.parquet")
-    price_market_caps = _price_market_caps_frame(data_root, prices)
-    frames = [
-        frame
-        for frame in [market_caps, price_market_caps]
-        if frame is not None and not frame.is_empty()
-    ]
-    if not frames:
-        return [BuildSummary("gold.daily_market_caps", 0, 0)]
-    market_caps = (
-        pl.concat(frames, how="diagonal_relaxed")
-        .sort(["date", "ticker", "market_cap_source"])
-        .unique(subset=["date", "ticker"], keep="first")
-    )
+    """Merge silver.market_caps with price-derived caps into gold.daily_market_caps.
+
+    Existing gold partitions are never rewritten (append-only), so only dates
+    without a gold partition are considered at all. Those new dates are then
+    processed in ``DAILY_MARKET_CAPS_REBUILD_CHUNK_DAYS`` calendar chunks so a
+    first-time full build stays memory-bounded; the per-(date, ticker) source
+    preference is date-local, so chunking cannot change the output.
+    """
     existing_dates = {
         _partition_date_from_path(Path(file), "dt")
         for file in glob((data_root / "gold/daily_market_caps/dt=*/part.parquet").as_posix())
     }
-    if existing_dates:
-        market_caps = market_caps.filter(~pl.col("date").is_in(existing_dates))
-    if market_caps.is_empty():
+    candidate_dates = {
+        _partition_date_from_path(Path(file), "dt")
+        for file in glob((data_root / "silver/market_caps/dt=*/part.parquet").as_posix())
+    }
+    if prices is not None:
+        candidate_dates.update(prices["date"].drop_nulls().unique().to_list())
+    else:
+        candidate_dates.update(
+            _partition_date_from_path(Path(file), "dt")
+            for file in glob((data_root / "silver/prices/dt=*/part.parquet").as_posix())
+        )
+    new_dates = sorted(candidate_dates - existing_dates)
+    if not new_dates:
         return [BuildSummary("gold.daily_market_caps", 0, 0)]
-    return _write_by_date(data_root, "gold.daily_market_caps", market_caps, "date")
+    rows = 0
+    files = 0
+    for chunk in _chunk_dates_by_span(new_dates, DAILY_MARKET_CAPS_REBUILD_CHUNK_DAYS):
+        chunk_set = set(chunk)
+        market_caps = _read_partition_dates(data_root, "silver.market_caps", chunk_set)
+        price_frame = (
+            prices.filter(pl.col("date").is_in(chunk))
+            if prices is not None
+            else _read_partition_dates(data_root, "silver.prices", chunk_set)
+        )
+        if price_frame is not None and not price_frame.is_empty():
+            price_frame = _price_market_caps_frame(
+                price_frame.select(
+                    [
+                        column
+                        for column in _MARKET_CAP_PRICE_COLUMNS
+                        if column in price_frame.columns
+                    ]
+                )
+            )
+        frames = [
+            frame
+            for frame in [market_caps, price_frame]
+            if frame is not None and not frame.is_empty()
+        ]
+        if not frames:
+            continue
+        merged = (
+            pl.concat(frames, how="diagonal_relaxed")
+            .sort(["date", "ticker", "market_cap_source"])
+            .unique(subset=["date", "ticker"], keep="first")
+        )
+        summary = _write_by_date(data_root, "gold.daily_market_caps", merged, "date")[0]
+        rows += summary.rows
+        files += summary.files
+    return [BuildSummary("gold.daily_market_caps", rows, files)]
 
 
 def build_financials_silver(data_root: Path) -> list[BuildSummary]:
@@ -1917,6 +2072,113 @@ def _read_existing_paths(paths: Iterable[Path]) -> pl.DataFrame | None:
     )
 
 
+def _bronze_price_source_dates(data_root: Path) -> list[date]:
+    """Distinct data dates across all bronze price sources, cheaply.
+
+    ``dt=``-partitioned sources contribute their partition dates straight from
+    the directory names (the ingest writes one data date per partition, which
+    the incremental path already relies on); only request-date-partitioned
+    sources (naver) are scanned, projected down to the ``date`` column.
+    """
+    values: set[date] = set()
+    for _source, pattern in _BRONZE_PRICE_SOURCES:
+        unpartitioned: list[str] = []
+        for file in sorted(glob((data_root / pattern).as_posix())):
+            try:
+                values.add(_partition_date_from_path(Path(file), "dt"))
+            except ValueError:
+                unpartitioned.append(file)
+        values.update(_scanned_price_dates(unpartitioned))
+    return sorted(values)
+
+
+def _scanned_price_dates(files: list[str]) -> set[date]:
+    if not files:
+        return set()
+    try:
+        dates = (
+            pl.scan_parquet(files, hive_partitioning=True)
+            .select(pl.col("date").cast(pl.Date, strict=False))
+            .unique()
+            .collect()["date"]
+        )
+        return set(dates.drop_nulls().to_list())
+    except (pl.exceptions.SchemaError, pl.exceptions.ColumnNotFoundError):
+        values: set[date] = set()
+        for file in files:
+            lazy = pl.scan_parquet(file, hive_partitioning=True)
+            if "date" not in lazy.collect_schema().names():
+                continue
+            frame = _cast_dates(lazy.select("date").collect(), ["date"])
+            values.update(frame["date"].drop_nulls().to_list())
+        return values
+
+
+def _read_price_source_chunk(pattern: Path, load_dates: list[date]) -> pl.DataFrame | None:
+    """Read one bronze price source pruned to ``load_dates`` and price columns.
+
+    ``dt=``-partitioned files outside the requested dates are dropped from the
+    file list before scanning; everything else relies on the lazy scan's
+    column projection and date predicate, so only the chunk's rows are ever
+    materialized.
+    """
+    files = _filter_files_by_partition_dates(sorted(glob(pattern.as_posix())), set(load_dates))
+    if not files:
+        return None
+    try:
+        lazy = pl.scan_parquet(files, hive_partitioning=True)
+        available = lazy.collect_schema().names()
+        return (
+            lazy.select([column for column in _BRONZE_PRICE_COLUMNS if column in available])
+            .with_columns(pl.col("date").cast(pl.Date, strict=False))
+            .filter(pl.col("date").is_in(load_dates))
+            .collect()
+        )
+    except (pl.exceptions.SchemaError, pl.exceptions.ColumnNotFoundError):
+        frames: list[pl.DataFrame] = []
+        for file in files:
+            frame = pl.read_parquet(file, hive_partitioning=True)
+            if "date" not in frame.columns:
+                continue
+            frame = frame.select(
+                [column for column in _BRONZE_PRICE_COLUMNS if column in frame.columns]
+            )
+            frame = _cast_dates(frame, ["date"]).filter(pl.col("date").is_in(load_dates))
+            if not frame.is_empty():
+                frames.append(frame)
+        if not frames:
+            return None
+        return pl.concat(frames, how="diagonal_relaxed")
+
+
+def _filter_files_by_partition_dates(files: list[str], dates: set[date]) -> list[str]:
+    """Keep dt=-partitioned files matching ``dates``; pass other files through."""
+    selected: list[str] = []
+    for file in files:
+        try:
+            partition_date = _partition_date_from_path(Path(file), "dt")
+        except ValueError:
+            selected.append(file)
+            continue
+        if partition_date in dates:
+            selected.append(file)
+    return selected
+
+
+def _chunk_dates_by_span(dates: list[date], span_days: int) -> list[list[date]]:
+    """Split sorted dates into consecutive chunks spanning <= span_days each."""
+    chunks: list[list[date]] = []
+    current: list[date] = []
+    for value in dates:
+        if current and (value - current[0]).days >= span_days:
+            chunks.append(current)
+            current = []
+        current.append(value)
+    if current:
+        chunks.append(current)
+    return chunks
+
+
 def _latest_company_frame(data_root: Path) -> pl.DataFrame | None:
     frame = _read_optional(
         data_root / "bronze/dart_company/snapshot_dt=*/part.parquet",
@@ -2374,20 +2636,7 @@ def _previous_gold_close_frame(data_root: Path, before: date) -> pl.DataFrame | 
     return pl.read_parquet(path, hive_partitioning=True)
 
 
-def _price_market_caps_frame(
-    data_root: Path,
-    prices: pl.DataFrame | None = None,
-) -> pl.DataFrame | None:
-    frame = (
-        prices
-        if prices is not None
-        else _read_optional(
-            data_root / "silver/prices/dt=*/part.parquet",
-            columns=_MARKET_CAP_PRICE_COLUMNS,
-        )
-    )
-    if frame is None or frame.is_empty():
-        return None
+def _price_market_caps_frame(frame: pl.DataFrame) -> pl.DataFrame:
     return (
         frame.filter(pl.col("market_cap").is_not_null() & pl.col("listed_shares").is_not_null())
         .with_columns(
@@ -2522,11 +2771,23 @@ def _write_by_partition(
     files = 0
     rows = 0
     selected = set(values)
-    # Single partition pass instead of one full-frame filter per value.
-    partitions = frame.partition_by(partition_column, as_dict=True)
-    for key in sorted(key for key in partitions if key[0] is not None and key[0] in selected):
-        value = key[0]
-        partition = partitions[key]
+    # Walk zero-copy slices of the frame sorted by the partition column instead
+    # of partition_by(as_dict=True), which materializes a full copy of every
+    # partition simultaneously (~2x frame memory at full-history scale). The
+    # stable sort keeps the original row order within each partition (matching
+    # partition_by), and the ordered group sizes yield each partition's
+    # (offset, length) in ascending key order like the old sorted() loop.
+    if frame.height and not frame[partition_column].is_sorted():
+        frame = frame.sort(partition_column, maintain_order=True)
+    group_sizes = frame.group_by(partition_column, maintain_order=True).agg(
+        pl.len().alias("_len")
+    )
+    offset = 0
+    for value, length in zip(group_sizes[partition_column], group_sizes["_len"], strict=True):
+        partition = frame.slice(offset, length)
+        offset += length
+        if value is None or value not in selected:
+            continue
         if dataset in {"silver.financials", "silver.dividends"}:
             name = dataset.split(".", maxsplit=1)[1]
             path = data_root / "silver" / name / f"fiscal_year={value}" / "part.parquet"
