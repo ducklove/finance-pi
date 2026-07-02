@@ -126,7 +126,8 @@ def _empty_financials() -> str:
         CAST(NULL AS VARCHAR) AS account_name,
         CAST(NULL AS DOUBLE) AS amount,
         CAST(NULL AS BOOLEAN) AS is_consolidated,
-        CAST(NULL AS VARCHAR) AS accounting_basis
+        CAST(NULL AS VARCHAR) AS accounting_basis,
+        CAST(NULL AS BOOLEAN) AS is_backfilled
     WHERE FALSE
     """
 
@@ -464,6 +465,19 @@ def _empty_share_counts() -> str:
     """
 
 
+def _empty_identity_review() -> str:
+    return """
+    SELECT
+        CAST(NULL AS VARCHAR) AS ticker,
+        CAST(NULL AS DATE) AS gap_start,
+        CAST(NULL AS DATE) AS gap_end,
+        CAST(NULL AS VARCHAR) AS name_before,
+        CAST(NULL AS VARCHAR) AS name_after,
+        CAST(NULL AS BOOLEAN) AS name_changed
+    WHERE FALSE
+    """
+
+
 def _empty_economic_indicators() -> str:
     return """
     SELECT
@@ -645,6 +659,13 @@ dataset_registry: dict[str, DatasetSpec] = {
         "gold",
         "gold/security_master.parquet",
         _empty_security_master(),
+        hive_partitioning=False,
+    ),
+    "gold.identity_review": DatasetSpec(
+        "gold.identity_review",
+        "gold",
+        "gold/identity_review.parquet",
+        _empty_identity_review(),
         hive_partitioning=False,
     ),
     "macro.cpi": DatasetSpec(

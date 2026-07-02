@@ -56,6 +56,10 @@ class DartFinancialRow(BaseModel):
     amount: float
     is_consolidated: bool = True
     accounting_basis: str | None = None
+    # True for rows fetched by a historical bulk backfill: OpenDART returns the
+    # latest (post-correction) figures, so the amount may not match what was
+    # knowable on available_date.
+    is_backfilled: bool = False
 
 
 def _listed_stock_code_or_none(value: object) -> str | None:

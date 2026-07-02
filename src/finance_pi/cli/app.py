@@ -1465,6 +1465,11 @@ def ingest_dart_financials_bulk(
     batch_size: int = typer.Option(25, help="Financial API calls per resumable chunk"),
     sleep_seconds: float = typer.Option(0.05, help="Sleep between OpenDART financial calls"),
     fs_div: str = typer.Option("CFS", help="CFS or OFS"),
+    backfilled: bool = typer.Option(
+        True,
+        "--backfilled/--daily",
+        help="Mark rows is_backfilled=True (historical bulk); the daily scheduler passes --daily",
+    ),
 ) -> None:
     paths = ProjectPaths(root=root)
     settings = RuntimeSettings.load(paths.root)
@@ -1490,6 +1495,7 @@ def ingest_dart_financials_bulk(
         fs_div=fs_div,
         batch_size=batch_size,
         sleep_seconds=sleep_seconds,
+        is_backfilled=backfilled,
     )
     _run_and_print([adapter], start, end)
 
@@ -1954,6 +1960,7 @@ def bootstrap(
                     financial_batch_size,
                     financial_sleep_seconds,
                     "CFS",
+                    True,
                 )
             except Exception as exc:  # noqa: BLE001
                 failures.append(f"OpenDART financial ingest failed: {exc}")
@@ -2505,6 +2512,7 @@ def _run_daily_ingest(
                 25,
                 0.05,
                 "CFS",
+                False,
             )
         except Exception as exc:  # noqa: BLE001
             failures.append(f"OpenDART financial ingest failed: {exc}")
@@ -3611,6 +3619,7 @@ def _run_yearly_backfill(
                     financial_batch_size,
                     financial_sleep_seconds,
                     "CFS",
+                    True,
                 )
             except Exception as exc:  # noqa: BLE001
                 failures.append(f"OpenDART financial ingest failed: {exc}")

@@ -35,6 +35,7 @@ def _financials_row(
         "amount": amount,
         "is_consolidated": is_consolidated,
         "accounting_basis": "K-IFRS",
+        "is_backfilled": False,
         "fiscal_year": fiscal_period_end.year,
     }
 

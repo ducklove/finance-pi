@@ -6,7 +6,7 @@ from finance_pi.cli.app import _parse_dart_financial_report
 from finance_pi.sources.kis import normalize_kis_daily_row
 from finance_pi.sources.krx import normalize_krx_daily_row
 from finance_pi.sources.naver import parse_daily_price_payload, parse_market_sum_page
-from finance_pi.sources.opendart import DartCompanyRow, DartFilingRow
+from finance_pi.sources.opendart import DartCompanyRow, DartFilingRow, OpenDartClient
 from finance_pi.sources.parsing import share_class_from_stock_kind
 
 
@@ -75,6 +75,71 @@ def test_opendart_alphanumeric_stock_codes_are_kept() -> None:
 
     assert company.stock_code == "0068Y0"
     assert filing.stock_code == "0068Y0"
+
+
+def test_fetch_financials_derives_rcept_dt_from_rcept_no() -> None:
+    class FakeHttp:
+        def get_json(self, path, params=None):
+            return {
+                "status": "000",
+                "list": [
+                    {
+                        "rcept_no": "20240315000123",
+                        "account_id": "ifrs-full_Assets",
+                        "account_nm": "Assets",
+                        "thstrm_amount": "1000",
+                    },
+                    {
+                        "rcept_no": "bogus",
+                        "account_id": "ifrs-full_Equity",
+                        "account_nm": "Equity",
+                        "thstrm_amount": "500",
+                    },
+                ],
+            }
+
+    client = OpenDartClient("key", FakeHttp())
+
+    rows = client.fetch_financials(
+        "00126380",
+        2023,
+        "11011",
+        available_date=date(2024, 5, 1),
+        is_backfilled=True,
+    )
+
+    # The real receipt date comes from rcept_no; available_date keeps meaning
+    # "when the filing became schedulable from the filings scan".
+    assert rows[0]["rcept_dt"] == "2024-03-15"
+    assert rows[0]["available_date"] == "2024-05-01"
+    assert rows[0]["is_backfilled"] is True
+    # Malformed rcept_no falls back to the caller-provided date.
+    assert rows[1]["rcept_dt"] == "2024-05-01"
+
+
+def test_fetch_financials_defaults_to_not_backfilled() -> None:
+    class FakeHttp:
+        def get_json(self, path, params=None):
+            return {
+                "status": "000",
+                "list": [
+                    {
+                        "rcept_no": "20240315000123",
+                        "account_id": "ifrs-full_Assets",
+                        "account_nm": "Assets",
+                        "thstrm_amount": "1000",
+                    }
+                ],
+            }
+
+    rows = OpenDartClient("key", FakeHttp()).fetch_financials(
+        "00126380",
+        2023,
+        "11011",
+        available_date=date(2024, 5, 1),
+    )
+
+    assert rows[0]["is_backfilled"] is False
 
 
 def test_parse_naver_market_sum_page_converts_units() -> None:

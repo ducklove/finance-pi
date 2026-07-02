@@ -137,6 +137,8 @@ class DataLakeLayout:
                 return self.root / "silver" / "security_identity" / "part.parquet"
             case "gold.security_master":
                 return self.root / "gold" / "security_master.parquet"
+            case "gold.identity_review":
+                return self.root / "gold" / "identity_review.parquet"
             case "macro.cpi":
                 return self.root / "macro" / "cpi" / "part.parquet"
             case "macro.rates":

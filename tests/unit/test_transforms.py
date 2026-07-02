@@ -635,6 +635,7 @@ def test_build_financials_accepts_mixed_bronze_date_schemas(tmp_path) -> None:
                 "amount": 2000.0,
                 "is_consolidated": True,
                 "accounting_basis": "K-IFRS",
+                "is_backfilled": True,
             }
         ]
     ).write_parquet(second)
@@ -646,6 +647,11 @@ def test_build_financials_accepts_mixed_bronze_date_schemas(tmp_path) -> None:
     )
     assert summary.rows == 2
     assert silver["rcept_dt"].dtype == pl.Date
+    # Legacy bronze partitions without the column read as False.
+    backfilled = {
+        row["corp_code"]: row["is_backfilled"] for row in silver.iter_rows(named=True)
+    }
+    assert backfilled == {"00126380": False, "00258801": True}
 
 
 def test_build_financials_normalizes_dart_web_korean_account_names(tmp_path) -> None:
@@ -1332,6 +1338,55 @@ def test_security_master_sets_delisted_date_for_stale_securities(tmp_path) -> No
     }
     assert active["S111111"] is True
     assert active["S222222"] is False
+
+
+def test_identity_review_detects_ticker_reuse_gap(tmp_path, caplog, monkeypatch) -> None:
+    layout = DataLakeLayout(tmp_path)
+    layout.ensure_base_dirs()
+    monkeypatch.setattr(builders_module, "TICKER_REUSE_GAP_TRADING_DAYS", 5)
+    rows = [_silver_price_row(date(2024, 1, day), "111111", close=100.0) for day in range(1, 13)]
+    rows.extend(
+        [
+            # Ticker reused: trades stop, then the code reappears with a new name
+            # after a long gap on the observed trading-day axis.
+            {**_silver_price_row(date(2024, 1, 1), "222222", close=50.0), "name": "Old Corp"},
+            {**_silver_price_row(date(2024, 1, 2), "222222", close=50.0), "name": "Old Corp"},
+            {**_silver_price_row(date(2024, 1, 12), "222222", close=500.0), "name": "New Corp"},
+        ]
+    )
+    _write_silver_prices(tmp_path, rows)
+
+    with caplog.at_level(logging.WARNING, logger="finance_pi.transforms.builders"):
+        summaries = build_security_master(tmp_path)
+
+    review = pl.read_parquet(tmp_path / "gold" / "identity_review.parquet")
+    assert review.height == 1
+    row = review.row(0, named=True)
+    assert row["ticker"] == "222222"
+    assert row["gap_start"] == date(2024, 1, 2)
+    assert row["gap_end"] == date(2024, 1, 12)
+    assert row["name_before"] == "Old Corp"
+    assert row["name_after"] == "New Corp"
+    assert row["name_changed"] is True
+    assert any("identity_review" in record.message for record in caplog.records)
+    assert {summary.dataset for summary in summaries} == {
+        "gold.security_master",
+        "gold.identity_review",
+    }
+
+
+def test_identity_review_empty_for_contiguous_history(tmp_path) -> None:
+    layout = DataLakeLayout(tmp_path)
+    layout.ensure_base_dirs()
+    _write_silver_prices(
+        tmp_path,
+        [_silver_price_row(date(2024, 1, day), "111111", close=100.0) for day in range(1, 13)],
+    )
+
+    build_security_master(tmp_path)
+
+    review = pl.read_parquet(tmp_path / "gold" / "identity_review.parquet")
+    assert review.is_empty()
 
 
 def test_incremental_master_merge_preserves_delisted_date(tmp_path) -> None:

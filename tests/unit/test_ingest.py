@@ -126,6 +126,54 @@ def test_dart_financial_requests_accepts_mixed_filing_date_schemas(tmp_path) -> 
     assert {request["bsns_year"] for request in requests} == {2025}
 
 
+def test_dart_financial_requests_advance_available_date_on_correction(tmp_path) -> None:
+    # A correction filing ([기재정정]) later in the window must fold into the
+    # same (corp, year, report) request and advance its available_date.
+    data_root = tmp_path / "data"
+    original = data_root / "bronze" / "dart_filings" / "dt=2026-03-15" / "part.parquet"
+    correction = data_root / "bronze" / "dart_filings" / "dt=2026-03-20" / "part.parquet"
+    original.parent.mkdir(parents=True)
+    correction.parent.mkdir(parents=True)
+    pl.DataFrame(
+        [
+            {
+                "rcept_dt": date(2026, 3, 15),
+                "corp_code": "00126380",
+                "corp_name": "Samsung",
+                "stock_code": "005930",
+                "rcept_no": "20260315000001",
+                "report_nm": "사업보고서 (2025.12)",
+                "rm": None,
+            }
+        ]
+    ).write_parquet(original)
+    pl.DataFrame(
+        [
+            {
+                "rcept_dt": date(2026, 3, 20),
+                "corp_code": "00126380",
+                "corp_name": "Samsung",
+                "stock_code": "005930",
+                "rcept_no": "20260320000001",
+                "report_nm": "[기재정정]사업보고서 (2025.12)",
+                "rm": "정",
+            }
+        ]
+    ).write_parquet(correction)
+
+    requests = _dart_financial_requests(
+        ProjectPaths(root=tmp_path),
+        date(2026, 3, 1),
+        date(2026, 3, 31),
+        ("11011",),
+    )
+
+    assert len(requests) == 1
+    assert requests[0]["corp_code"] == "00126380"
+    assert requests[0]["bsns_year"] == 2025
+    assert requests[0]["available_date"] == date(2026, 3, 20)
+
+
 def test_kis_universe_adapter_writes_combined_date_partitions(tmp_path) -> None:
     class FakeKisClient:
         def fetch_daily_prices(self, ticker: str, since: date, until: date):
@@ -388,6 +436,7 @@ def test_dart_financials_bulk_merges_same_rcept_date_partitions(tmp_path) -> Non
             *,
             available_date: date,
             fs_div: str = "CFS",
+            is_backfilled: bool = False,
         ):
             return [
                 {
@@ -403,6 +452,7 @@ def test_dart_financials_bulk_merges_same_rcept_date_partitions(tmp_path) -> Non
                     "amount": 1000.0,
                     "is_consolidated": fs_div == "CFS",
                     "accounting_basis": "K-IFRS",
+                    "is_backfilled": is_backfilled,
                 }
             ]
 
@@ -428,6 +478,7 @@ def test_dart_financials_bulk_merges_same_rcept_date_partitions(tmp_path) -> Non
         ),
         batch_size=1,
         sleep_seconds=0,
+        is_backfilled=True,
     )
 
     units = list(adapter.list_pending(date(2026, 3, 1), date(2026, 3, 31)))
@@ -438,6 +489,7 @@ def test_dart_financials_bulk_merges_same_rcept_date_partitions(tmp_path) -> Non
     assert first.rows == 1
     assert second.rows == 1
     assert sorted(frame["corp_code"].to_list()) == ["00126380", "00258801"]
+    assert frame["is_backfilled"].to_list() == [True, True]
     assert list(adapter.list_pending(date(2026, 3, 1), date(2026, 3, 31))) == []
 
 
@@ -454,6 +506,7 @@ def test_dart_financials_bulk_writes_partial_marker_and_retries(tmp_path) -> Non
             *,
             available_date: date,
             fs_div: str = "CFS",
+            is_backfilled: bool = False,
         ):
             if corp_code == self.fail_corp_code:
                 raise RuntimeError("quota exceeded")
@@ -471,6 +524,7 @@ def test_dart_financials_bulk_writes_partial_marker_and_retries(tmp_path) -> Non
                     "amount": 1000.0,
                     "is_consolidated": fs_div == "CFS",
                     "accounting_basis": "K-IFRS",
+                    "is_backfilled": is_backfilled,
                 }
             ]
 

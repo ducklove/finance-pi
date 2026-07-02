@@ -21,6 +21,11 @@ logger = logging.getLogger(__name__)
 # newest silver.prices date is considered delisted as of its last seen date.
 DELISTING_BUFFER_TRADING_DAYS = 10
 
+# KRX reuses ticker codes; a gap of more than this many observed trading days
+# between consecutive price rows of one ticker flags a possible reuse for
+# manual identity review (security_id semantics stay ticker-derived).
+TICKER_REUSE_GAP_TRADING_DAYS = 250
+
 # Corporate-action detection: listed_shares must jump by at least this ratio
 # (or its inverse) between consecutive observed rows to be a candidate event.
 SHARES_JUMP_MIN_RATIO = 1.5
@@ -126,6 +131,7 @@ _FINANCIALS_COLUMNS = [
     "amount",
     "is_consolidated",
     "accounting_basis",
+    "is_backfilled",
 ]
 
 
@@ -231,7 +237,65 @@ def build_security_master(
         writer.write(master, layout.singleton_path("silver.security_identity"), mode="overwrite"),
         writer.write(master, layout.singleton_path("gold.security_master"), mode="overwrite"),
     ]
-    return [BuildSummary("gold.security_master", master.height, len(paths))]
+    summaries = [BuildSummary("gold.security_master", master.height, len(paths))]
+    if selected_dates is None:
+        summaries.extend(_write_identity_review(data_root, prices))
+    return summaries
+
+
+def _write_identity_review(data_root: Path, prices: pl.DataFrame) -> list[BuildSummary]:
+    """Detect ticker-reuse candidates and write them to gold.identity_review.
+
+    KRX reuses delisted ticker codes and ``security_id`` is derived from the
+    ticker, so a reused code silently chains two different companies. This
+    only surfaces the suspects for review — identity semantics are unchanged.
+    Detection needs the full price history, so incremental (per-date) master
+    builds skip it.
+    """
+    review = _detect_ticker_reuse(prices)
+    if not review.is_empty():
+        logger.warning(
+            "gold.identity_review: %d possible ticker reuse gap(s) over %d trading days detected",
+            review.height,
+            TICKER_REUSE_GAP_TRADING_DAYS,
+        )
+    ParquetDatasetWriter().write(
+        review,
+        DataLakeLayout(data_root).singleton_path("gold.identity_review"),
+        mode="overwrite",
+    )
+    return [BuildSummary("gold.identity_review", review.height, 1)]
+
+
+def _detect_ticker_reuse(prices: pl.DataFrame) -> pl.DataFrame:
+    axis = (
+        prices.select(pl.col("date").unique().sort())
+        .with_row_index("_day_index")
+        .with_columns(pl.col("_day_index").cast(pl.Int64))
+    )
+    return (
+        prices.select("date", "ticker", "name")
+        .unique(subset=["ticker", "date"], keep="last")
+        .join(axis, on="date", how="left")
+        .sort(["ticker", "date"])
+        .with_columns(
+            pl.col("date").shift(1).over("ticker").alias("gap_start"),
+            pl.col("name").shift(1).over("ticker").alias("name_before"),
+            pl.col("_day_index").shift(1).over("ticker").alias("_prev_day_index"),
+        )
+        .filter(
+            (pl.col("_day_index") - pl.col("_prev_day_index")) > TICKER_REUSE_GAP_TRADING_DAYS
+        )
+        .select(
+            "ticker",
+            "gap_start",
+            pl.col("date").alias("gap_end"),
+            "name_before",
+            pl.col("name").alias("name_after"),
+            (pl.col("name_before") != pl.col("name")).fill_null(False).alias("name_changed"),
+        )
+        .sort(["ticker", "gap_start"])
+    )
 
 
 def build_universe_history(
@@ -752,6 +816,15 @@ def build_daily_market_caps(
 
 
 def build_financials_silver(data_root: Path) -> list[BuildSummary]:
+    """Normalize bronze DART financial rows into silver.financials.
+
+    ``is_backfilled`` marks rows fetched by a historical bulk backfill rather
+    than the daily filings-scheduled ingest. OpenDART fnlttSinglAcntAll always
+    returns the LATEST (post-correction) figures, so a backfilled amount may
+    not match what was knowable on ``available_date``; PIT-sensitive research
+    can exclude or discount such rows. Legacy bronze partitions written before
+    the column existed read as False.
+    """
     financials = _read_optional(
         data_root / "bronze/dart_financials/rcept_dt=*/part.parquet",
         columns=_FINANCIALS_COLUMNS,
@@ -767,12 +840,15 @@ def build_financials_silver(data_root: Path) -> list[BuildSummary]:
             on="corp_code",
             how="left",
         )
+    if "is_backfilled" not in financials.columns:
+        financials = financials.with_columns(pl.lit(False).alias("is_backfilled"))
     financials = (
         _cast_dates(
             financials,
             ["fiscal_period_end", "event_date", "rcept_dt", "available_date"],
         )
         .pipe(_normalize_financial_account_ids)
+        .with_columns(pl.col("is_backfilled").cast(pl.Boolean, strict=False).fill_null(False))
         .select(
             [
                 "security_id",
@@ -787,6 +863,7 @@ def build_financials_silver(data_root: Path) -> list[BuildSummary]:
                 "amount",
                 "is_consolidated",
                 "accounting_basis",
+                "is_backfilled",
             ]
         )
         .with_columns(pl.col("fiscal_period_end").dt.year().alias("fiscal_year"))

@@ -90,6 +90,7 @@ class OpenDartClient:
         *,
         available_date: date,
         fs_div: str = "CFS",
+        is_backfilled: bool = False,
     ) -> list[dict[str, Any]]:
         payload = self.http.get_json(
             "/api/fnlttSinglAcntAll.json",
@@ -120,7 +121,9 @@ class OpenDartClient:
                 "security_id": None,
                 "fiscal_period_end": fiscal_period_end,
                 "event_date": fiscal_period_end,
-                "rcept_dt": available_date,
+                # The first 8 digits of rcept_no are the true DART receipt date;
+                # fall back to the scheduling date only when they are missing.
+                "rcept_dt": _receipt_date(item.get("rcept_no")) or available_date,
                 "available_date": available_date,
                 "report_type": reprt_code,
                 "account_id": value_for(item, "account_id", "account_nm"),
@@ -128,6 +131,7 @@ class OpenDartClient:
                 "amount": amount,
                 "is_consolidated": fs_div.upper() == "CFS",
                 "accounting_basis": value_for(item, "frmtrm_nm", default=None),
+                "is_backfilled": is_backfilled,
             }
             rows.append(DartFinancialRow.model_validate(row).model_dump(mode="json"))
         return rows
@@ -221,6 +225,16 @@ def _empty_to_none(value: Any) -> Any:
 def _dart_date(value: Any) -> date:
     text = str(value)
     return date(int(text[:4]), int(text[4:6]), int(text[6:8]))
+
+
+def _receipt_date(rcept_no: Any) -> date | None:
+    text = str(rcept_no or "")
+    if len(text) < 8 or not text[:8].isdigit():
+        return None
+    try:
+        return date(int(text[:4]), int(text[4:6]), int(text[6:8]))
+    except ValueError:
+        return None
 
 
 def _dart_date_dash(value: Any) -> date:

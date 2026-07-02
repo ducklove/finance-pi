@@ -27,6 +27,7 @@ FINANCIAL_SCHEMA = {
     "amount": pl.Float64,
     "is_consolidated": pl.Boolean,
     "accounting_basis": pl.String,
+    "is_backfilled": pl.Boolean,
 }
 
 FINANCIAL_DEDUP_COLUMNS = [
@@ -171,6 +172,7 @@ class DartFinancialsAdapter:
     reprt_code: str
     available_date: date
     fs_div: str = "CFS"
+    is_backfilled: bool = False
     name: str = "opendart_financials"
 
     def list_pending(self, since: date, until: date) -> Iterable[IngestUnit]:
@@ -195,6 +197,7 @@ class DartFinancialsAdapter:
                 self.reprt_code,
                 available_date=self.available_date,
                 fs_div=self.fs_div,
+                is_backfilled=self.is_backfilled,
             ),
         )
 
@@ -214,6 +217,7 @@ class DartFinancialsBulkAdapter:
     fs_div: str = "CFS"
     batch_size: int = 25
     sleep_seconds: float = 0.05
+    is_backfilled: bool = False
     name: str = "opendart_financials_bulk"
 
     def list_pending(self, since: date, until: date) -> Iterable[IngestUnit]:
@@ -276,6 +280,7 @@ class DartFinancialsBulkAdapter:
                     report_code,
                     available_date=available_date,
                     fs_div=self.fs_div,
+                    is_backfilled=self.is_backfilled,
                 )
                 if not fetched and self.fs_div.upper() == "CFS":
                     fetched = self.client.fetch_financials(
@@ -284,6 +289,7 @@ class DartFinancialsBulkAdapter:
                         report_code,
                         available_date=available_date,
                         fs_div="OFS",
+                        is_backfilled=self.is_backfilled,
                     )
                 rows.extend(fetched)
             except Exception as exc:  # noqa: BLE001
