@@ -388,11 +388,12 @@ class NpsHoldingsClient:
         }
         if not ticker_set:
             return {}
-        files = _price_files(self.data_root, target_date, lookback_days)
+        gold_files, silver_files = _price_files(self.data_root, target_date, lookback_days)
+        files = gold_files or silver_files
         if not files:
             return {}
         frame = pl.read_parquet([path.as_posix() for path in files], hive_partitioning=True)
-        if "security_id" in frame.columns:
+        if gold_files and "security_id" in frame.columns:
             frame = frame.with_columns(
                 pl.col("security_id").cast(pl.String).str.strip_prefix("S").alias("ticker"),
                 pl.col("close_adj").alias("close"),
@@ -529,8 +530,17 @@ def _read_parquet_optional(pattern: Path) -> pl.DataFrame | None:
         return pl.concat(frames, how="diagonal_relaxed")
 
 
-def _price_files(data_root: Path, target_date: date, lookback_days: int) -> list[Path]:
-    files: list[Path] = []
+def _price_files(
+    data_root: Path, target_date: date, lookback_days: int
+) -> tuple[list[Path], list[Path]]:
+    """Collect gold and silver price partitions separately over the lookback window.
+
+    Callers should prefer the gold (adjusted-close) files and only fall back
+    to silver (raw-close) files when no gold partitions exist at all, to
+    avoid mixing adjusted and raw closes in a single read.
+    """
+    gold_files: list[Path] = []
+    silver_files: list[Path] = []
     current = target_date - timedelta(days=max(0, lookback_days))
     while current <= target_date:
         gold_path = (
@@ -548,8 +558,8 @@ def _price_files(data_root: Path, target_date: date, lookback_days: int) -> list
             / "part.parquet"
         )
         if gold_path.exists():
-            files.append(gold_path)
-        elif silver_path.exists():
-            files.append(silver_path)
+            gold_files.append(gold_path)
+        if silver_path.exists():
+            silver_files.append(silver_path)
         current += timedelta(days=1)
-    return files
+    return gold_files, silver_files

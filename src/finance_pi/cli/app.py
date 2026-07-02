@@ -25,7 +25,13 @@ import polars as pl
 import typer
 
 from finance_pi.admin import run_admin as run_admin_server
-from finance_pi.backtest import BacktestConfig, BacktestEngine
+from finance_pi.backtest import (
+    BacktestConfig,
+    BacktestEngine,
+    CostModel,
+    FixedBpsCostModel,
+    KoreanTradingCostModel,
+)
 from finance_pi.calendar import TradingCalendar
 from finance_pi.config import ProjectPaths, RuntimeSettings, diagnose_dotenv
 from finance_pi.docs_site import build_docs_site
@@ -56,6 +62,7 @@ from finance_pi.sources.opendart import (
     DartFinancialsBulkAdapter,
     OpenDartClient,
 )
+from finance_pi.sources.parsing import share_class_from_stock_kind
 from finance_pi.sources.schemas import PRICE_SCHEMA
 from finance_pi.storage import CatalogBuilder, DataLakeLayout, dataset_registry
 from finance_pi.storage.parquet import ParquetDatasetWriter
@@ -2149,6 +2156,19 @@ def verify_nps_shadow(
         raise typer.Exit(code=1)
 
 
+def _backtest_cost_model(
+    cost_bps: float,
+    commission_bps: float | None,
+    sell_tax_bps: float | None,
+) -> CostModel:
+    if commission_bps is None and sell_tax_bps is None:
+        return FixedBpsCostModel(bps=cost_bps)
+    return KoreanTradingCostModel(
+        commission_bps=commission_bps if commission_bps is not None else 5.0,
+        sell_tax_bps=sell_tax_bps if sell_tax_bps is not None else 15.0,
+    )
+
+
 @backtest_app.command("run")
 def run_backtest(
     factor_name: str = typer.Option(..., "--factor", help="Registered factor name"),
@@ -2156,6 +2176,21 @@ def run_backtest(
     end: str = typer.Option(..., help="End date as YYYY-MM-DD"),
     root: Path = typer.Option(Path("."), help="Workspace root"),
     top_fraction: float = typer.Option(0.1, help="Selection fraction"),
+    cost_bps: float = typer.Option(
+        10.0,
+        "--cost-bps",
+        help="Fixed round-trip cost in bps (ignored when commission/sell-tax given)",
+    ),
+    commission_bps: float | None = typer.Option(
+        None,
+        "--commission-bps",
+        help="Commission bps per side; switches to KoreanTradingCostModel (default 5.0)",
+    ),
+    sell_tax_bps: float | None = typer.Option(
+        None,
+        "--sell-tax-bps",
+        help="Sell-side transaction tax bps; switches to KoreanTradingCostModel (default 15.0)",
+    ),
 ) -> None:
     paths = ProjectPaths(root=root)
     prices_path = paths.data_root / "gold" / "daily_prices_adj" / "dt=*" / "part.parquet"
@@ -2171,7 +2206,8 @@ def run_backtest(
     )
     calendar = TradingCalendar.from_dates(dates)
     factor = factor_registry.get(factor_name)()
-    result = BacktestEngine(calendar).run(
+    cost_model = _backtest_cost_model(cost_bps, commission_bps, sell_tax_bps)
+    result = BacktestEngine(calendar, cost_model=cost_model).run(
         factor,
         ParquetFactorContext(paths.data_root),
         BacktestConfig(
@@ -4097,7 +4133,7 @@ def _normalize_dart_dividend_rows(
         if metric is None:
             continue
         stock_kind = _clean_text(row.get("stock_knd"))
-        share_class = _share_class_from_stock_kind(stock_kind)
+        share_class = share_class_from_stock_kind(stock_kind)
         if share_class is None:
             continue
         corp_code = str(row.get("corp_code") or "")
@@ -4165,7 +4201,7 @@ def _normalize_dart_share_count_rows(
                 "available_date": available_date,
                 "corp_code": str(row.get("corp_code") or ""),
                 "corp_name": _clean_text(row.get("corp_name")),
-                "share_class": _share_class_from_stock_kind(stock_kind),
+                "share_class": share_class_from_stock_kind(stock_kind),
                 "stock_kind": stock_kind,
                 "authorized_shares": _int_or_none(row.get("isu_stock_totqy")),
                 "cumulative_issued_shares": _int_or_none(row.get("now_to_isu_stock_totqy")),
@@ -4313,16 +4349,6 @@ def _dividend_metric(label: str) -> str | None:
         return "stock_dividend_per_share"
     if "현금배당수익률" in normalized:
         return "cash_dividend_yield_pct"
-    return None
-
-
-def _share_class_from_stock_kind(stock_kind: str | None) -> str | None:
-    if not stock_kind:
-        return None
-    if "보통" in stock_kind:
-        return "common"
-    if "우선" in stock_kind:
-        return "preferred"
     return None
 
 

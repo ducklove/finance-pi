@@ -281,7 +281,9 @@ def _markdown_to_html(source: str) -> tuple[str, tuple[tuple[int, str, str], ...
     table: list[str] = []
     code: list[str] = []
     in_code = False
+    in_table = False
     code_lang = ""
+    anchor_counts: dict[str, int] = {}
 
     def flush_paragraph() -> None:
         nonlocal paragraph
@@ -302,10 +304,11 @@ def _markdown_to_html(source: str) -> tuple[str, tuple[tuple[int, str, str], ...
             blockquote = []
 
     def flush_table() -> None:
-        nonlocal table
+        nonlocal table, in_table
         if table:
             html_parts.append(_table_html(table))
             table = []
+        in_table = False
 
     def flush_all() -> None:
         flush_paragraph()
@@ -313,7 +316,7 @@ def _markdown_to_html(source: str) -> tuple[str, tuple[tuple[int, str, str], ...
         flush_blockquote()
         flush_table()
 
-    for raw in lines:
+    for index, raw in enumerate(lines):
         line = raw.rstrip()
         fence = re.match(r"^```(.*)$", line)
         if fence:
@@ -340,7 +343,10 @@ def _markdown_to_html(source: str) -> tuple[str, tuple[tuple[int, str, str], ...
             flush_all()
             level = len(heading.group(1))
             text = _strip_inline(heading.group(2))
-            anchor = _slug(text)
+            base_anchor = _slug(text)
+            seen = anchor_counts.get(base_anchor, 0)
+            anchor_counts[base_anchor] = seen + 1
+            anchor = base_anchor if seen == 0 else f"{base_anchor}-{seen + 1}"
             headings.append((level, text, anchor))
             html_parts.append(f'<h{level} id="{anchor}">{_inline(text)}</h{level}>')
             continue
@@ -350,10 +356,15 @@ def _markdown_to_html(source: str) -> tuple[str, tuple[tuple[int, str, str], ...
             flush_table()
             blockquote.append(line.lstrip("> "))
             continue
-        if _is_table_line(line):
+        next_line = lines[index + 1].rstrip() if index + 1 < len(lines) else ""
+        if in_table and _is_table_line(line):
+            table.append(line)
+            continue
+        if not in_table and _starts_table(line, next_line):
             flush_paragraph()
             flush_list()
             flush_blockquote()
+            in_table = True
             table.append(line)
             continue
         unordered = re.match(r"^\s*[-*]\s+(.+)$", line)
@@ -394,7 +405,11 @@ def _table_html(lines: list[str]) -> str:
 
 
 def _is_table_line(line: str) -> bool:
-    return line.count("|") >= 2
+    return line.strip().startswith("|") and line.count("|") >= 2
+
+
+def _starts_table(line: str, next_line: str) -> bool:
+    return _is_table_line(line) and _is_table_separator(next_line)
 
 
 def _is_table_separator(line: str) -> bool:

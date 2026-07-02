@@ -182,6 +182,59 @@ def test_admin_nps_universe_returns_latest_snapshot_on_or_before_date(tmp_path) 
     assert payload["universe"][0]["stock_code"] == "005930"
 
 
+def test_close_lookup_prefers_gold_and_never_mixes_with_silver(tmp_path) -> None:
+    target = date(2025, 1, 10)
+    gold_dir = tmp_path / "gold" / "daily_prices_adj" / f"dt={target.isoformat()}"
+    gold_dir.mkdir(parents=True)
+    pl.DataFrame(
+        [
+            {
+                "date": target,
+                "security_id": "S005930",
+                "listing_id": "L005930",
+                "close_adj": 999.0,
+            }
+        ]
+    ).write_parquet(gold_dir / "part.parquet")
+
+    silver_dir = tmp_path / "silver" / "prices" / f"dt={target.isoformat()}"
+    silver_dir.mkdir(parents=True)
+    pl.DataFrame(
+        [
+            {
+                "date": target,
+                "ticker": "005930",
+                "close": 1.0,
+            }
+        ]
+    ).write_parquet(silver_dir / "part.parquet")
+
+    client = NpsHoldingsClient(tmp_path)
+    points = client._close_lookup(["005930"], target, lookback_days=5)
+
+    assert points["005930"].close == 999.0
+
+
+def test_close_lookup_falls_back_to_silver_when_no_gold_files(tmp_path) -> None:
+    target = date(2025, 1, 10)
+    silver_dir = tmp_path / "silver" / "prices" / f"dt={target.isoformat()}"
+    silver_dir.mkdir(parents=True)
+    pl.DataFrame(
+        [
+            {
+                "date": target,
+                "ticker": "005930",
+                "close": 1234.0,
+            }
+        ]
+    ).write_parquet(silver_dir / "part.parquet")
+
+    client = NpsHoldingsClient(tmp_path)
+    points = client._close_lookup(["005930"], target, lookback_days=5)
+
+    assert points["005930"].close == 1234.0
+
+
 def test_nps_shadow_compare_passes_legacy_sqlite_rows(tmp_path) -> None:
     data_root = tmp_path / "data"
     layout = DataLakeLayout(data_root)

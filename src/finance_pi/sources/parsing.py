@@ -42,3 +42,20 @@ def parse_date(value: Any) -> date:
     if len(text) == 8 and text.isdigit():
         return parse_yyyymmdd(text)
     return date.fromisoformat(text)
+
+
+def share_class_from_stock_kind(stock_kind: str | None) -> str | None:
+    """Classify a DART stock-kind string ("주식의 종류") into common/preferred.
+
+    DART reports use strings such as "보통주", "우선주", "의결권 있는 주식",
+    "의결권 없는 주식", and various "종류주식" labels for share classes with
+    special rights. Anything containing "종류" without "보통" is treated as
+    a non-common (preferred-like) class.
+    """
+    if not stock_kind:
+        return None
+    if "보통" in stock_kind or "의결권 있는" in stock_kind:
+        return "common"
+    if "우선" in stock_kind or "종류" in stock_kind or "의결권 없는" in stock_kind:
+        return "preferred"
+    return None

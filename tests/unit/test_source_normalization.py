@@ -7,6 +7,7 @@ from finance_pi.sources.kis import normalize_kis_daily_row
 from finance_pi.sources.krx import normalize_krx_daily_row
 from finance_pi.sources.naver import parse_daily_price_payload, parse_market_sum_page
 from finance_pi.sources.opendart import DartCompanyRow, DartFilingRow
+from finance_pi.sources.parsing import share_class_from_stock_kind
 
 
 def test_normalize_krx_daily_row_accepts_krx_fields() -> None:
@@ -169,3 +170,15 @@ def test_parse_dart_financial_report_names() -> None:
         "\ubd84\uae30\ubcf4\uace0\uc11c (2026.09)",
         date(2026, 11, 14),
     ) == (2026, "11014")
+
+
+def test_share_class_from_stock_kind_classifies_dart_labels() -> None:
+    no_voting = "\uc758\uacb0\uad8c \uc5c6\ub294 \uc8fc\uc2dd"
+    has_voting = "\uc758\uacb0\uad8c \uc788\ub294 \uc8fc\uc2dd"
+    assert share_class_from_stock_kind("\ubcf4\ud1b5\uc8fc") == "common"
+    assert share_class_from_stock_kind("\uc6b0\uc120\uc8fc") == "preferred"
+    assert share_class_from_stock_kind(no_voting) == "preferred"
+    assert share_class_from_stock_kind(has_voting) == "common"
+    assert share_class_from_stock_kind("\uc885\ub958\uc8fc\uc2dd") == "preferred"
+    assert share_class_from_stock_kind("\uae30\ud0c0") is None
+    assert share_class_from_stock_kind(None) is None

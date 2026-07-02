@@ -26,6 +26,7 @@ import polars as pl
 
 from finance_pi.config import ProjectPaths, load_dotenv
 from finance_pi.docs_site import build_docs_site
+from finance_pi.sources.parsing import share_class_from_stock_kind
 from finance_pi.storage import dataset_registry
 
 DEFAULT_MAX_REQUEST_THREADS = 16
@@ -3773,7 +3774,7 @@ def _dart_share_denominator_from_rows(rows: list[dict[str, Any]]) -> dict[str, A
         components.append(
             {
                 "stock_kind": stock_kind,
-                "share_class": _share_class_from_stock_kind(stock_kind),
+                "share_class": share_class_from_stock_kind(stock_kind),
                 "share_date": latest_date.isoformat(),
                 "issued_shares": issued,
                 "treasury_shares": treasury,
@@ -4754,16 +4755,6 @@ def _int_or_none(value: Any) -> int | None:
         return int(float(str(value).replace(",", "").strip()))
     except ValueError:
         return None
-
-
-def _share_class_from_stock_kind(stock_kind: str | None) -> str | None:
-    if not stock_kind:
-        return None
-    if "보통" in stock_kind or "의결권 있는" in stock_kind:
-        return "common"
-    if "우선" in stock_kind or "종류" in stock_kind or "의결권 없는" in stock_kind:
-        return "preferred"
-    return None
 
 
 def _query_macro_table(
