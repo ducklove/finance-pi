@@ -24,10 +24,60 @@ from urllib.parse import parse_qs, quote, urlparse
 import duckdb
 import polars as pl
 
+from finance_pi.admin.api_docs import build_api_docs_payload
 from finance_pi.config import ProjectPaths, load_dotenv
 from finance_pi.docs_site import build_docs_site
+from finance_pi.sources.cnbc import (
+    CNBC_COMMODITY_SERIES,
+    CNBC_DERIVED_FX_SERIES,
+    CNBC_FX_SERIES,
+    CNBC_INDEX_SERIES,
+    CNBC_RATE_SERIES,
+)
+from finance_pi.sources.cnbc import (
+    cnbc_commodity_rows as _cnbc_commodity_rows,
+)
+from finance_pi.sources.cnbc import (
+    cnbc_derived_fx_rows as _cnbc_derived_fx_rows,
+)
+from finance_pi.sources.cnbc import (
+    cnbc_fx_rows as _cnbc_fx_rows,
+)
+from finance_pi.sources.cnbc import (
+    cnbc_index_rows as _cnbc_index_rows,
+)
+from finance_pi.sources.cnbc import (
+    cnbc_rate_rows as _cnbc_rate_rows,
+)
+from finance_pi.sources.cnbc import (
+    fetch_cnbc_quotes as _fetch_cnbc_quotes,
+)
 from finance_pi.sources.parsing import share_class_from_stock_kind
 from finance_pi.storage import dataset_registry
+from finance_pi.util import (
+    backfill_marker_path as _backfill_marker_path,
+)
+from finance_pi.util import (
+    coerce_date_or_none as _coerce_date,
+)
+from finance_pi.util import (
+    duckdb_path as _duckdb_path,
+)
+from finance_pi.util import (
+    int_or_none as _int_or_none,
+)
+from finance_pi.util import (
+    iso_or_none as _iso_or_none,
+)
+from finance_pi.util import (
+    parse_iso_date as _parse_iso_date,
+)
+from finance_pi.util import (
+    read_backfill_marker_status as _read_backfill_marker_status,
+)
+from finance_pi.util import (
+    sql_placeholders as _sql_placeholders,
+)
 
 DEFAULT_MAX_REQUEST_THREADS = 16
 DEFAULT_MAX_ADMIN_JOBS = 1
@@ -188,966 +238,10 @@ DEFAULT_DAILY_PRICE_FIELDS = (
     "trading_value",
 )
 
-INDEX_HTML = """<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>finance-pi Admin</title>
-  <link rel="stylesheet" href="/assets/admin.css">
-</head>
-<body>
-  <div class="shell">
-    <aside class="rail">
-      <div class="brand">
-        <span class="brand-mark">fp</span>
-        <div>
-          <strong>finance-pi</strong>
-          <span>Admin</span>
-        </div>
-      </div>
-      <nav>
-        <a href="#overview" class="active">Overview</a>
-        <a href="#datasets">Datasets</a>
-        <a href="#backfill">Backfill</a>
-        <a href="#jobs">Jobs</a>
-        <a href="#docs">Docs</a>
-        <a href="#research">Research</a>
-      </nav>
-      <div class="rail-foot">
-        <span id="server-clock">--</span>
-      </div>
-    </aside>
-
-    <main>
-      <header class="topbar">
-        <div>
-          <p class="eyebrow">Local Operations</p>
-          <h1>finance-pi Admin</h1>
-        </div>
-        <div class="top-actions">
-          <button class="icon-button" id="refresh-button" title="Refresh">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 0 0-14.7-4.4L3 9m0 0V3m0 6h6M4 13a8 8 0 0 0 14.7 4.4L21 15m0 0v6m0-6h-6"/></svg>
-          </button>
-        </div>
-      </header>
-
-      <section class="status-grid" id="overview">
-        <article class="metric">
-          <span>Catalog</span>
-          <strong id="catalog-status">--</strong>
-          <small id="catalog-path">--</small>
-        </article>
-        <article class="metric">
-          <span>Datasets</span>
-          <strong id="dataset-count">--</strong>
-          <small id="dataset-files">--</small>
-        </article>
-        <article class="metric">
-          <span>Price Coverage</span>
-          <strong id="coverage-start">--</strong>
-          <small id="coverage-end">--</small>
-        </article>
-        <article class="metric">
-          <span>Active Jobs</span>
-          <strong id="active-jobs">--</strong>
-          <small id="last-refresh">--</small>
-        </article>
-      </section>
-
-      <section class="command-band" aria-label="Commands">
-        <button data-action="build_all">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19h16M4 15h10M4 11h16M4 7h10"/></svg>
-          Build All
-        </button>
-        <button data-action="catalog_build">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v14H4zM8 5v14M4 10h16"/></svg>
-          Catalog
-        </button>
-        <button data-action="daily_no_ingest">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h14v14H5zM8 9h8M8 13h5"/></svg>
-          Daily Dry
-        </button>
-        <button data-action="daily">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
-          Daily Live
-        </button>
-        <button data-action="reports">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 19V5h14v14zM8 15h8M8 11h8M8 7h4"/></svg>
-          Reports
-        </button>
-        <button data-action="docs_build">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h10l4 4v12H5zM14 4v5h5M8 13h8M8 17h6"/></svg>
-          Docs
-        </button>
-      </section>
-
-      <section class="panel" id="backfill">
-        <div class="panel-head">
-          <div>
-            <p class="eyebrow">Historical Data</p>
-            <h2>Yearly Backfill</h2>
-          </div>
-          <span class="pill" id="backfill-summary">--</span>
-        </div>
-        <form id="backfill-form" class="backfill-form">
-          <label>Start Year<input name="start_year" type="number" min="1900" max="2100" value="2023"></label>
-          <label>End Year<input name="end_year" type="number" min="1900" max="2100" value="1990"></label>
-          <label>Chunks<input name="max_years" type="number" min="0" max="50" value="1"></label>
-          <label class="check"><input name="include_prices" type="checkbox" checked disabled> Naver prices</label>
-          <label class="check"><input name="include_financials" type="checkbox" checked> DART financials</label>
-          <label class="check"><input name="include_builds" type="checkbox" checked disabled> Silver/Gold builds</label>
-          <label class="check"><input name="include_fundamentals_pit" type="checkbox"> Fundamentals PIT</label>
-          <label class="check"><input name="no_strict" type="checkbox" checked> Continue on source errors</label>
-          <label class="check"><input name="force" type="checkbox"> Force completed years</label>
-          <button type="submit">Run Next</button>
-          <button type="button" id="backfill-dry-run">Dry Run</button>
-        </form>
-        <div class="table-wrap backfill-status">
-          <table>
-            <thead>
-              <tr>
-                <th>Year</th>
-                <th>Status</th>
-                <th>Price Days</th>
-                <th>Rows</th>
-                <th>Coverage</th>
-                <th>Marker</th>
-              </tr>
-            </thead>
-            <tbody id="backfill-body"></tbody>
-          </table>
-        </div>
-      </section>
-
-      <section class="split">
-        <div class="panel" id="datasets">
-          <div class="panel-head">
-          <div>
-            <p class="eyebrow">Lakehouse</p>
-            <h2>Dataset Health</h2>
-          </div>
-          <div class="panel-tools">
-            <input class="filter-input" id="dataset-filter" type="search" placeholder="Filter datasets" aria-label="Filter datasets">
-            <span class="pill" id="data-root">--</span>
-          </div>
-        </div>
-          <div class="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Dataset</th>
-                  <th>Layer</th>
-                  <th>Rows</th>
-                  <th>Files</th>
-                  <th>Coverage</th>
-                  <th>Size</th>
-                  <th>Status</th>
-                </tr>
-              </thead>
-              <tbody id="dataset-body"></tbody>
-            </table>
-          </div>
-        </div>
-
-        <div class="stack">
-          <section class="panel" id="jobs">
-            <div class="panel-head">
-              <div>
-                <p class="eyebrow">Queue</p>
-                <h2>Jobs</h2>
-              </div>
-              <span class="pill" id="job-count">--</span>
-            </div>
-            <div id="jobs-list" class="jobs-list"></div>
-          </section>
-
-          <section class="panel" id="research">
-            <div class="panel-head">
-              <div>
-                <p class="eyebrow">Research</p>
-                <h2>Backtest</h2>
-              </div>
-            </div>
-            <form id="backtest-form" class="backtest-form">
-              <label>Factor<select name="factor">
-                <option value="momentum_12_1">momentum_12_1</option>
-                <option value="value_earnings_yield">value_earnings_yield</option>
-                <option value="quality_roa">quality_roa</option>
-              </select></label>
-              <label>Start<input name="start" type="date" value="2024-01-01"></label>
-              <label>End<input name="end" type="date"></label>
-              <label>Top<input name="top_fraction" type="number" step="0.01" min="0.01" max="1" value="0.10"></label>
-              <button type="submit">Run</button>
-            </form>
-            <div id="backtests-list" class="run-list"></div>
-          </section>
-        </div>
-      </section>
-
-      <section class="panel">
-        <div class="panel-head">
-          <div>
-            <p class="eyebrow">Reports</p>
-            <h2>Latest Artifacts</h2>
-          </div>
-        </div>
-        <div id="reports-list" class="artifact-grid"></div>
-      </section>
-
-      <section class="panel" id="docs">
-        <div class="panel-head">
-          <div>
-            <p class="eyebrow">Published</p>
-            <h2>Documentation</h2>
-          </div>
-          <a class="pill" id="docs-open" href="/docs/" target="_blank" rel="noreferrer">Open docs</a>
-        </div>
-        <div id="docs-list" class="artifact-grid"></div>
-      </section>
-    </main>
-  </div>
-
-  <dialog id="log-dialog">
-    <div class="dialog-head">
-      <strong id="log-title">Job Log</strong>
-      <button class="icon-button" id="close-log" title="Close">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
-      </button>
-    </div>
-    <pre id="job-log"></pre>
-  </dialog>
-  <div class="toast" id="toast" role="status" aria-live="polite"></div>
-
-  <script src="/assets/admin.js"></script>
-</body>
-</html>
-"""
-
-ADMIN_CSS = """
-:root {
-  color-scheme: light;
-  --bg: #f4f6f8;
-  --panel: #ffffff;
-  --panel-soft: #f9fafb;
-  --ink: #111827;
-  --muted: #667085;
-  --line: #d9dee7;
-  --line-soft: #edf0f5;
-  --rail: #151a22;
-  --rail-soft: #202733;
-  --blue: #2563eb;
-  --green: #0f766e;
-  --amber: #b45309;
-  --red: #b42318;
-  --violet: #6d28d9;
-  --shadow: 0 16px 40px rgba(17, 24, 39, 0.08);
-  --focus: 0 0 0 3px rgba(37, 99, 235, 0.18);
-}
-
-* { box-sizing: border-box; }
-html { scroll-behavior: smooth; }
-body {
-  margin: 0;
-  min-height: 100vh;
-  background:
-    linear-gradient(180deg, rgba(255,255,255,.88), rgba(244,246,248,.94) 260px),
-    var(--bg);
-  color: var(--ink);
-  font: 14px/1.45 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-}
-button, input, select { font: inherit; }
-button, a, input, select { outline-color: transparent; }
-button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible { box-shadow: var(--focus); }
-.shell { display: grid; grid-template-columns: 244px minmax(0, 1fr); min-height: 100vh; }
-.rail {
-  position: sticky;
-  top: 0;
-  height: 100vh;
-  padding: 22px 16px;
-  background: var(--rail);
-  color: white;
-  display: flex;
-  flex-direction: column;
-  gap: 26px;
-}
-.brand { display: flex; align-items: center; gap: 12px; padding: 0 6px; }
-.brand-mark {
-  width: 42px;
-  height: 42px;
-  border-radius: 8px;
-  display: grid;
-  place-items: center;
-  color: white;
-  background: linear-gradient(135deg, #0f766e, #2563eb);
-  font-weight: 800;
-  letter-spacing: 0;
-  box-shadow: 0 10px 22px rgba(15, 118, 110, .28);
-}
-.brand strong, .brand span { display: block; }
-.brand strong { font-size: 15px; }
-.brand span { color: #aab3c2; font-size: 12px; }
-nav { display: grid; gap: 5px; }
-nav a {
-  color: #d8dee8;
-  text-decoration: none;
-  padding: 10px 11px;
-  border-radius: 7px;
-  border: 1px solid transparent;
-  display: flex;
-  align-items: center;
-  min-height: 40px;
-}
-nav a.active, nav a:hover {
-  color: white;
-  background: var(--rail-soft);
-  border-color: rgba(255,255,255,.08);
-}
-.rail-foot {
-  margin-top: auto;
-  padding: 10px 11px;
-  border: 1px solid rgba(255,255,255,.08);
-  border-radius: 8px;
-  color: #aab3c2;
-  background: rgba(255,255,255,.04);
-  font-size: 12px;
-}
-main {
-  padding: 26px;
-  display: grid;
-  gap: 18px;
-  min-width: 0;
-  max-width: 1680px;
-  width: 100%;
-}
-.topbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-}
-.eyebrow {
-  margin: 0 0 4px;
-  color: var(--muted);
-  font-size: 11px;
-  font-weight: 800;
-  text-transform: uppercase;
-  letter-spacing: .08em;
-}
-h1, h2 { margin: 0; letter-spacing: 0; }
-h1 { font-size: clamp(25px, 3vw, 34px); line-height: 1.1; }
-h2 { font-size: 18px; line-height: 1.22; }
-.top-actions { display: flex; gap: 8px; align-items: center; }
-.icon-button {
-  width: 40px;
-  height: 40px;
-  border-radius: 8px;
-  border: 1px solid var(--line);
-  background: var(--panel);
-  color: #344054;
-  display: grid;
-  place-items: center;
-  cursor: pointer;
-  transition: border-color .16s ease, transform .16s ease, background .16s ease;
-}
-.icon-button:hover { border-color: #b6c0cf; transform: translateY(-1px); }
-svg {
-  width: 18px;
-  height: 18px;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 2;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-  flex: 0 0 auto;
-}
-.status-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
-.metric, .panel {
-  background: rgba(255,255,255,.94);
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  box-shadow: var(--shadow);
-}
-.metric {
-  padding: 15px;
-  display: grid;
-  gap: 4px;
-  min-width: 0;
-  position: relative;
-  overflow: hidden;
-}
-.metric::before {
-  content: "";
-  position: absolute;
-  inset: 0 auto 0 0;
-  width: 3px;
-  background: var(--blue);
-}
-.metric:nth-child(2)::before { background: var(--green); }
-.metric:nth-child(3)::before { background: var(--violet); }
-.metric:nth-child(4)::before { background: var(--amber); }
-.metric span { color: var(--muted); font-size: 12px; font-weight: 700; }
-.metric strong { font-size: 25px; line-height: 1.1; }
-.metric small { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.command-band {
-  display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
-  gap: 10px;
-}
-.command-band button, .backtest-form button, .backfill-form button {
-  min-height: 42px;
-  border: 1px solid #c8d0dc;
-  background: var(--panel);
-  color: #1f2937;
-  border-radius: 8px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  cursor: pointer;
-  font-weight: 800;
-  transition: transform .16s ease, border-color .16s ease, background .16s ease, color .16s ease;
-}
-.command-band button:hover, .backtest-form button:hover, .backfill-form button:hover {
-  transform: translateY(-1px);
-  border-color: #9aa6b8;
-  background: #f8fafc;
-}
-.command-band button:first-child {
-  background: #111827;
-  border-color: #111827;
-  color: white;
-}
-.command-band button:nth-child(4) {
-  background: var(--green);
-  border-color: var(--green);
-  color: white;
-}
-.command-band button.is-busy, .backfill-form button.is-busy {
-  opacity: .72;
-  cursor: progress;
-  transform: none;
-}
-.split {
-  display: grid;
-  grid-template-columns: minmax(0, 1.7fr) minmax(340px, .82fr);
-  gap: 18px;
-  align-items: start;
-}
-.stack { display: grid; gap: 18px; }
-.panel { padding: 16px; min-width: 0; }
-.panel-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: start;
-  gap: 12px;
-  margin-bottom: 14px;
-}
-.panel-tools { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.filter-input {
-  width: min(250px, 42vw);
-  height: 34px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 0 10px;
-  background: var(--panel-soft);
-  color: var(--ink);
-}
-.pill {
-  max-width: 300px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  padding: 5px 9px;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  color: #475467;
-  background: var(--panel-soft);
-  font-size: 12px;
-  text-decoration: none;
-}
-a.pill:hover { border-color: #b6c0cf; color: var(--blue); }
-.table-wrap {
-  overflow: auto;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: white;
-}
-table { width: 100%; border-collapse: collapse; min-width: 800px; }
-th, td {
-  padding: 11px 12px;
-  border-bottom: 1px solid var(--line-soft);
-  text-align: left;
-  white-space: nowrap;
-}
-th {
-  font-size: 11px;
-  color: #667085;
-  background: #f8fafc;
-  position: sticky;
-  top: 0;
-  z-index: 1;
-  text-transform: uppercase;
-  letter-spacing: .04em;
-}
-tbody tr:hover { background: #f9fbff; }
-tr:last-child td { border-bottom: 0; }
-.status {
-  display: inline-flex;
-  align-items: center;
-  min-height: 24px;
-  padding: 2px 8px;
-  border-radius: 999px;
-  font-size: 12px;
-  font-weight: 800;
-  border: 1px solid transparent;
-}
-.status.ready, .status.done {
-  color: #0f766e;
-  background: #ecfdf3;
-  border-color: #b7e4d1;
-}
-.status.empty, .status.running {
-  color: #b45309;
-  background: #fff7ed;
-  border-color: #fed7aa;
-}
-.status.failed {
-  color: var(--red);
-  background: #fef3f2;
-  border-color: #fecaca;
-}
-.bar {
-  height: 5px;
-  background: #edf0f5;
-  border-radius: 999px;
-  overflow: hidden;
-  margin-top: 6px;
-  width: min(170px, 100%);
-}
-.bar span { display: block; height: 100%; background: linear-gradient(90deg, var(--blue), var(--green)); min-width: 2px; }
-.jobs-list, .run-list { display: grid; gap: 8px; }
-.job, .artifact {
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 10px;
-  display: grid;
-  gap: 6px;
-  background: #ffffff;
-}
-.job:hover, .artifact:hover { border-color: #b9c3d0; }
-.job-row { display: flex; justify-content: space-between; gap: 10px; align-items: center; min-width: 0; }
-.job-row small { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.job button {
-  border: 1px solid var(--line);
-  background: #f8fafc;
-  border-radius: 7px;
-  padding: 6px 9px;
-  cursor: pointer;
-  color: #344054;
-}
-.job button:hover { border-color: #b6c0cf; color: var(--blue); }
-.backtest-form {
-  display: grid;
-  grid-template-columns: 1.2fr 1fr 1fr .7fr auto;
-  gap: 8px;
-  align-items: end;
-}
-.stack .backtest-form { grid-template-columns: 1fr 1fr; }
-.stack .backtest-form label:first-child { grid-column: 1 / -1; }
-.stack .backtest-form button { grid-column: 1 / -1; }
-.backtest-form label { display: grid; gap: 5px; color: var(--muted); font-size: 12px; font-weight: 700; }
-.backtest-form input, .backtest-form select {
-  height: 38px;
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  padding: 0 9px;
-  background: white;
-  color: var(--ink);
-}
-.backtest-form button {
-  background: var(--blue);
-  border-color: var(--blue);
-  color: white;
-  padding: 0 14px;
-}
-.backfill-form {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(130px, 1fr)) repeat(2, minmax(160px, 1fr));
-  gap: 10px;
-  align-items: end;
-  margin-bottom: 14px;
-}
-.backfill-form label {
-  display: grid;
-  gap: 5px;
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 700;
-}
-.backfill-form input[type="number"] {
-  height: 38px;
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  padding: 0 9px;
-  background: white;
-  color: var(--ink);
-}
-.backfill-form .check {
-  min-height: 38px;
-  grid-template-columns: 18px minmax(0, 1fr);
-  align-items: center;
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  padding: 8px 10px;
-  background: #f8fafc;
-  color: #344054;
-}
-.backfill-form input[type="checkbox"] { width: 16px; height: 16px; margin: 0; }
-.backfill-form button {
-  background: var(--blue);
-  border-color: var(--blue);
-  color: white;
-  padding: 0 14px;
-}
-.backfill-form button[type="button"] {
-  background: #ffffff;
-  border-color: #c8d0dc;
-  color: #1f2937;
-}
-.backfill-status table { min-width: 720px; }
-.artifact-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
-.artifact a {
-  color: #1d4ed8;
-  font-weight: 800;
-  text-decoration: none;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.artifact a:hover { text-decoration: underline; }
-.artifact span, .job small { color: var(--muted); font-size: 12px; }
-.toast {
-  position: fixed;
-  right: 18px;
-  bottom: 18px;
-  z-index: 10;
-  max-width: min(420px, calc(100vw - 32px));
-  padding: 12px 14px;
-  border-radius: 8px;
-  border: 1px solid var(--line);
-  background: #111827;
-  color: white;
-  box-shadow: var(--shadow);
-  opacity: 0;
-  transform: translateY(8px);
-  pointer-events: none;
-  transition: opacity .16s ease, transform .16s ease;
-}
-.toast.show { opacity: 1; transform: translateY(0); }
-dialog {
-  width: min(920px, calc(100vw - 32px));
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 0;
-  box-shadow: 0 28px 80px rgba(17,24,39,.22);
-}
-dialog::backdrop { background: rgba(17,24,39,.34); }
-.dialog-head { display: flex; justify-content: space-between; align-items: center; padding: 12px 14px; border-bottom: 1px solid var(--line); }
-pre { margin: 0; padding: 14px; max-height: 65vh; overflow: auto; background: #0f172a; color: #e5e7eb; font-size: 12px; }
-@media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; }
-}
-@media (max-width: 1120px) {
-  .status-grid, .artifact-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .command-band { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-  .backfill-form { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .split { grid-template-columns: 1fr; }
-}
-@media (max-width: 760px) {
-  .shell { grid-template-columns: 1fr; }
-  .rail {
-    position: static;
-    height: auto;
-    flex-direction: row;
-    align-items: center;
-    overflow-x: auto;
-    gap: 14px;
-    padding: 14px;
-  }
-  .brand { min-width: 172px; }
-  nav { display: flex; }
-  nav a { white-space: nowrap; }
-  .rail-foot { display: none; }
-  main { padding: 16px; }
-  .topbar { align-items: flex-start; }
-  .status-grid, .command-band, .artifact-grid { grid-template-columns: 1fr; }
-  .panel-head { flex-direction: column; }
-  .panel-tools, .filter-input { width: 100%; }
-  .backtest-form, .backfill-form { grid-template-columns: 1fr; }
-}
-"""
-
-ADMIN_JS = """
-const state = { overview: null, selectedJob: null, datasetFilter: '' };
-const fmt = new Intl.NumberFormat();
-
-function qs(id) { return document.getElementById(id); }
-function html(value) {
-  return String(value ?? '').replace(/[&<>"']/g, char => ({
-    '&': '&amp;',
-    '<': '&lt;',
-    '>': '&gt;',
-    '"': '&quot;',
-    "'": '&#39;',
-  })[char]);
-}
-function shortDate(value) { return value ? String(value).replace('T', ' ').slice(0, 19) : '--'; }
-function bytes(value) {
-  if (!value) return '0 B';
-  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-  let size = value; let idx = 0;
-  while (size >= 1024 && idx < units.length - 1) { size /= 1024; idx++; }
-  return `${size.toFixed(idx ? 1 : 0)} ${units[idx]}`;
-}
-
-async function api(path, options = {}) {
-  const token = adminToken();
-  const headers = { 'Content-Type': 'application/json' };
-  if (token) headers['X-Admin-Token'] = token;
-  const response = await fetch(path, {
-    headers,
-    ...options,
-  });
-  if (!response.ok) throw new Error(await response.text());
-  return response.json();
-}
-
-function adminToken() {
-  const params = new URLSearchParams(window.location.search);
-  const token = params.get('token');
-  if (token) {
-    localStorage.setItem('financePiAdminToken', token);
-    window.history.replaceState({}, document.title, window.location.pathname);
-    return token;
-  }
-  return localStorage.getItem('financePiAdminToken') || '';
-}
-
-async function refresh() {
-  const overview = await api('/api/overview');
-  state.overview = overview;
-  renderOverview(overview);
-}
-
-function renderOverview(data) {
-  qs('server-clock').textContent = shortDate(data.generated_at);
-  qs('catalog-status').textContent = data.catalog.exists ? 'Ready' : 'Missing';
-  qs('catalog-path').textContent = data.catalog.path;
-  qs('dataset-count').textContent = `${data.datasets.filter(d => d.files > 0).length}/${data.datasets.length}`;
-  qs('dataset-files').textContent = `${fmt.format(data.datasets.reduce((n, d) => n + d.files, 0))} files`;
-  qs('coverage-start').textContent = data.price_coverage.start || '--';
-  qs('coverage-end').textContent = data.price_coverage.end
-    ? `to ${data.price_coverage.end}`
-    : 'no price data yet';
-  qs('active-jobs').textContent = data.jobs.filter(j => j.status === 'running').length;
-  qs('last-refresh').textContent = shortDate(data.generated_at);
-  qs('data-root').textContent = data.data_root;
-  renderDatasets(data.datasets);
-  renderJobs(data.jobs);
-  renderReports(data.reports);
-  renderDocs(data.docs);
-  renderBacktests(data.backtests);
-  renderBackfill(data.backfill);
-  const maxDate = data.max_price_date || new Date().toISOString().slice(0, 10);
-  document.querySelector('#backtest-form [name=end]').value = maxDate;
-}
-
-function renderDatasets(datasets) {
-  const maxRows = Math.max(...datasets.map(d => d.rows || 0), 1);
-  const needle = state.datasetFilter.trim().toLowerCase();
-  const visible = needle
-    ? datasets.filter(d => `${d.name} ${d.layer} ${d.latest_partition || ''}`.toLowerCase().includes(needle))
-    : datasets;
-  if (!visible.length) {
-    qs('dataset-body').innerHTML = '<tr><td colspan="7">No matching datasets</td></tr>';
-    return;
-  }
-  qs('dataset-body').innerHTML = visible.map(d => `
-    <tr>
-      <td><strong>${html(d.name)}</strong>${rowBar(d.rows, maxRows)}</td>
-      <td>${html(d.layer)}</td>
-      <td>${d.rows == null ? '--' : fmt.format(d.rows)}</td>
-      <td>${fmt.format(d.files)}</td>
-      <td>${html(coverageLabel(d))}</td>
-      <td>${bytes(d.bytes)}</td>
-      <td><span class="status ${html(d.status)}">${html(d.status)}</span></td>
-    </tr>`).join('');
-}
-
-function rowBar(rows, maxRows) {
-  if (rows == null) return '';
-  return `<div class="bar"><span style="width:${Math.max(2, (rows || 0) / maxRows * 100)}%"></span></div>`;
-}
-
-function coverageLabel(dataset) {
-  if (!dataset.coverage_start) return '--';
-  if (dataset.coverage_start === dataset.coverage_end) return dataset.coverage_start;
-  return `${dataset.coverage_start} - ${dataset.coverage_end}`;
-}
-
-function renderJobs(jobs) {
-  qs('job-count').textContent = `${jobs.length}`;
-  qs('jobs-list').innerHTML = jobs.length ? jobs.map(job => `
-    <div class="job">
-      <div class="job-row">
-        <strong>${html(job.label)}</strong>
-        <span class="status ${html(job.status)}">${html(job.status)}</span>
-      </div>
-      <small>${shortDate(job.started_at)}${job.ended_at ? ' - ' + shortDate(job.ended_at) : ''}</small>
-      <div class="job-row">
-        <small>${html(job.command)}</small>
-        <button data-log="${html(job.id)}">Log</button>
-      </div>
-    </div>`).join('') : '<div class="artifact"><span>No jobs yet</span></div>';
-  document.querySelectorAll('[data-log]').forEach(button => button.addEventListener('click', () => openLog(button.dataset.log)));
-}
-
-function renderReports(reports) {
-  qs('reports-list').innerHTML = reports.length ? reports.map(report => `
-    <div class="artifact">
-      <a href="${html(withTokenUrl(report.url))}" target="_blank" rel="noreferrer">${html(report.name)}</a>
-      <span>${html(report.kind)}</span>
-      <span>${shortDate(report.modified_at)}</span>
-    </div>`).join('') : '<div class="artifact"><span>No reports yet</span></div>';
-}
-
-function renderDocs(docs) {
-  qs('docs-list').innerHTML = docs.length ? docs.map(doc => `
-    <div class="artifact">
-      <a href="${html(doc.url)}" target="_blank" rel="noreferrer">${html(doc.title)}</a>
-      <span>${html(doc.source)}</span>
-      <span>${shortDate(doc.modified_at)}</span>
-    </div>`).join('') : '<div class="artifact"><span>No published docs yet</span></div>';
-}
-
-function renderBacktests(runs) {
-  qs('backtests-list').innerHTML = runs.length ? runs.map(run => `
-    <div class="artifact">
-      <a href="${html(withTokenUrl(run.url))}" target="_blank" rel="noreferrer">${html(run.name)}</a>
-      <span>${run.nav_rows} nav rows${run.final_nav ? ' / NAV ' + run.final_nav.toFixed(4) : ''}</span>
-    </div>`).join('') : '<div class="artifact"><span>No backtests yet</span></div>';
-}
-
-function renderBackfill(backfill) {
-  const items = (backfill && backfill.years) || [];
-  const complete = items.filter(item => String(item.status || '').startsWith('complete')).length;
-  qs('backfill-summary').textContent = items.length ? `${complete}/${items.length} years complete` : 'no status';
-  qs('backfill-body').innerHTML = items.length ? items.map(item => `
-    <tr>
-      <td><strong>${html(item.year)}</strong></td>
-      <td><span class="status ${statusClass(item.status)}">${html(item.status)}</span></td>
-      <td>${fmt.format(item.price_days || 0)}</td>
-      <td>${item.rows == null ? '--' : fmt.format(item.rows)}</td>
-      <td>${html(item.coverage || '--')}</td>
-      <td>${html(item.marker || '-')}</td>
-    </tr>`).join('') : '<tr><td colspan="6">No backfill status yet</td></tr>';
-}
-
-function statusClass(status) {
-  const text = String(status || '');
-  if (text === 'complete') return 'ready';
-  if (text === 'complete_with_failures') return 'running';
-  if (text === 'partial') return 'running';
-  if (text === 'missing') return 'empty';
-  return text || 'empty';
-}
-
-function withTokenUrl(url) {
-  if (!url || url === '#') return '#';
-  const token = adminToken();
-  if (!token) return url;
-  const separator = url.includes('?') ? '&' : '?';
-  return `${url}${separator}token=${encodeURIComponent(token)}`;
-}
-
-function showToast(message) {
-  const toast = qs('toast');
-  toast.textContent = message;
-  toast.classList.add('show');
-  clearTimeout(showToast.timer);
-  showToast.timer = setTimeout(() => toast.classList.remove('show'), 2800);
-}
-
-async function startAction(action, payload = {}, sourceButton = null) {
-  if (sourceButton) {
-    sourceButton.disabled = true;
-    sourceButton.classList.add('is-busy');
-  }
-  try {
-    const job = await api('/api/jobs', { method: 'POST', body: JSON.stringify({ action, ...payload }) });
-    showToast(`${job.label} queued`);
-    await refresh();
-  } catch (error) {
-    showToast(error.message || 'Action failed');
-  } finally {
-    if (sourceButton) {
-      sourceButton.disabled = false;
-      sourceButton.classList.remove('is-busy');
-    }
-  }
-}
-
-async function openLog(id) {
-  const data = await api(`/api/jobs/${id}/log`);
-  qs('log-title').textContent = data.label;
-  qs('job-log').textContent = data.log || '(empty)';
-  qs('log-dialog').showModal();
-}
-
-document.querySelectorAll('[data-action]').forEach(button => {
-  button.addEventListener('click', () => startAction(button.dataset.action, {}, button));
-});
-document.querySelectorAll('nav a').forEach(link => {
-  link.addEventListener('click', () => {
-    document.querySelectorAll('nav a').forEach(item => item.classList.remove('active'));
-    link.classList.add('active');
-  });
-});
-qs('dataset-filter').addEventListener('input', event => {
-  state.datasetFilter = event.currentTarget.value;
-  if (state.overview) renderDatasets(state.overview.datasets);
-});
-qs('refresh-button').addEventListener('click', refresh);
-qs('close-log').addEventListener('click', () => qs('log-dialog').close());
-qs('backtest-form').addEventListener('submit', event => {
-  event.preventDefault();
-  const form = new FormData(event.currentTarget);
-  startAction('backtest', Object.fromEntries(form.entries()), event.currentTarget.querySelector('button'));
-});
-qs('backfill-form').addEventListener('submit', event => {
-  event.preventDefault();
-  startAction('backfill_yearly', backfillPayload(event.currentTarget, false), event.currentTarget.querySelector('button[type=submit]'));
-});
-qs('backfill-dry-run').addEventListener('click', event => {
-  startAction('backfill_yearly', backfillPayload(qs('backfill-form'), true), event.currentTarget);
-});
-
-function backfillPayload(form, dryRun) {
-  return {
-    start_year: form.elements.start_year.value,
-    end_year: form.elements.end_year.value,
-    max_years: form.elements.max_years.value,
-    include_financials: form.elements.include_financials.checked,
-    include_fundamentals_pit: form.elements.include_fundamentals_pit.checked,
-    no_strict: form.elements.no_strict.checked,
-    force: form.elements.force.checked,
-    dry_run: dryRun,
-  };
-}
-refresh();
-setInterval(refresh, 30000);
-"""
+ASSETS_DIR = Path(__file__).parent / "assets"
+INDEX_HTML = (ASSETS_DIR / "index.html").read_text(encoding="utf-8")
+ADMIN_CSS = (ASSETS_DIR / "admin.css").read_text(encoding="utf-8")
+ADMIN_JS = (ASSETS_DIR / "admin.js").read_text(encoding="utf-8")
 
 
 @dataclass
@@ -2082,307 +1176,22 @@ def _health_payload(state: AdminState) -> dict[str, Any]:
 
 
 def _api_docs_payload(state: AdminState) -> dict[str, Any]:
-    base_url = "/api"
-    # Unauthenticated endpoint: no absolute filesystem paths in the response.
-    return {
-        "service": "finance-pi admin API",
-        "generated_at": datetime.now(UTC).isoformat(),
-        "workspace": state.paths.root.resolve().name,
-        "auth": {
-            "local_network": "LAN clients are allowed without a token",
-            "token": "Use X-Admin-Token or token query parameter outside local networks",
-        },
-        "limits": {
-            "max_request_threads": _admin_max_request_threads(),
-            "max_admin_jobs": _admin_max_jobs(),
-            "max_price_queries": _admin_max_price_queries(),
-            "price_query_wait_seconds": _admin_price_query_wait_seconds(),
-            "max_price_tickers": _admin_max_price_tickers(),
-            "max_price_days": _admin_max_price_days(),
-            "max_price_cells": MAX_PRICE_CELLS,
-        },
-        "endpoints": {
-            "health": {
-                "method": "GET",
-                "path": f"{base_url}/health",
-                "description": "Lightweight service health check.",
-            },
-            "close_prices": {
-                "method": "GET",
-                "path": f"{base_url}/prices/close",
-                "description": (
-                    "Adjusted close prices. Supports one ticker or batched tickers. "
-                    f"tickers x days must not exceed {MAX_PRICE_CELLS}."
-                ),
-                "query": {
-                    "ticker": "Single ticker, e.g. 005930 or 5930.",
-                    "tickers": "Comma-separated tickers, e.g. 005930,000660.",
-                    "since": "YYYY-MM-DD inclusive.",
-                    "until": "YYYY-MM-DD inclusive.",
-                },
-                "examples": [
-                    f"{base_url}/prices/close?ticker=005930&since=2026-04-29&until=2026-04-30",
-                    f"{base_url}/prices/close?tickers=005930,000660&since=2026-04-29&until=2026-04-30",
-                ],
-            },
-            "daily_prices": {
-                "method": "GET",
-                "path": f"{base_url}/prices/daily",
-                "description": (
-                    "Daily adjusted OHLCV rows with optional market fields. "
-                    f"tickers x days must not exceed {MAX_PRICE_CELLS}."
-                ),
-                "query": {
-                    "ticker": "Single ticker, e.g. 005930 or 5930.",
-                    "tickers": "Comma-separated tickers, e.g. 005930,000660.",
-                    "since": "YYYY-MM-DD inclusive.",
-                    "until": "YYYY-MM-DD inclusive.",
-                    "fields": "Optional comma-separated subset. Defaults to open,high,low,close,volume,trading_value.",
-                },
-                "fields": {
-                    "default": list(DEFAULT_DAILY_PRICE_FIELDS),
-                    "available": list(DAILY_PRICE_FIELDS.keys()),
-                },
-                "examples": [
-                    f"{base_url}/prices/daily?tickers=005930,000660&since=2026-04-29&until=2026-04-30",
-                    f"{base_url}/prices/daily?ticker=005930&since=2026-04-29&until=2026-04-30&fields=close,volume",
-                ],
-            },
-            "quotes": {
-                "method": "GET",
-                "path": f"{base_url}/quotes",
-                "description": "Domestic and overseas quote snapshots. Korean numeric tickers use local Naver/gold data; other symbols use CNBC quotes.",
-                "query": {
-                    "symbol": "Single ticker/symbol, e.g. 005930 or AAPL.",
-                    "symbols": "Comma-separated tickers/symbols, e.g. 005930,AAPL,.SPX.",
-                },
-                "examples": [
-                    f"{base_url}/quotes?symbols=005930,000660",
-                    f"{base_url}/quotes?symbols=AAPL,MSFT,.SPX,US10Y",
-                ],
-            },
-            "security_search": {
-                "method": "GET",
-                "path": f"{base_url}/securities/search",
-                "description": "Batch search local Korean securities by ticker/name and validate overseas CNBC symbols.",
-                "query": {
-                    "q": "Search query. Can be repeated or comma-separated.",
-                    "queries": "Alternative comma-separated batch query parameter.",
-                    "limit": "Optional max results per query, 1..50. Defaults to 10.",
-                },
-                "examples": [
-                    f"{base_url}/securities/search?q=삼성전자&q=000660",
-                    f"{base_url}/securities/search?queries=AAPL,MSFT,.SPX&limit=5",
-                ],
-            },
-            "nps_universe": {
-                "method": "GET",
-                "path": f"{base_url}/universe/nps",
-                "description": "Point-in-time NPS holdings universe ranked by market value.",
-                "query": {
-                    "date": "Optional requested date as YYYY-MM-DD. Uses the latest NPS snapshot on or before this date.",
-                    "top": "Optional max rows, 1..1000. Defaults to 100.",
-                },
-                "examples": [
-                    f"{base_url}/universe/nps?date=2024-12-31&top=100",
-                    f"{base_url}/universe/nps?date=2026-04-30&top=50",
-                ],
-            },
-            "basic_fundamentals": {
-                "method": "GET",
-                "path": f"{base_url}/fundamentals/basic",
-                "description": "Latest available annual basic financial metrics by ticker, with per-share BPS/EPS values when DART share-denominator data is available.",
-                "query": {
-                    "ticker": "Single ticker, e.g. 005930 or 5930.",
-                    "tickers": "Comma-separated tickers, e.g. 005930,000660.",
-                    "as_of": "Optional YYYY-MM-DD point-in-time cutoff. Defaults to today.",
-                    "fiscal_year": "Optional fiscal year filter.",
-                },
-                "metrics": list(BASIC_FUNDAMENTAL_METRICS.keys()),
-                "per_share": {
-                    "object": "Returned per ticker as fundamentals.<ticker>.per_share when denominator data is available.",
-                    "fields": {
-                        "bps": "Latest balance-sheet equity divided by issuer-level DART outstanding shares when available.",
-                        "eps_annual": "Latest annual net income divided by issuer-level DART outstanding shares when available.",
-                        "eps_ttm": "Trailing-twelve-month net income divided by issuer-level DART outstanding shares when available. Annual latest rows equal eps_annual; interim latest rows use latest cumulative + prior annual - prior matching interim.",
-                        "eps_forward": "Forward EPS placeholder. value is null and available is false until a forward earnings estimate source is added.",
-                    },
-                    "denominator": {
-                        "share_basis": "dart_distributed_shares",
-                        "issuer_key": "corp_code",
-                        "preferred_shares": "Included by summing DART common/preferred rows for the same issuer.",
-                        "treasury_shares": "DART stock total quantity rows are preferred; when available, shares are distb_stock_co and treasury_shares_excluded is true.",
-                    },
-                },
-                "examples": [
-                    f"{base_url}/fundamentals/basic?tickers=005930,000660",
-                    f"{base_url}/fundamentals/basic?ticker=005930&as_of=2026-04-30&fiscal_year=2025",
-                ],
-            },
-            "capital_actions": {
-                "method": "GET",
-                "path": f"{base_url}/fundamentals/capital-actions",
-                "description": "Annual dividend and treasury-share related financial rows by ticker.",
-                "query": {
-                    "ticker": "Single ticker, e.g. 005930 or 5930.",
-                    "tickers": "Comma-separated tickers, e.g. 005930,000660.",
-                    "as_of": "Optional YYYY-MM-DD point-in-time cutoff. Defaults to today.",
-                    "start_year": "Optional first fiscal year.",
-                    "end_year": "Optional last fiscal year.",
-                },
-                "metrics": list(CAPITAL_ACTION_METRICS.keys()),
-                "examples": [
-                    f"{base_url}/fundamentals/capital-actions?tickers=005930,000660&start_year=2024&end_year=2025",
-                    f"{base_url}/fundamentals/capital-actions?ticker=005930&as_of=2026-04-30",
-                ],
-            },
-            "dividends": {
-                "method": "GET",
-                "path": f"{base_url}/fundamentals/dividends",
-                "description": "Per-share dividend rows by listed security, including common/preferred stock distinctions when OpenDART can map them unambiguously.",
-                "query": {
-                    "ticker": "Single ticker, e.g. 005930 or 005935.",
-                    "tickers": "Comma-separated tickers, e.g. 005930,005935.",
-                    "as_of": "Optional YYYY-MM-DD point-in-time cutoff. Defaults to today.",
-                    "start_year": "Optional first fiscal year.",
-                    "end_year": "Optional last fiscal year.",
-                },
-                "examples": [
-                    f"{base_url}/fundamentals/dividends?tickers=005930,005935&start_year=2022&end_year=2024",
-                    f"{base_url}/fundamentals/dividends?ticker=005935&as_of=2026-04-30",
-                ],
-            },
-            "cpi": {
-                "method": "GET",
-                "path": f"{base_url}/macro/cpi",
-                "description": "Consumer price index observations from macro.cpi.",
-                "query": {
-                    "since": "Optional YYYY-MM-DD inclusive.",
-                    "until": "Optional YYYY-MM-DD inclusive.",
-                    "country": "Optional country code, e.g. KR or US.",
-                    "series_id": "Optional CPI series id.",
-                },
-                "columns": list(MACRO_TABLE_COLUMNS["cpi"]),
-                "examples": [
-                    f"{base_url}/macro/cpi?country=KR&since=2024-01-01",
-                    f"{base_url}/macro/cpi?series_id=KOR_CPI_ALL&since=2024-01-01&until=2024-12-31",
-                ],
-            },
-            "rates": {
-                "method": "GET",
-                "path": f"{base_url}/macro/rates",
-                "description": "Interest-rate observations from macro.rates.",
-                "query": {
-                    "since": "Optional YYYY-MM-DD inclusive.",
-                    "until": "Optional YYYY-MM-DD inclusive.",
-                    "country": "Optional country code, e.g. KR or US.",
-                    "series_id": "Optional rate series id.",
-                },
-                "columns": list(MACRO_TABLE_COLUMNS["rates"]),
-                "examples": [
-                    f"{base_url}/macro/rates?country=KR&since=2024-01-01",
-                    f"{base_url}/macro/rates?series_id=KOR_BASE_RATE",
-                ],
-            },
-            "indices": {
-                "method": "GET",
-                "path": f"{base_url}/macro/indices",
-                "description": "Market and macro index observations from macro.indices.",
-                "query": {
-                    "since": "Optional YYYY-MM-DD inclusive.",
-                    "until": "Optional YYYY-MM-DD inclusive.",
-                    "country": "Optional country code, e.g. KR or US.",
-                    "series_id": "Optional index series id.",
-                },
-                "columns": list(MACRO_TABLE_COLUMNS["indices"]),
-                "examples": [
-                    f"{base_url}/macro/indices?country=KR&since=2024-01-01",
-                    f"{base_url}/macro/indices?series_id=KOSPI",
-                ],
-            },
-            "daily_indices": {
-                "method": "GET",
-                "path": f"{base_url}/daily-indices",
-                "description": "Alias for daily market index observations from macro.indices.",
-                "query": {
-                    "since": "Optional YYYY-MM-DD inclusive.",
-                    "until": "Optional YYYY-MM-DD inclusive.",
-                    "country": "Optional country code, e.g. JP or US.",
-                    "series_id": "Optional index series id, e.g. SP500, NASDAQ, DOW_JONES, NIKKEI_225, HANG_SENG, SSE_COMPOSITE.",
-                },
-                "columns": list(MACRO_TABLE_COLUMNS["indices"]),
-                "examples": [
-                    f"{base_url}/daily-indices?series_id=SP500&since=2024-01-01",
-                    f"{base_url}/daily-indices?country=JP&since=2024-01-01",
-                ],
-            },
-            "realtime_indicators": {
-                "method": "GET",
-                "path": f"{base_url}/realtime/indicators",
-                "description": "Live CNBC quote snapshots for configured indices, rates, commodities, and FX indicators. Responses are cached briefly in-process.",
-                "query": {
-                    "category": "Optional group: indices, rates, commodities, or fx.",
-                    "series_id": "Optional configured series id, e.g. SP500, USD_KRW, US_TREASURY_10Y.",
-                },
-                "examples": [
-                    f"{base_url}/realtime/indicators",
-                    f"{base_url}/realtime/indicators?category=indices",
-                    f"{base_url}/realtime/indicators?series_id=USD_KRW",
-                ],
-            },
-            "commodities": {
-                "method": "GET",
-                "path": f"{base_url}/macro/commodities",
-                "description": "Commodity observations such as gold and silver from macro.commodities.",
-                "query": {
-                    "since": "Optional YYYY-MM-DD inclusive.",
-                    "until": "Optional YYYY-MM-DD inclusive.",
-                    "series_id": "Optional commodity series id.",
-                    "commodity": "Optional commodity code, e.g. gold or silver.",
-                },
-                "columns": list(MACRO_TABLE_COLUMNS["commodities"]),
-                "examples": [
-                    f"{base_url}/macro/commodities?commodity=gold&since=2024-01-01",
-                    f"{base_url}/macro/commodities?series_id=GOLD_USD_OZ",
-                ],
-            },
-            "fx": {
-                "method": "GET",
-                "path": f"{base_url}/macro/fx",
-                "description": "Foreign-exchange observations from macro.fx.",
-                "query": {
-                    "since": "Optional YYYY-MM-DD inclusive.",
-                    "until": "Optional YYYY-MM-DD inclusive.",
-                    "series_id": "Optional FX series id.",
-                    "base_currency": "Optional base currency, e.g. USD.",
-                    "quote_currency": "Optional quote currency, e.g. KRW.",
-                },
-                "columns": list(MACRO_TABLE_COLUMNS["fx"]),
-                "examples": [
-                    f"{base_url}/macro/fx?base_currency=USD&quote_currency=KRW&since=2024-01-01",
-                    f"{base_url}/macro/fx?series_id=USD_KRW",
-                ],
-            },
-            "economic_indicators": {
-                "method": "GET",
-                "path": f"{base_url}/macro/economic-indicators",
-                "description": "General FRED macroeconomic observations from macro.economic_indicators.",
-                "query": {
-                    "since": "Optional YYYY-MM-DD inclusive.",
-                    "until": "Optional YYYY-MM-DD inclusive.",
-                    "country": "Optional country code, e.g. US.",
-                    "series_id": "Optional FRED series id, e.g. UNRATE or VIXCLS.",
-                    "category": "Optional category, e.g. labor, growth, risk, credit, inflation.",
-                    "frequency": "Optional frequency code, e.g. D, W, M, Q.",
-                },
-                "columns": list(MACRO_TABLE_COLUMNS["economic_indicators"]),
-                "examples": [
-                    f"{base_url}/macro/economic-indicators?category=labor&since=2024-01-01",
-                    f"{base_url}/macro/economic-indicators?series_id=VIXCLS&since=2024-01-01",
-                ],
-            },
-        },
-    }
+    return build_api_docs_payload(
+        generated_at=datetime.now(UTC).isoformat(),
+        workspace=state.paths.root.resolve().name,
+        max_request_threads=_admin_max_request_threads(),
+        max_admin_jobs=_admin_max_jobs(),
+        max_price_queries=_admin_max_price_queries(),
+        price_query_wait_seconds=_admin_price_query_wait_seconds(),
+        max_price_tickers=_admin_max_price_tickers(),
+        max_price_days=_admin_max_price_days(),
+        max_price_cells=MAX_PRICE_CELLS,
+        default_daily_price_fields=list(DEFAULT_DAILY_PRICE_FIELDS),
+        daily_price_fields=list(DAILY_PRICE_FIELDS.keys()),
+        basic_fundamental_metrics=list(BASIC_FUNDAMENTAL_METRICS.keys()),
+        capital_action_metrics=list(CAPITAL_ACTION_METRICS.keys()),
+        macro_table_columns={key: list(value) for key, value in MACRO_TABLE_COLUMNS.items()},
+    )
 
 
 def _admin_max_request_threads() -> int:
@@ -2673,16 +1482,6 @@ def _nps_universe_row_dict(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _coerce_date(value: Any) -> date | None:
-    if isinstance(value, date):
-        return value
-    if value is None:
-        return None
-    with suppress(ValueError):
-        return date.fromisoformat(str(value))
-    return None
-
-
 def _format_date_like(value: Any) -> str | None:
     if value is None:
         return None
@@ -2928,9 +1727,7 @@ def _query_latest_gold_quotes(
 def _query_cnbc_symbol_quotes(symbols: list[str]) -> list[dict[str, Any]]:
     if not symbols:
         return []
-    from finance_pi.cli import app as cli_app
-
-    quotes = cli_app._fetch_cnbc_quotes(symbols)
+    quotes = _fetch_cnbc_quotes(symbols)
     rows = []
     for symbol in symbols:
         quote_item = quotes.get(symbol)
@@ -4720,10 +3517,6 @@ def _select_basic_fundamental_row(
     )[0]
 
 
-def _iso_or_none(value: Any) -> str | None:
-    return value.isoformat() if hasattr(value, "isoformat") else None
-
-
 def _safe_quote_float(value: Any) -> float | None:
     if value in (None, "", "N/A", "--"):
         return None
@@ -4735,26 +3528,6 @@ def _safe_quote_float(value: Any) -> float | None:
 
 def _lower_or_none(value: Any) -> str | None:
     return str(value).lower() if value is not None else None
-
-
-def _parse_iso_date(value: Any) -> date | None:
-    if isinstance(value, date):
-        return value
-    if not value:
-        return None
-    try:
-        return date.fromisoformat(str(value))
-    except ValueError:
-        return None
-
-
-def _int_or_none(value: Any) -> int | None:
-    if value in (None, "", " ", "-"):
-        return None
-    try:
-        return int(float(str(value).replace(",", "").strip()))
-    except ValueError:
-        return None
 
 
 def _query_macro_table(
@@ -4802,13 +3575,11 @@ def _query_realtime_indicators(
     category: str | None,
     series_id: str | None,
 ) -> dict[str, Any]:
-    from finance_pi.cli import app as cli_app
-
     series_by_category = {
-        "indices": cli_app.CNBC_INDEX_SERIES,
-        "rates": cli_app.CNBC_RATE_SERIES,
-        "commodities": cli_app.CNBC_COMMODITY_SERIES,
-        "fx": cli_app.CNBC_FX_SERIES,
+        "indices": CNBC_INDEX_SERIES,
+        "rates": CNBC_RATE_SERIES,
+        "commodities": CNBC_COMMODITY_SERIES,
+        "fx": CNBC_FX_SERIES,
     }
     selected_categories = [category] if category is not None else list(series_by_category)
     selected_series = {
@@ -4821,7 +3592,7 @@ def _query_realtime_indicators(
     }
     derived_fx = [
         item
-        for item in cli_app.CNBC_DERIVED_FX_SERIES
+        for item in CNBC_DERIVED_FX_SERIES
         if (category in (None, "fx")) and (series_id is None or item["series_id"] == series_id)
     ]
     symbols = [
@@ -4832,22 +3603,22 @@ def _query_realtime_indicators(
     symbols.extend(item["numerator_symbol"] for item in derived_fx)
     symbols.extend(item["denominator_symbol"] for item in derived_fx)
     symbols = sorted(set(symbols))
-    quotes = cli_app._fetch_cnbc_quotes(symbols)
+    quotes = _fetch_cnbc_quotes(symbols)
     today = datetime.now(UTC).date()
     since = today - timedelta(days=7)
     until = today + timedelta(days=1)
     indicators = {
-        "indices": cli_app._cnbc_index_rows(selected_series.get("indices", []), quotes, since, until),
-        "rates": cli_app._cnbc_rate_rows(selected_series.get("rates", []), quotes, since, until),
-        "commodities": cli_app._cnbc_commodity_rows(
+        "indices": _cnbc_index_rows(selected_series.get("indices", []), quotes, since, until),
+        "rates": _cnbc_rate_rows(selected_series.get("rates", []), quotes, since, until),
+        "commodities": _cnbc_commodity_rows(
             selected_series.get("commodities", []),
             quotes,
             since,
             until,
         ),
         "fx": [
-            *cli_app._cnbc_fx_rows(selected_series.get("fx", []), quotes, since, until),
-            *cli_app._cnbc_derived_fx_rows(derived_fx, quotes, since, until),
+            *_cnbc_fx_rows(selected_series.get("fx", []), quotes, since, until),
+            *_cnbc_derived_fx_rows(derived_fx, quotes, since, until),
         ],
     }
     if series_id is not None:
@@ -4896,14 +3667,6 @@ def _macro_row_dict(columns: tuple[str, ...], row: tuple[Any, ...]) -> dict[str,
         column: value.isoformat() if hasattr(value, "isoformat") else value
         for column, value in zip(columns, row, strict=True)
     }
-
-
-def _sql_placeholders(values: list[str]) -> str:
-    return ", ".join("?" for _ in values)
-
-
-def _duckdb_path(path: Path) -> str:
-    return path.as_posix().replace("'", "''")
 
 
 def _job_command(action: str, payload: dict[str, Any], root: Path) -> tuple[str, list[str]]:
@@ -5259,21 +4022,6 @@ def _partition_date(path: Path, key: str) -> date | None:
         except ValueError:
             return None
     return None
-
-
-def _backfill_marker_path(data_root: Path, year: int) -> Path:
-    return data_root / "_state" / "backfill" / "yearly" / f"{year}.json"
-
-
-def _read_backfill_marker_status(marker: Path) -> str | None:
-    if not marker.exists():
-        return None
-    try:
-        data = json.loads(marker.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return "marker_invalid"
-    status = data.get("status")
-    return str(status) if status else "complete"
 
 
 def _scan_parquet_enabled() -> bool:

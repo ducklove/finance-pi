@@ -8,6 +8,7 @@ from io import BytesIO
 
 import polars as pl
 
+from finance_pi.admin import server as admin_server
 from finance_pi.admin.server import (
     MAX_JOBS_RETAINED,
     AdminJob,
@@ -26,7 +27,6 @@ from finance_pi.admin.server import (
     _is_local_admin_client,
     _job_command,
 )
-from finance_pi.cli import app as cli_app
 from finance_pi.storage import DataLakeLayout, ParquetDatasetWriter
 
 
@@ -1430,7 +1430,7 @@ def test_admin_realtime_indicators_fetches_cnbc_snapshot(tmp_path, monkeypatch) 
             }
         }
 
-    monkeypatch.setattr(cli_app, "_fetch_cnbc_quotes", fake_fetch)
+    monkeypatch.setattr(admin_server, "_fetch_cnbc_quotes", fake_fetch)
 
     state = AdminState(tmp_path)
     payload = state.realtime_indicators({"category": ["indices"], "series_id": ["SP500"]})
@@ -1492,7 +1492,7 @@ def test_admin_quotes_return_domestic_and_cnbc_snapshots(tmp_path, monkeypatch) 
             }
         }
 
-    monkeypatch.setattr(cli_app, "_fetch_cnbc_quotes", fake_fetch)
+    monkeypatch.setattr(admin_server, "_fetch_cnbc_quotes", fake_fetch)
 
     payload = AdminState(tmp_path).quotes({"symbols": ["005930,AAPL"]})
 
@@ -1538,7 +1538,7 @@ def test_admin_security_search_batches_local_and_cnbc(tmp_path, monkeypatch) -> 
             }
         }
 
-    monkeypatch.setattr(cli_app, "_fetch_cnbc_quotes", fake_fetch)
+    monkeypatch.setattr(admin_server, "_fetch_cnbc_quotes", fake_fetch)
 
     payload = AdminState(tmp_path).security_search({"queries": ["Samsung,AAPL"], "limit": ["5"]})
 

@@ -7,6 +7,7 @@ from pathlib import Path
 import duckdb
 
 from finance_pi.storage.datasets import DatasetSpec, dataset_registry
+from finance_pi.util import duckdb_path as _duckdb_path
 
 
 @dataclass(frozen=True)
@@ -164,10 +165,6 @@ class CatalogBuilder:
             SELECT * FROM gold.security_master
             """
         )
-
-
-def _duckdb_path(path: Path) -> str:
-    return path.as_posix().replace("'", "''")
 
 
 def _sql_string(value: str) -> str:
