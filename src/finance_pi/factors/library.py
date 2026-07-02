@@ -4,6 +4,29 @@ import polars as pl
 
 from finance_pi.factors.base import Factor, factor_registry
 
+# DART annual report code (사업보고서). Interim reports are excluded until TTM lands.
+ANNUAL_REPORT_TYPE = "11011"
+
+# Priority order: owners-of-parent first to avoid double counting with ProfitLoss.
+NET_INCOME_ACCOUNTS = (
+    "ifrs-full_ProfitLossAttributableToOwnersOfParent",
+    "ifrs-full_ProfitLoss",
+    "profit_loss",
+    "net_income",
+)
+ASSET_ACCOUNTS = (
+    "ifrs-full_Assets",
+    "assets",
+    "total_assets",
+)
+
+
+def _amount_by_priority(accounts: tuple[str, ...]) -> pl.Expr:
+    """Aggregation expression: first non-null amount in account priority order."""
+    return pl.coalesce(
+        pl.col("amount").filter(pl.col("account_id") == account).first() for account in accounts
+    )
+
 
 @factor_registry.register("momentum_12_1")
 class Momentum12_1(Factor):
@@ -31,19 +54,17 @@ class ValueEarningsYield(Factor):
 
     requires = ["gold.fundamentals_pit", "gold.daily_prices_adj"]
     rebalance = "monthly"
-    net_income_accounts = {
-        "ifrs-full_ProfitLoss",
-        "ifrs-full_ProfitLossAttributableToOwnersOfParent",
-        "profit_loss",
-        "net_income",
-    }
+    net_income_accounts = NET_INCOME_ACCOUNTS
 
     def compute(self, ctx) -> pl.LazyFrame:
         fundamentals = (
             ctx.scan("gold.fundamentals_pit")
-            .filter(pl.col("account_id").is_in(self.net_income_accounts))
+            .filter(
+                (pl.col("report_type") == ANNUAL_REPORT_TYPE)
+                & pl.col("account_id").is_in(self.net_income_accounts)
+            )
             .group_by(["as_of_date", "security_id"])
-            .agg(pl.col("amount").sum().alias("net_income"))
+            .agg(_amount_by_priority(self.net_income_accounts).alias("net_income"))
             .rename({"as_of_date": "date"})
         )
         prices = ctx.scan("gold.daily_prices_adj").select(["date", "security_id", "market_cap"])
@@ -60,33 +81,18 @@ class QualityRoa(Factor):
 
     requires = ["gold.fundamentals_pit"]
     rebalance = "monthly"
-    net_income_accounts = {
-        "ifrs-full_ProfitLoss",
-        "ifrs-full_ProfitLossAttributableToOwnersOfParent",
-        "profit_loss",
-        "net_income",
-    }
-    asset_accounts = {
-        "ifrs-full_Assets",
-        "assets",
-        "total_assets",
-    }
+    net_income_accounts = NET_INCOME_ACCOUNTS
+    asset_accounts = ASSET_ACCOUNTS
 
     def compute(self, ctx) -> pl.LazyFrame:
-        fundamentals = ctx.scan("gold.fundamentals_pit")
+        fundamentals = ctx.scan("gold.fundamentals_pit").filter(
+            pl.col("report_type") == ANNUAL_REPORT_TYPE
+        )
         return (
             fundamentals.group_by(["as_of_date", "security_id"])
             .agg(
-                pl.when(pl.col("account_id").is_in(self.net_income_accounts))
-                .then(pl.col("amount"))
-                .otherwise(None)
-                .sum()
-                .alias("net_income"),
-                pl.when(pl.col("account_id").is_in(self.asset_accounts))
-                .then(pl.col("amount"))
-                .otherwise(None)
-                .sum()
-                .alias("assets"),
+                _amount_by_priority(self.net_income_accounts).alias("net_income"),
+                _amount_by_priority(self.asset_accounts).alias("assets"),
             )
             .with_columns((pl.col("net_income") / pl.col("assets")).alias("score"))
             .rename({"as_of_date": "date"})
