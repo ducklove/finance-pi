@@ -465,6 +465,40 @@ def _empty_share_counts() -> str:
     """
 
 
+def _empty_security_relations() -> str:
+    return """
+    SELECT
+        CAST(NULL AS VARCHAR) AS common_security_id,
+        CAST(NULL AS VARCHAR) AS preferred_security_id,
+        CAST(NULL AS VARCHAR) AS common_ticker,
+        CAST(NULL AS VARCHAR) AS preferred_ticker,
+        CAST(NULL AS VARCHAR) AS preferred_name,
+        CAST(NULL AS VARCHAR) AS relation_type,
+        CAST(NULL AS VARCHAR) AS confidence,
+        CAST(NULL AS DATE) AS first_seen_date,
+        CAST(NULL AS DATE) AS last_seen_date
+    WHERE FALSE
+    """
+
+
+def _empty_preferred_discount() -> str:
+    return """
+    SELECT
+        CAST(NULL AS DATE) AS date,
+        CAST(NULL AS VARCHAR) AS common_security_id,
+        CAST(NULL AS VARCHAR) AS preferred_security_id,
+        CAST(NULL AS VARCHAR) AS preferred_ticker,
+        CAST(NULL AS DOUBLE) AS common_close,
+        CAST(NULL AS DOUBLE) AS preferred_close,
+        CAST(NULL AS DOUBLE) AS discount,
+        CAST(NULL AS DOUBLE) AS discount_mean_252,
+        CAST(NULL AS DOUBLE) AS discount_std_252,
+        CAST(NULL AS DOUBLE) AS discount_z,
+        CAST(NULL AS VARCHAR) AS confidence
+    WHERE FALSE
+    """
+
+
 def _empty_identity_review() -> str:
     return """
     SELECT
@@ -621,6 +655,13 @@ dataset_registry: dict[str, DatasetSpec] = {
         _empty_security_master(),
         hive_partitioning=False,
     ),
+    "silver.security_relations": DatasetSpec(
+        "silver.security_relations",
+        "silver",
+        "silver/security_relations/part.parquet",
+        _empty_security_relations(),
+        hive_partitioning=False,
+    ),
     "gold.daily_prices_adj": DatasetSpec(
         "gold.daily_prices_adj",
         "gold",
@@ -653,6 +694,12 @@ dataset_registry: dict[str, DatasetSpec] = {
         "gold",
         "gold/nps_universe/dt=*/part.parquet",
         _empty_nps_universe(),
+    ),
+    "gold.preferred_discount": DatasetSpec(
+        "gold.preferred_discount",
+        "gold",
+        "gold/preferred_discount/dt=*/part.parquet",
+        _empty_preferred_discount(),
     ),
     "gold.security_master": DatasetSpec(
         "gold.security_master",

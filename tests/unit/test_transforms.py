@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import shutil
 from datetime import date
 
 import polars as pl
@@ -15,7 +16,9 @@ from finance_pi.transforms import (
     build_daily_prices_adj,
     build_financials_silver,
     build_fundamentals_pit,
+    build_preferred_discount,
     build_security_master,
+    build_security_relations,
     build_silver_prices,
     build_universe_history,
 )
@@ -1593,3 +1596,224 @@ def test_fundamentals_pit_explicit_dates_builds_only_those(tmp_path) -> None:
     assert (tmp_path / "gold" / "fundamentals_pit" / "dt=2024-01-03" / "part.parquet").exists()
     # Partial builds must not record the incremental state marker.
     assert not (tmp_path / "_state" / "fundamentals_pit.json").exists()
+
+
+def _adj_price_row(logical_date: date, security_id: str, close_adj: float) -> dict:
+    return {"date": logical_date, "security_id": security_id, "close_adj": close_adj}
+
+
+def _write_adj_price_rows(tmp_path, rows: list[dict]) -> None:
+    layout = DataLakeLayout(tmp_path)
+    writer = ParquetDatasetWriter()
+    frame = pl.DataFrame(rows)
+    for key, partition in frame.partition_by("date", as_dict=True).items():
+        logical_date = key[0] if isinstance(key, tuple) else key
+        writer.write(
+            partition,
+            layout.partition_path("gold.daily_prices_adj", logical_date),
+            mode="overwrite",
+        )
+
+
+def _relation_row(common_ticker: str, preferred_ticker: str, *, confidence: str = "high") -> dict:
+    return {
+        "common_security_id": f"S{common_ticker}",
+        "preferred_security_id": f"S{preferred_ticker}",
+        "common_ticker": common_ticker,
+        "preferred_ticker": preferred_ticker,
+        "preferred_name": f"Name {preferred_ticker}",
+        "relation_type": "preferred_of",
+        "confidence": confidence,
+        "first_seen_date": None,
+        "last_seen_date": None,
+    }
+
+
+def _read_preferred_discount(tmp_path) -> pl.DataFrame:
+    return pl.concat(
+        [
+            pl.read_parquet(path)
+            for path in sorted((tmp_path / "gold" / "preferred_discount").glob("dt=*/part.parquet"))
+        ],
+        how="diagonal_relaxed",
+    ).sort(["date", "preferred_ticker"])
+
+
+def test_build_security_relations_maps_preferred_pairs(tmp_path) -> None:
+    layout = DataLakeLayout(tmp_path)
+    layout.ensure_base_dirs()
+    rows = []
+    for day in (2, 3, 4):
+        logical_date = date(2024, 1, day)
+        rows.append({**_silver_price_row(logical_date, "005930", close=100.0), "name": "삼성전자"})
+        if day >= 3:
+            rows.append(
+                {**_silver_price_row(logical_date, "005935", close=50.0), "name": "삼성전자우"}
+            )
+        rows.append(
+            {**_silver_price_row(logical_date, "111110", close=100.0), "name": "Common Corp"}
+        )
+        rows.append(
+            {**_silver_price_row(logical_date, "111115", close=50.0), "name": "Unrelated 우"}
+        )
+        rows.append({**_silver_price_row(logical_date, "123450", close=100.0), "name": "Test"})
+        rows.append(
+            {**_silver_price_row(logical_date, "12345K", close=50.0), "name": "Test 2우B"}
+        )
+        rows.append(
+            {**_silver_price_row(logical_date, "222220", close=10.0), "name": "Lonely Corp"}
+        )
+    _write_silver_prices(tmp_path, rows)
+    build_security_master(tmp_path)
+
+    summary = build_security_relations(tmp_path)[0]
+
+    relations = pl.read_parquet(tmp_path / "silver" / "security_relations" / "part.parquet")
+    by_preferred = {row["preferred_ticker"]: row for row in relations.iter_rows(named=True)}
+    assert summary.dataset == "silver.security_relations"
+    assert summary.rows == 3
+    assert set(by_preferred) == {"005935", "111115", "12345K"}
+    samsung = by_preferred["005935"]
+    assert samsung["common_ticker"] == "005930"
+    assert samsung["common_security_id"] == "S005930"
+    assert samsung["preferred_security_id"] == "S005935"
+    assert samsung["preferred_name"] == "삼성전자우"
+    assert samsung["relation_type"] == "preferred_of"
+    assert samsung["confidence"] == "high"
+    # Overlap of both legs' observed trading ranges.
+    assert samsung["first_seen_date"] == date(2024, 1, 3)
+    assert samsung["last_seen_date"] == date(2024, 1, 4)
+    # Ticker prefix matches but the name is unrelated: kept, flagged low.
+    assert by_preferred["111115"]["confidence"] == "low"
+    # Alphanumeric 신형우선주-style code with an agreeing name suffix.
+    assert by_preferred["12345K"]["common_ticker"] == "123450"
+    assert by_preferred["12345K"]["confidence"] == "high"
+
+
+def test_build_preferred_discount_computes_discount_and_zscore(tmp_path, monkeypatch) -> None:
+    layout = DataLakeLayout(tmp_path)
+    layout.ensure_base_dirs()
+    monkeypatch.setattr(builders_module, "PREFERRED_DISCOUNT_WINDOW", 3)
+    monkeypatch.setattr(builders_module, "PREFERRED_DISCOUNT_MIN_OBS", 2)
+    days = [date(2024, 1, day) for day in (2, 3, 4, 5)]
+    rows = []
+    for logical_date, preferred_close in zip(days, [50.0, 60.0, 40.0, 50.0], strict=True):
+        rows.append(_adj_price_row(logical_date, "S111110", 100.0))
+        rows.append(_adj_price_row(logical_date, "S111115", preferred_close))
+        rows.append(_adj_price_row(logical_date, "S222220", 100.0))
+        rows.append(_adj_price_row(logical_date, "S222225", 90.0))
+    _write_adj_price_rows(tmp_path, rows)
+    ParquetDatasetWriter().write(
+        pl.DataFrame(
+            [
+                _relation_row("111110", "111115"),
+                _relation_row("222220", "222225", confidence="low"),
+            ]
+        ),
+        layout.singleton_path("silver.security_relations"),
+        mode="overwrite",
+    )
+
+    summary = build_preferred_discount(tmp_path)[0]
+
+    discount = _read_preferred_discount(tmp_path)
+    assert summary.dataset == "gold.preferred_discount"
+    # Low-confidence pairs are excluded by default.
+    assert summary.rows == 4
+    assert discount["preferred_security_id"].unique().to_list() == ["S111115"]
+    first, second, third, fourth = discount.iter_rows(named=True)
+    # discount = 1 - preferred/common: [0.5, 0.4, 0.6, 0.5]; window=3, min_obs=2.
+    assert first["discount"] == pytest.approx(0.5)
+    assert first["discount_mean_252"] is None
+    assert first["discount_std_252"] is None
+    assert first["discount_z"] is None
+    assert second["discount"] == pytest.approx(0.4)
+    assert second["discount_mean_252"] == pytest.approx(0.45)
+    assert second["discount_std_252"] == pytest.approx(0.05 * 2**0.5)
+    assert second["discount_z"] == pytest.approx(-(0.5**0.5))
+    assert third["discount_mean_252"] == pytest.approx(0.5)
+    assert third["discount_std_252"] == pytest.approx(0.1)
+    assert third["discount_z"] == pytest.approx(1.0)
+    assert fourth["discount_mean_252"] == pytest.approx(0.5)
+    assert fourth["discount_z"] == pytest.approx(0.0)
+
+    include_low = build_preferred_discount(tmp_path, include_low_confidence=True)[0]
+
+    assert include_low.rows == 8
+    latest = pl.read_parquet(
+        tmp_path / "gold" / "preferred_discount" / "dt=2024-01-05" / "part.parquet"
+    )
+    by_preferred = {row["preferred_security_id"]: row for row in latest.iter_rows(named=True)}
+    assert by_preferred["S222225"]["confidence"] == "low"
+    assert by_preferred["S222225"]["discount"] == pytest.approx(0.1)
+
+
+def test_build_preferred_discount_incremental_matches_full_build(tmp_path, monkeypatch) -> None:
+    layout = DataLakeLayout(tmp_path)
+    layout.ensure_base_dirs()
+    monkeypatch.setattr(builders_module, "PREFERRED_DISCOUNT_WINDOW", 3)
+    monkeypatch.setattr(builders_module, "PREFERRED_DISCOUNT_MIN_OBS", 2)
+    days = [date(2024, 1, day) for day in (2, 3, 4, 5)]
+    rows = []
+    for logical_date, preferred_close in zip(days, [50.0, 60.0, 40.0, 50.0], strict=True):
+        rows.append(_adj_price_row(logical_date, "S111110", 100.0))
+        rows.append(_adj_price_row(logical_date, "S111115", preferred_close))
+    _write_adj_price_rows(tmp_path, rows)
+    ParquetDatasetWriter().write(
+        pl.DataFrame([_relation_row("111110", "111115")]),
+        layout.singleton_path("silver.security_relations"),
+        mode="overwrite",
+    )
+    build_preferred_discount(tmp_path)
+    full_latest = pl.read_parquet(
+        tmp_path / "gold" / "preferred_discount" / "dt=2024-01-05" / "part.parquet"
+    )
+    shutil.rmtree(tmp_path / "gold" / "preferred_discount")
+
+    summary = build_preferred_discount(tmp_path, dates=[date(2024, 1, 5)])[0]
+
+    partitions = sorted(
+        path.parent.name
+        for path in (tmp_path / "gold" / "preferred_discount").glob("dt=*/part.parquet")
+    )
+    assert summary.files == 1
+    # Only the requested partition is written, but the trailing window is
+    # loaded as lookback so the stats match the full-build values exactly.
+    assert partitions == ["dt=2024-01-05"]
+    incremental = pl.read_parquet(
+        tmp_path / "gold" / "preferred_discount" / "dt=2024-01-05" / "part.parquet"
+    )
+    assert incremental.equals(full_latest)
+
+
+def test_preferred_discount_empty_when_no_preferred_shares(tmp_path) -> None:
+    layout = DataLakeLayout(tmp_path)
+    layout.ensure_base_dirs()
+    _write_silver_prices(
+        tmp_path,
+        [_silver_price_row(date(2024, 1, 2), "111110", close=100.0)],
+    )
+    build_security_master(tmp_path)
+
+    relations_summary = build_security_relations(tmp_path)[0]
+
+    relations = pl.read_parquet(tmp_path / "silver" / "security_relations" / "part.parquet")
+    assert relations_summary.rows == 0
+    assert relations.is_empty()
+    assert relations.columns == [
+        "common_security_id",
+        "preferred_security_id",
+        "common_ticker",
+        "preferred_ticker",
+        "preferred_name",
+        "relation_type",
+        "confidence",
+        "first_seen_date",
+        "last_seen_date",
+    ]
+
+    summary = build_preferred_discount(tmp_path)[0]
+
+    assert summary.dataset == "gold.preferred_discount"
+    assert (summary.rows, summary.files) == (0, 0)
+    assert not list((tmp_path / "gold" / "preferred_discount").glob("dt=*/part.parquet"))

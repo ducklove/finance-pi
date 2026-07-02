@@ -41,6 +41,22 @@ CORPORATE_ACTIONS_WARN_MIN_DATES = 250
 DART_CORROBORATION_DAYS_BEFORE = 120
 DART_CORROBORATION_DAYS_AFTER = 14
 
+# Preferred discount: trailing window (observed pair trading days) for the
+# rolling mean/std of the pair discount, and the minimum observations before
+# the stats (and z-score) are emitted instead of null.
+PREFERRED_DISCOUNT_WINDOW = 252
+PREFERRED_DISCOUNT_MIN_OBS = 120
+
+# KRX preferred tickers reuse the common ticker's first 5 digits with a
+# non-zero 6th character: 5/7/9 for legacy classes, or an uppercase letter
+# (e.g. K for 신형우선주). Anything else (fully alphanumeric short codes,
+# non-6-char codes) is excluded conservatively.
+_COMMON_TICKER_PATTERN = r"^\d{5}0$"
+_PREFERRED_TICKER_PATTERN = r"^\d{5}[1-9A-Z]$"
+# Preferred name = common name + suffix such as 우, 우B, 1우, 2우B, 우선주
+# (whitespace ignored on both sides).
+_PREFERRED_NAME_SUFFIX_PATTERN = r"^\d?우(선주)?[A-Z]?$"
+
 _CORPORATE_ACTION_SPLIT_PATTERN = "주식분할|액면분할"
 _CORPORATE_ACTION_MERGE_PATTERN = "주식병합|액면병합|감자"
 
@@ -72,6 +88,8 @@ _BRONZE_PRICE_COLUMNS = [
     "listed_shares",
 ]
 _MASTER_PRICE_COLUMNS = ["date", "ticker", "name", "market"]
+_RELATION_PRICE_COLUMNS = ["date", "ticker"]
+_DISCOUNT_PRICE_COLUMNS = ["date", "security_id", "close_adj"]
 _UNIVERSE_PRICE_COLUMNS = ["date", "ticker", "is_halted", "is_designated", "is_liquidation_window"]
 _ACTION_PRICE_COLUMNS = ["date", "security_id", "ticker", "close", "listed_shares", "market_cap"]
 _ADJ_PRICE_COLUMNS = [
@@ -153,11 +171,13 @@ def build_all_iter(data_root: Path) -> Iterable[BuildSummary]:
     # consumer instead of re-reading the multi-GB history once per builder.
     prices = _read_optional(data_root / "silver/prices/dt=*/part.parquet")
     yield from build_security_master(data_root, prices=prices)
+    yield from build_security_relations(data_root, prices=prices)
     yield from build_universe_history(data_root, prices=prices)
     yield from build_corporate_actions(data_root, prices=prices)
     yield from build_daily_prices_adj(data_root, prices=prices)
     yield from build_daily_market_caps(data_root, prices=prices)
     del prices
+    yield from build_preferred_discount(data_root)
     yield from build_nps_holdings_silver(data_root)
     yield from build_nps_universe(data_root)
     yield from build_financials_silver(data_root)
@@ -295,6 +315,149 @@ def _detect_ticker_reuse(prices: pl.DataFrame) -> pl.DataFrame:
             (pl.col("name_before") != pl.col("name")).fill_null(False).alias("name_changed"),
         )
         .sort(["ticker", "gap_start"])
+    )
+
+
+def build_security_relations(
+    data_root: Path,
+    *,
+    prices: pl.DataFrame | None = None,
+) -> list[BuildSummary]:
+    """Map preferred shares to their common share into silver.security_relations.
+
+    Candidates come from gold.security_master: a preferred-class ticker
+    matching ``^\\d{5}[1-9A-Z]$`` pairs with the common-class ticker sharing
+    its first five digits (6th char ``0``). ``confidence`` is ``"high"`` when
+    the preferred name also equals the common name plus a recognised suffix
+    (우/우B/1우/2우B/우선주 …, whitespace ignored), and ``"low"`` when only
+    the ticker prefix matches — still emitted but flagged for review.
+    ``first_seen_date``/``last_seen_date`` are the overlap of both legs'
+    observed silver.prices trading ranges (null when the legs never overlap
+    or prices are unavailable). The dataset is a singleton parquet rebuilt
+    from the full history, like gold.security_master.
+    """
+    master = _read_optional(data_root / "gold/security_master.parquet")
+    if master is None or master.is_empty():
+        return [BuildSummary("silver.security_relations", 0, 0)]
+    if prices is None:
+        prices = _read_optional(
+            data_root / "silver/prices/dt=*/part.parquet",
+            columns=_RELATION_PRICE_COLUMNS,
+        )
+    relations = _preferred_relations_frame(master, prices)
+    ParquetDatasetWriter().write(
+        relations,
+        DataLakeLayout(data_root).singleton_path("silver.security_relations"),
+        mode="overwrite",
+    )
+    return [BuildSummary("silver.security_relations", relations.height, 1)]
+
+
+def _preferred_relations_frame(
+    master: pl.DataFrame,
+    prices: pl.DataFrame | None,
+) -> pl.DataFrame:
+    securities = master.select(
+        "security_id",
+        pl.col("ticker").cast(pl.String),
+        pl.col("name").cast(pl.String),
+        "share_class",
+    )
+    common = securities.filter(
+        (pl.col("share_class") == "common")
+        & pl.col("ticker").str.contains(_COMMON_TICKER_PATTERN)
+    ).select(
+        pl.col("ticker").str.slice(0, 5).alias("_ticker_prefix"),
+        pl.col("security_id").alias("common_security_id"),
+        pl.col("ticker").alias("common_ticker"),
+        pl.col("name").alias("_common_name"),
+    )
+    preferred = securities.filter(
+        (pl.col("share_class") == "preferred")
+        & pl.col("ticker").str.contains(_PREFERRED_TICKER_PATTERN)
+    ).select(
+        pl.col("ticker").str.slice(0, 5).alias("_ticker_prefix"),
+        pl.col("security_id").alias("preferred_security_id"),
+        pl.col("ticker").alias("preferred_ticker"),
+        pl.col("name").alias("preferred_name"),
+    )
+    common_name = pl.col("_common_name").str.replace_all(r"\s+", "")
+    preferred_name = pl.col("preferred_name").str.replace_all(r"\s+", "")
+    name_matches = preferred_name.str.starts_with(common_name) & (
+        preferred_name.str.strip_prefix(common_name).str.contains(
+            _PREFERRED_NAME_SUFFIX_PATTERN
+        )
+    )
+    pairs = (
+        preferred.join(common, on="_ticker_prefix", how="inner")
+        .with_columns(
+            pl.when(name_matches.fill_null(False))
+            .then(pl.lit("high"))
+            .otherwise(pl.lit("low"))
+            .alias("confidence"),
+            pl.lit("preferred_of").alias("relation_type"),
+        )
+        .sort(["preferred_ticker", "confidence"])
+        .unique(subset=["preferred_security_id"], keep="first")
+    )
+    return (
+        _with_relation_span(pairs, prices)
+        .select(
+            [
+                "common_security_id",
+                "preferred_security_id",
+                "common_ticker",
+                "preferred_ticker",
+                "preferred_name",
+                "relation_type",
+                "confidence",
+                "first_seen_date",
+                "last_seen_date",
+            ]
+        )
+        .sort("preferred_ticker")
+    )
+
+
+def _with_relation_span(pairs: pl.DataFrame, prices: pl.DataFrame | None) -> pl.DataFrame:
+    if prices is None or prices.is_empty():
+        return pairs.with_columns(
+            pl.lit(None, dtype=pl.Date).alias("first_seen_date"),
+            pl.lit(None, dtype=pl.Date).alias("last_seen_date"),
+        )
+    spans = prices.group_by("ticker").agg(
+        pl.col("date").min().alias("_first_date"),
+        pl.col("date").max().alias("_last_date"),
+    )
+    overlapping = pl.col("first_seen_date") <= pl.col("last_seen_date")
+    return (
+        pairs.join(
+            spans.select(
+                pl.col("ticker").alias("preferred_ticker"),
+                pl.col("_first_date").alias("_preferred_first"),
+                pl.col("_last_date").alias("_preferred_last"),
+            ),
+            on="preferred_ticker",
+            how="left",
+        )
+        .join(
+            spans.select(
+                pl.col("ticker").alias("common_ticker"),
+                pl.col("_first_date").alias("_common_first"),
+                pl.col("_last_date").alias("_common_last"),
+            ),
+            on="common_ticker",
+            how="left",
+        )
+        .with_columns(
+            pl.max_horizontal("_preferred_first", "_common_first").alias("first_seen_date"),
+            pl.min_horizontal("_preferred_last", "_common_last").alias("last_seen_date"),
+        )
+        .with_columns(
+            pl.when(overlapping).then(pl.col("first_seen_date")).alias("first_seen_date"),
+            pl.when(overlapping).then(pl.col("last_seen_date")).alias("last_seen_date"),
+        )
+        .drop("_preferred_first", "_preferred_last", "_common_first", "_common_last")
     )
 
 
@@ -782,6 +945,157 @@ def _adjusted_price_frame(prices: pl.DataFrame, actions: pl.DataFrame | None) ->
                 "is_liquidation_window",
             ]
         )
+    )
+
+
+def build_preferred_discount(
+    data_root: Path,
+    dates: Iterable[date] | None = None,
+    *,
+    prices: pl.DataFrame | None = None,
+    include_low_confidence: bool = False,
+) -> list[BuildSummary]:
+    """Build the daily preferred-vs-common discount series (gold.preferred_discount).
+
+    ``discount = 1 - preferred_close_adj / common_close_adj`` per
+    silver.security_relations pair (positive = preferred trades below the
+    common, the typical case). Rolling mean/std over the trailing
+    ``PREFERRED_DISCOUNT_WINDOW`` observed pair days (row-based: only days
+    where BOTH legs traded count) feed ``discount_z``; both stats stay null
+    until ``PREFERRED_DISCOUNT_MIN_OBS`` observations exist, and the z-score
+    additionally requires a positive std. The ``discount_*_252`` column names
+    are fixed even if the window constant is overridden. Only high-confidence
+    pairs are used unless ``include_low_confidence=True``.
+
+    ``prices`` optionally shares a gold.daily_prices_adj-shaped frame (date,
+    security_id, close_adj); the caller must then include enough history for
+    the trailing window. With ``dates``, only those partitions are rewritten,
+    but the trailing ``PREFERRED_DISCOUNT_WINDOW`` gold partitions before
+    min(dates) are loaded as lookback so incremental z-scores match a full
+    rebuild.
+    """
+    selected_dates = set(dates) if dates is not None else None
+    relations = _load_preferred_relations(data_root, include_low_confidence)
+    if relations is None or relations.is_empty():
+        return [BuildSummary("gold.preferred_discount", 0, 0)]
+    if prices is not None:
+        adj = prices.select(
+            [column for column in _DISCOUNT_PRICE_COLUMNS if column in prices.columns]
+        )
+    elif selected_dates is not None:
+        adj = _read_adj_prices_with_lookback(data_root, selected_dates)
+    else:
+        adj = _read_optional(
+            data_root / "gold/daily_prices_adj/dt=*/part.parquet",
+            columns=_DISCOUNT_PRICE_COLUMNS,
+        )
+    if adj is None or adj.is_empty():
+        return [BuildSummary("gold.preferred_discount", 0, 0)]
+    discount = _preferred_discount_frame(adj, relations)
+    if selected_dates is not None:
+        discount = discount.filter(pl.col("date").is_in(selected_dates))
+    if discount.is_empty():
+        return [BuildSummary("gold.preferred_discount", 0, 0)]
+    return _write_by_date(data_root, "gold.preferred_discount", discount, "date")
+
+
+def _load_preferred_relations(
+    data_root: Path,
+    include_low_confidence: bool,
+) -> pl.DataFrame | None:
+    relations = _read_optional(
+        data_root / "silver/security_relations/part.parquet",
+        columns=[
+            "common_security_id",
+            "preferred_security_id",
+            "preferred_ticker",
+            "relation_type",
+            "confidence",
+        ],
+    )
+    if relations is None or relations.is_empty():
+        return None
+    relations = relations.filter(pl.col("relation_type") == "preferred_of")
+    if not include_low_confidence:
+        relations = relations.filter(pl.col("confidence") == "high")
+    return relations.drop("relation_type")
+
+
+def _read_adj_prices_with_lookback(
+    data_root: Path,
+    dates: set[date],
+) -> pl.DataFrame | None:
+    partition_dates = sorted(
+        _partition_date_from_path(Path(file), "dt")
+        for file in glob((data_root / "gold/daily_prices_adj/dt=*/part.parquet").as_posix())
+    )
+    if not partition_dates:
+        return None
+    target_min = min(dates)
+    lookback = [value for value in partition_dates if value < target_min]
+    lookback = lookback[-PREFERRED_DISCOUNT_WINDOW:]
+    selected = set(lookback) | (set(partition_dates) & dates)
+    frame = _read_partition_dates(data_root, "gold.daily_prices_adj", selected)
+    if frame is None:
+        return None
+    return frame.select([column for column in _DISCOUNT_PRICE_COLUMNS if column in frame.columns])
+
+
+def _preferred_discount_frame(adj: pl.DataFrame, relations: pl.DataFrame) -> pl.DataFrame:
+    adj = adj.filter(pl.col("close_adj").is_not_null() & (pl.col("close_adj") > 0))
+    common = adj.select(
+        "date",
+        pl.col("security_id").alias("common_security_id"),
+        pl.col("close_adj").alias("common_close"),
+    )
+    preferred = adj.select(
+        "date",
+        pl.col("security_id").alias("preferred_security_id"),
+        pl.col("close_adj").alias("preferred_close"),
+    )
+    window = PREFERRED_DISCOUNT_WINDOW
+    min_obs = PREFERRED_DISCOUNT_MIN_OBS
+    return (
+        relations.join(preferred, on="preferred_security_id", how="inner")
+        .join(common, on=["date", "common_security_id"], how="inner")
+        .with_columns(
+            (1.0 - pl.col("preferred_close") / pl.col("common_close")).alias("discount")
+        )
+        .sort(["preferred_security_id", "date"])
+        .with_columns(
+            pl.col("discount")
+            .rolling_mean(window_size=window, min_samples=min_obs)
+            .over("preferred_security_id")
+            .alias("discount_mean_252"),
+            pl.col("discount")
+            .rolling_std(window_size=window, min_samples=min_obs)
+            .over("preferred_security_id")
+            .alias("discount_std_252"),
+        )
+        .with_columns(
+            pl.when(pl.col("discount_std_252") > 0)
+            .then(
+                (pl.col("discount") - pl.col("discount_mean_252")) / pl.col("discount_std_252")
+            )
+            .otherwise(None)
+            .alias("discount_z")
+        )
+        .select(
+            [
+                "date",
+                "common_security_id",
+                "preferred_security_id",
+                "preferred_ticker",
+                "common_close",
+                "preferred_close",
+                "discount",
+                "discount_mean_252",
+                "discount_std_252",
+                "discount_z",
+                "confidence",
+            ]
+        )
+        .sort(["date", "preferred_ticker"])
     )
 
 

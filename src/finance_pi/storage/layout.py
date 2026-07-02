@@ -32,11 +32,13 @@ class DataLakeLayout:
             "silver/share_counts",
             "silver/nps_holdings",
             "silver/security_identity",
+            "silver/security_relations",
             "gold/daily_prices_adj",
             "gold/daily_market_caps",
             "gold/fundamentals_pit",
             "gold/universe_history",
             "gold/nps_universe",
+            "gold/preferred_discount",
             "macro/cpi",
             "macro/rates",
             "macro/indices",
@@ -128,6 +130,8 @@ class DataLakeLayout:
                 return self.root / "gold" / "universe_history" / f"dt={dt}" / "part.parquet"
             case "gold.nps_universe":
                 return self.root / "gold" / "nps_universe" / f"dt={dt}" / "part.parquet"
+            case "gold.preferred_discount":
+                return self.root / "gold" / "preferred_discount" / f"dt={dt}" / "part.parquet"
             case _:
                 raise ValueError(f"{dataset} is not date-partitioned")
 
@@ -135,6 +139,8 @@ class DataLakeLayout:
         match dataset:
             case "silver.security_identity":
                 return self.root / "silver" / "security_identity" / "part.parquet"
+            case "silver.security_relations":
+                return self.root / "silver" / "security_relations" / "part.parquet"
             case "gold.security_master":
                 return self.root / "gold" / "security_master.parquet"
             case "gold.identity_review":
