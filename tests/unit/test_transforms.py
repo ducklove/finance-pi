@@ -1400,3 +1400,141 @@ def test_incremental_silver_prices_picks_up_backfilled_naver_dates(tmp_path) -> 
     assert silver.height == 1
     assert silver.select("close").item() == 100.0
     assert silver.select("price_source").item() == "naver"
+
+
+def _pit_universe_row(as_of: date) -> dict:
+    return {
+        "date": as_of,
+        "security_id": "S005930",
+        "listing_id": "L005930",
+        "market": "KOSPI",
+        "is_active": True,
+        "share_class": "common",
+        "security_type": "equity",
+        "is_spac_pre": False,
+        "is_halted": False,
+        "is_designated": False,
+        "is_liquidation_window": False,
+    }
+
+
+def _pit_financials_row(*, account_id: str, amount: float, available_date: date) -> dict:
+    return {
+        "security_id": "S005930",
+        "corp_code": "00126380",
+        "fiscal_period_end": date(2023, 12, 31),
+        "event_date": date(2023, 12, 31),
+        "rcept_dt": available_date,
+        "available_date": available_date,
+        "report_type": "11011",
+        "account_id": account_id,
+        "account_name": account_id,
+        "amount": amount,
+        "is_consolidated": True,
+        "accounting_basis": "K-IFRS",
+    }
+
+
+def _write_pit_fixture(
+    tmp_path,
+    as_of_dates: list[date],
+    financials_rows: list[dict],
+) -> None:
+    layout = DataLakeLayout(tmp_path)
+    layout.ensure_base_dirs()
+    writer = ParquetDatasetWriter()
+    for as_of in as_of_dates:
+        writer.write(
+            pl.DataFrame([_pit_universe_row(as_of)]),
+            layout.partition_path("gold.universe_history", as_of),
+            mode="overwrite",
+        )
+    silver_path = tmp_path / "silver" / "financials" / "fiscal_year=2023" / "part.parquet"
+    silver_path.parent.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame(financials_rows).write_parquet(silver_path)
+
+
+def _pit_partition_mtimes(tmp_path) -> dict[str, int]:
+    return {
+        path.parent.name: path.stat().st_mtime_ns
+        for path in sorted((tmp_path / "gold" / "fundamentals_pit").glob("dt=*/part.parquet"))
+    }
+
+
+def test_fundamentals_pit_second_run_skips_unchanged_dates(tmp_path) -> None:
+    _write_pit_fixture(
+        tmp_path,
+        [date(2024, 1, 2), date(2024, 1, 3)],
+        [
+            _pit_financials_row(
+                account_id="ifrs-full_Assets", amount=1000.0, available_date=date(2024, 1, 1)
+            )
+        ],
+    )
+
+    first = build_fundamentals_pit(tmp_path)[0]
+    assert first.files == 2
+    mtimes = _pit_partition_mtimes(tmp_path)
+
+    second = build_fundamentals_pit(tmp_path)[0]
+
+    assert second.files == 0
+    assert second.rows == 0
+    assert _pit_partition_mtimes(tmp_path) == mtimes
+
+
+def test_fundamentals_pit_rebuilds_only_dates_after_new_available_date(tmp_path) -> None:
+    initial = [
+        _pit_financials_row(
+            account_id="ifrs-full_Assets", amount=1000.0, available_date=date(2024, 1, 1)
+        )
+    ]
+    as_of_dates = [date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4)]
+    _write_pit_fixture(tmp_path, as_of_dates, initial)
+    build_fundamentals_pit(tmp_path)
+    mtimes = _pit_partition_mtimes(tmp_path)
+    assert set(mtimes) == {"dt=2024-01-02", "dt=2024-01-03", "dt=2024-01-04"}
+
+    # A new filing available on 01-03 is visible strictly after that date, so
+    # only as-of dates > 01-03 may change.
+    _write_pit_fixture(
+        tmp_path,
+        as_of_dates,
+        [
+            *initial,
+            _pit_financials_row(
+                account_id="ifrs-full_Liabilities", amount=500.0, available_date=date(2024, 1, 3)
+            ),
+        ],
+    )
+    summary = build_fundamentals_pit(tmp_path)[0]
+
+    assert summary.files == 1
+    after = _pit_partition_mtimes(tmp_path)
+    assert after["dt=2024-01-02"] == mtimes["dt=2024-01-02"]
+    assert after["dt=2024-01-03"] == mtimes["dt=2024-01-03"]
+    rebuilt = pl.read_parquet(
+        tmp_path / "gold" / "fundamentals_pit" / "dt=2024-01-04" / "part.parquet"
+    )
+    assert rebuilt.height == 2
+    assert set(rebuilt["account_id"].to_list()) == {"ifrs-full_Assets", "ifrs-full_Liabilities"}
+
+
+def test_fundamentals_pit_explicit_dates_builds_only_those(tmp_path) -> None:
+    _write_pit_fixture(
+        tmp_path,
+        [date(2024, 1, 2), date(2024, 1, 3)],
+        [
+            _pit_financials_row(
+                account_id="ifrs-full_Assets", amount=1000.0, available_date=date(2024, 1, 1)
+            )
+        ],
+    )
+
+    summary = build_fundamentals_pit(tmp_path, dates=[date(2024, 1, 3)])[0]
+
+    assert summary.files == 1
+    assert not (tmp_path / "gold" / "fundamentals_pit" / "dt=2024-01-02" / "part.parquet").exists()
+    assert (tmp_path / "gold" / "fundamentals_pit" / "dt=2024-01-03" / "part.parquet").exists()
+    # Partial builds must not record the incremental state marker.
+    assert not (tmp_path / "_state" / "fundamentals_pit.json").exists()

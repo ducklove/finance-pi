@@ -116,6 +116,11 @@ that cache manually when needed:
 python -m finance_pi.cli.app build fundamentals-pit --root .
 ```
 
+After the first full build the command is incremental: it tracks
+`silver.financials` state under `data/_state/fundamentals_pit.json` and only
+rebuilds as-of dates affected by new filings. Delete the marker to force a full
+rebuild, or pass `--date 2026-05-02` (repeatable) to rebuild specific dates.
+
 Historical backfills can be run one year at a time, newest to oldest. The
 default below runs only the next missing year, so it is safe to repeat:
 

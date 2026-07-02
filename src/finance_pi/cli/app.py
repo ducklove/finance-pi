@@ -2111,8 +2111,15 @@ def build_cmd_financials(root: Path = typer.Option(Path("."), help="Workspace ro
 
 
 @build_app.command("fundamentals-pit")
-def build_cmd_fundamentals_pit(root: Path = typer.Option(Path("."), help="Workspace root")) -> None:
-    _print_summaries(build_fundamentals_pit(ProjectPaths(root=root).data_root))
+def build_cmd_fundamentals_pit(
+    root: Path = typer.Option(Path("."), help="Workspace root"),
+    dates: list[str] = typer.Option(
+        [], "--date", help="Rebuild only these as-of dates (YYYY-MM-DD, repeatable)"
+    ),
+) -> None:
+    parsed = [date.fromisoformat(value) for value in dates]
+    data_root = ProjectPaths(root=root).data_root
+    _print_summaries(build_fundamentals_pit(data_root, dates=parsed or None))
 
 
 @build_app.command("nps")

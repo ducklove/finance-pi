@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 from collections.abc import Iterable
@@ -38,6 +39,95 @@ DART_CORROBORATION_DAYS_AFTER = 14
 _CORPORATE_ACTION_SPLIT_PATTERN = "주식분할|액면분할"
 _CORPORATE_ACTION_MERGE_PATTERN = "주식병합|액면병합|감자"
 
+# join_asof cannot verify sortedness when `by` groups are provided and emits a
+# UserWarning instead. The asof inputs below are always pre-sorted by (by, on),
+# so skip the check when the installed polars supports opting out (>=1.2).
+_JOIN_ASOF_KWARGS: dict[str, bool] = (
+    {"check_sortedness": False}
+    if "check_sortedness" in inspect.signature(pl.DataFrame.join_asof).parameters
+    else {}
+)
+
+# Column pruning (ST-12): every reader below asks the parquet scan for exactly
+# the columns it consumes, so a full-history build decodes megabytes instead of
+# gigabytes per builder. Extra columns in an explicitly shared frame are fine —
+# each builder still projects with these lists before computing.
+_BRONZE_PRICE_COLUMNS = [
+    "date",
+    "ticker",
+    "name",
+    "market",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "trading_value",
+    "market_cap",
+    "listed_shares",
+]
+_MASTER_PRICE_COLUMNS = ["date", "ticker", "name", "market"]
+_UNIVERSE_PRICE_COLUMNS = ["date", "ticker", "is_halted", "is_designated", "is_liquidation_window"]
+_ACTION_PRICE_COLUMNS = ["date", "security_id", "ticker", "close", "listed_shares", "market_cap"]
+_ADJ_PRICE_COLUMNS = [
+    "date",
+    "security_id",
+    "listing_id",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "trading_value",
+    "market_cap",
+    "listed_shares",
+    "price_source",
+    "price_basis",
+    "is_halted",
+    "is_designated",
+    "is_liquidation_window",
+]
+_MARKET_CAP_PRICE_COLUMNS = [
+    "date",
+    "security_id",
+    "listing_id",
+    "ticker",
+    "name",
+    "market",
+    "close",
+    "trading_value",
+    "volume",
+    "market_cap",
+    "listed_shares",
+    "price_source",
+]
+_MARCAP_COLUMNS = [
+    "Date",
+    "Code",
+    "Name",
+    "Market",
+    "Rank",
+    "Close",
+    "Amount",
+    "Volume",
+    "Marcap",
+    "Stocks",
+]
+_FINANCIALS_COLUMNS = [
+    "security_id",
+    "corp_code",
+    "fiscal_period_end",
+    "event_date",
+    "rcept_dt",
+    "available_date",
+    "report_type",
+    "account_id",
+    "account_name",
+    "amount",
+    "is_consolidated",
+    "accounting_basis",
+]
+
 
 @dataclass(frozen=True)
 class BuildSummary:
@@ -51,20 +141,21 @@ def build_all(data_root: Path) -> list[BuildSummary]:
 
 
 def build_all_iter(data_root: Path) -> Iterable[BuildSummary]:
-    for builder in [
-        build_silver_market_caps,
-        build_silver_prices,
-        build_security_master,
-        build_universe_history,
-        build_corporate_actions,
-        build_daily_prices_adj,
-        build_daily_market_caps,
-        build_nps_holdings_silver,
-        build_nps_universe,
-        build_financials_silver,
-        build_fundamentals_pit,
-    ]:
-        yield from builder(data_root)
+    yield from build_silver_market_caps(data_root)
+    yield from build_silver_prices(data_root)
+    # Load silver.prices once (all columns) and share it with every downstream
+    # consumer instead of re-reading the multi-GB history once per builder.
+    prices = _read_optional(data_root / "silver/prices/dt=*/part.parquet")
+    yield from build_security_master(data_root, prices=prices)
+    yield from build_universe_history(data_root, prices=prices)
+    yield from build_corporate_actions(data_root, prices=prices)
+    yield from build_daily_prices_adj(data_root, prices=prices)
+    yield from build_daily_market_caps(data_root, prices=prices)
+    del prices
+    yield from build_nps_holdings_silver(data_root)
+    yield from build_nps_universe(data_root)
+    yield from build_financials_silver(data_root)
+    yield from build_fundamentals_pit(data_root)
 
 
 def build_silver_prices(
@@ -84,7 +175,7 @@ def build_silver_prices(
         frame = (
             _read_price_source_dates(data_root, source, selected_dates)
             if selected_dates is not None
-            else _read_optional(data_root / pattern)
+            else _read_optional(data_root / pattern, columns=_BRONZE_PRICE_COLUMNS)
         )
         if frame is not None and not frame.is_empty():
             prices = _normalize_price_frame(frame, source)
@@ -102,7 +193,7 @@ def build_silver_prices(
 
 
 def build_silver_market_caps(data_root: Path) -> list[BuildSummary]:
-    frame = _read_optional(data_root / "bronze/marcap/year=*/part.parquet")
+    frame = _read_optional(data_root / "bronze/marcap/year=*/part.parquet", columns=_MARCAP_COLUMNS)
     if frame is None or frame.is_empty():
         return [BuildSummary("silver.market_caps", 0, 0)]
     market_caps = _normalize_marcap_frame(frame)
@@ -112,13 +203,17 @@ def build_silver_market_caps(data_root: Path) -> list[BuildSummary]:
 def build_security_master(
     data_root: Path,
     dates: Iterable[date] | None = None,
+    *,
+    prices: pl.DataFrame | None = None,
 ) -> list[BuildSummary]:
     selected_dates = set(dates) if dates is not None else None
-    prices = (
-        _read_partition_dates(data_root, "silver.prices", selected_dates)
-        if selected_dates is not None
-        else _read_optional(data_root / "silver/prices/dt=*/part.parquet")
-    )
+    if selected_dates is not None:
+        prices = _read_partition_dates(data_root, "silver.prices", selected_dates)
+    elif prices is None:
+        prices = _read_optional(
+            data_root / "silver/prices/dt=*/part.parquet",
+            columns=_MASTER_PRICE_COLUMNS,
+        )
     if prices is None or prices.is_empty():
         return [BuildSummary("gold.security_master", 0, 0)]
 
@@ -142,13 +237,17 @@ def build_security_master(
 def build_universe_history(
     data_root: Path,
     dates: Iterable[date] | None = None,
+    *,
+    prices: pl.DataFrame | None = None,
 ) -> list[BuildSummary]:
     selected_dates = set(dates) if dates is not None else None
-    prices = (
-        _read_partition_dates(data_root, "silver.prices", selected_dates)
-        if selected_dates is not None
-        else _read_optional(data_root / "silver/prices/dt=*/part.parquet")
-    )
+    if selected_dates is not None:
+        prices = _read_partition_dates(data_root, "silver.prices", selected_dates)
+    elif prices is None:
+        prices = _read_optional(
+            data_root / "silver/prices/dt=*/part.parquet",
+            columns=_UNIVERSE_PRICE_COLUMNS,
+        )
     master = _read_optional(data_root / "gold/security_master.parquet")
     if prices is None or prices.is_empty() or master is None or master.is_empty():
         return [BuildSummary("gold.universe_history", 0, 0)]
@@ -189,6 +288,8 @@ def build_universe_history(
 def build_corporate_actions(
     data_root: Path,
     dates: Iterable[date] | None = None,
+    *,
+    prices: pl.DataFrame | None = None,
 ) -> list[BuildSummary]:
     """Detect split/merge/capital-reduction events from silver.prices share jumps.
 
@@ -203,9 +304,10 @@ def build_corporate_actions(
     curation) are preserved and win over detected rows for the same event.
     """
     del dates
-    prices = _read_price_history_columns(
-        data_root,
-        ["date", "security_id", "ticker", "close", "listed_shares", "market_cap"],
+    prices = (
+        prices.select(_ACTION_PRICE_COLUMNS)
+        if prices is not None
+        else _read_price_history_columns(data_root, _ACTION_PRICE_COLUMNS)
     )
     if prices is None or prices.is_empty():
         return [BuildSummary("silver.corporate_actions", 0, 0)]
@@ -282,7 +384,10 @@ def _detect_share_jump_actions(prices: pl.DataFrame) -> pl.DataFrame:
 def _corroborate_actions_with_dart(data_root: Path, actions: pl.DataFrame) -> pl.DataFrame:
     if actions.is_empty():
         return actions
-    filings = _read_optional(data_root / "bronze/dart_filings/dt=*/part.parquet")
+    filings = _read_optional(
+        data_root / "bronze/dart_filings/dt=*/part.parquet",
+        columns=["stock_code", "rcept_dt", "rcept_no", "report_nm"],
+    )
     if filings is None or filings.is_empty():
         return actions
     filings = (
@@ -519,13 +624,21 @@ def build_nps_universe(
 def build_daily_prices_adj(
     data_root: Path,
     dates: Iterable[date] | None = None,
+    *,
+    prices: pl.DataFrame | None = None,
 ) -> list[BuildSummary]:
     selected_dates = set(dates) if dates is not None else None
-    prices = (
-        _read_partition_dates(data_root, "silver.prices", selected_dates)
-        if selected_dates is not None
-        else _read_optional(data_root / "silver/prices/dt=*/part.parquet")
-    )
+    if selected_dates is not None:
+        prices = _read_partition_dates(data_root, "silver.prices", selected_dates)
+    elif prices is None:
+        prices = _read_optional(
+            data_root / "silver/prices/dt=*/part.parquet",
+            columns=_ADJ_PRICE_COLUMNS,
+        )
+    else:
+        prices = prices.select(
+            [column for column in _ADJ_PRICE_COLUMNS if column in prices.columns]
+        )
     if prices is None or prices.is_empty():
         return [BuildSummary("gold.daily_prices_adj", 0, 0)]
     actions = _load_corporate_actions(data_root)
@@ -608,9 +721,13 @@ def _adjusted_price_frame(prices: pl.DataFrame, actions: pl.DataFrame | None) ->
     )
 
 
-def build_daily_market_caps(data_root: Path) -> list[BuildSummary]:
+def build_daily_market_caps(
+    data_root: Path,
+    *,
+    prices: pl.DataFrame | None = None,
+) -> list[BuildSummary]:
     market_caps = _read_optional(data_root / "silver/market_caps/dt=*/part.parquet")
-    price_market_caps = _price_market_caps_frame(data_root)
+    price_market_caps = _price_market_caps_frame(data_root, prices)
     frames = [
         frame
         for frame in [market_caps, price_market_caps]
@@ -635,7 +752,10 @@ def build_daily_market_caps(data_root: Path) -> list[BuildSummary]:
 
 
 def build_financials_silver(data_root: Path) -> list[BuildSummary]:
-    financials = _read_optional(data_root / "bronze/dart_financials/rcept_dt=*/part.parquet")
+    financials = _read_optional(
+        data_root / "bronze/dart_financials/rcept_dt=*/part.parquet",
+        columns=_FINANCIALS_COLUMNS,
+    )
     if financials is None or financials.is_empty():
         return [BuildSummary("silver.financials", 0, 0)]
     master = _read_optional(data_root / "gold/security_master.parquet")
@@ -701,7 +821,10 @@ def _normalize_financial_account_ids(financials: pl.DataFrame) -> pl.DataFrame:
     )
 
 
-def build_fundamentals_pit(data_root: Path) -> list[BuildSummary]:
+def build_fundamentals_pit(
+    data_root: Path,
+    dates: Iterable[date] | None = None,
+) -> list[BuildSummary]:
     """Materialize point-in-time fundamentals per universe day.
 
     PIT availability policy: a filing is visible strictly AFTER its
@@ -711,7 +834,17 @@ def build_fundamentals_pit(data_root: Path) -> list[BuildSummary]:
     fiscal_period_end, then available_date, then rcept_dt, then consolidated
     statements over separate ones. Must stay row-for-row identical to
     ``finance_pi.pit.build_fundamentals_pit_sql``.
+
+    Incremental behavior: with ``dates=None`` an as-of date is only rebuilt
+    when its gold partition is missing or when silver.financials rows with an
+    ``available_date`` strictly before it were added or removed since the last
+    successful full run (per-available_date row counts recorded under
+    ``data/_state/fundamentals_pit.json``). Without that marker (first run)
+    every date is built, matching the previous full-rebuild behavior. With
+    explicit ``dates`` exactly those partitions are rebuilt and the state
+    marker is left untouched.
     """
+    selected_dates = set(dates) if dates is not None else None
     financials = _read_optional(data_root / "silver/financials/fiscal_year=*/part.parquet")
     universe_pattern = data_root / "gold/universe_history/dt=*/part.parquet"
     universe_files = sorted(glob(universe_pattern.as_posix()))
@@ -726,50 +859,169 @@ def build_fundamentals_pit(data_root: Path) -> list[BuildSummary]:
         .sort(["security_id", "account_id", "fiscal_period_end", "available_date", "rcept_dt"])
     )
 
+    available_date_rows = _financials_available_date_rows(financials)
+    state = _load_fundamentals_pit_state(data_root) if selected_dates is None else None
+    rebuild_all = selected_dates is None and state is None
+    changed_after: date | None = None
+    previously_empty: set[date] = set()
+    if state is not None:
+        previous_rows, previously_empty = state
+        changed_after = _first_changed_available_date(previous_rows, available_date_rows)
+
     layout = DataLakeLayout(data_root)
     writer = ParquetDatasetWriter()
     total_rows = 0
     total_files = 0
+    skipped_dates = 0
+    universe_dates: set[date] = set()
+    rebuilt_empty: set[date] = set()
+    rebuilt_nonempty: set[date] = set()
     for file in universe_files:
-        universe = pl.read_parquet(file, hive_partitioning=True).select("date", "security_id")
-        if universe.is_empty():
-            continue
         as_of_date = _partition_date_from_path(Path(file), "dt")
-        security_ids = universe["security_id"].drop_nulls().unique().to_list()
-        if not security_ids:
-            continue
-        eligible = financials.filter(
-            pl.col("security_id").is_in(security_ids)
-            & (pl.col("available_date") < pl.lit(as_of_date))
-        )
-        if eligible.is_empty():
-            continue
-        pit = (
-            universe.join(eligible, on="security_id", how="inner")
-            .sort(
-                [
-                    "date",
-                    "security_id",
-                    "account_id",
-                    "fiscal_period_end",
-                    "available_date",
-                    "rcept_dt",
-                    "is_consolidated",
-                ]
-            )
-            .unique(subset=["date", "security_id", "account_id"], keep="last")
-            .rename({"date": "as_of_date"})
-        )
-        if pit.is_empty():
+        if selected_dates is not None:
+            if as_of_date not in selected_dates:
+                continue
+        else:
+            universe_dates.add(as_of_date)
+            if not rebuild_all and not _fundamentals_pit_needs_rebuild(
+                layout, as_of_date, changed_after, previously_empty
+            ):
+                skipped_dates += 1
+                continue
+        universe = pl.read_parquet(file, hive_partitioning=True).select("date", "security_id")
+        pit = _fundamentals_pit_partition(universe, financials, as_of_date)
+        if pit is None:
+            rebuilt_empty.add(as_of_date)
             continue
         writer.write(
             pit,
             layout.partition_path("gold.fundamentals_pit", as_of_date),
             mode="overwrite",
         )
+        rebuilt_nonempty.add(as_of_date)
         total_rows += pit.height
         total_files += 1
+
+    if selected_dates is None:
+        empty_dates = ((previously_empty | rebuilt_empty) - rebuilt_nonempty) & universe_dates
+        _write_fundamentals_pit_state(data_root, available_date_rows, empty_dates)
+        logger.info(
+            "gold.fundamentals_pit: rebuilt %d as-of dates, skipped %d up-to-date dates",
+            len(rebuilt_empty) + len(rebuilt_nonempty),
+            skipped_dates,
+        )
     return [BuildSummary("gold.fundamentals_pit", total_rows, total_files)]
+
+
+def _fundamentals_pit_partition(
+    universe: pl.DataFrame,
+    financials: pl.DataFrame,
+    as_of_date: date,
+) -> pl.DataFrame | None:
+    """Compute one gold.fundamentals_pit partition; None when it has no rows."""
+    if universe.is_empty():
+        return None
+    security_ids = universe["security_id"].drop_nulls().unique().to_list()
+    if not security_ids:
+        return None
+    eligible = financials.filter(
+        pl.col("security_id").is_in(security_ids)
+        & (pl.col("available_date") < pl.lit(as_of_date))
+    )
+    if eligible.is_empty():
+        return None
+    pit = (
+        universe.join(eligible, on="security_id", how="inner")
+        .sort(
+            [
+                "date",
+                "security_id",
+                "account_id",
+                "fiscal_period_end",
+                "available_date",
+                "rcept_dt",
+                "is_consolidated",
+            ]
+        )
+        .unique(subset=["date", "security_id", "account_id"], keep="last")
+        .rename({"date": "as_of_date"})
+    )
+    return None if pit.is_empty() else pit
+
+
+def _fundamentals_pit_needs_rebuild(
+    layout: DataLakeLayout,
+    as_of_date: date,
+    changed_after: date | None,
+    previously_empty: set[date],
+) -> bool:
+    # Strict-less-than visibility: a financials row available on day A can only
+    # influence as-of dates strictly after A.
+    if changed_after is not None and as_of_date > changed_after:
+        return True
+    if layout.partition_path("gold.fundamentals_pit", as_of_date).exists():
+        return False
+    # Missing partition: rebuild unless the last run already proved it empty.
+    return as_of_date not in previously_empty
+
+
+def _fundamentals_pit_state_path(data_root: Path) -> Path:
+    return data_root / "_state" / "fundamentals_pit.json"
+
+
+def _financials_available_date_rows(financials: pl.DataFrame) -> dict[str, int]:
+    """Row count per available_date for the PIT-relevant financials rows.
+
+    Rows with a null available_date can never satisfy ``available_date <
+    as_of_date`` and are excluded, so churn in them never triggers rebuilds.
+    """
+    counts = (
+        financials.drop_nulls("available_date").group_by("available_date").agg(pl.len())
+    )
+    return {
+        value.isoformat(): rows
+        for value, rows in zip(counts["available_date"], counts["len"], strict=True)
+    }
+
+
+def _first_changed_available_date(
+    previous: dict[str, int],
+    current: dict[str, int],
+) -> date | None:
+    changed = {
+        key for key in previous.keys() | current.keys() if previous.get(key) != current.get(key)
+    }
+    if not changed:
+        return None
+    return date.fromisoformat(min(changed))
+
+
+def _load_fundamentals_pit_state(data_root: Path) -> tuple[dict[str, int], set[date]] | None:
+    path = _fundamentals_pit_state_path(data_root)
+    if not path.exists():
+        return None
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    available_date_rows = {
+        str(key): int(value) for key, value in payload.get("available_date_rows", {}).items()
+    }
+    empty_dates = {date.fromisoformat(value) for value in payload.get("empty_dates", [])}
+    return available_date_rows, empty_dates
+
+
+def _write_fundamentals_pit_state(
+    data_root: Path,
+    available_date_rows: dict[str, int],
+    empty_dates: set[date],
+) -> None:
+    path = _fundamentals_pit_state_path(data_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "financials_row_count": sum(available_date_rows.values()),
+        "financials_max_available_date": max(available_date_rows, default=None),
+        "available_date_rows": dict(sorted(available_date_rows.items())),
+        "empty_dates": sorted(value.isoformat() for value in empty_dates),
+    }
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
 def _normalize_nps_holdings(frame: pl.DataFrame) -> pl.DataFrame:
@@ -897,12 +1149,15 @@ def _deduplicate_price_candidates(prices: pl.DataFrame) -> pl.DataFrame:
         duplicate_keys = duplicates.select("_candidate_id", "ticker", "date", "close").sort(
             ["ticker", "date"]
         )
+        # Both sides are sorted by (ticker, date) above; polars cannot verify
+        # per-group sortedness itself, so opt out of the noisy runtime check.
         previous = duplicate_keys.join_asof(
             anchors,
             left_on="date",
             right_on="_anchor_date",
             by="ticker",
             strategy="backward",
+            **_JOIN_ASOF_KWARGS,
         ).select("_candidate_id", pl.col("_anchor_close").alias("_previous_close"))
         following = duplicate_keys.join_asof(
             anchors,
@@ -910,6 +1165,7 @@ def _deduplicate_price_candidates(prices: pl.DataFrame) -> pl.DataFrame:
             right_on="_anchor_date",
             by="ticker",
             strategy="forward",
+            **_JOIN_ASOF_KWARGS,
         ).select("_candidate_id", pl.col("_anchor_close").alias("_following_close"))
         selected = (
             duplicates.join(previous, on="_candidate_id", how="left")
@@ -1055,15 +1311,28 @@ def _normalize_marcap_frame(frame: pl.DataFrame) -> pl.DataFrame:
     )
 
 
-def _read_optional(pattern: Path) -> pl.DataFrame | None:
+def _read_optional(pattern: Path, columns: list[str] | None = None) -> pl.DataFrame | None:
+    """Read every file matching ``pattern``, or None when the dataset is absent.
+
+    ``columns`` prunes the scan to the requested columns (intersected with the
+    dataset schema, so optional columns may be silently absent) before
+    collecting, keeping memory proportional to what the caller consumes.
+    """
     files = sorted(glob(pattern.as_posix()))
     if not files:
         return None
     try:
-        return pl.read_parquet(files, hive_partitioning=True)
-    except pl.exceptions.SchemaError:
+        lazy = pl.scan_parquet(files, hive_partitioning=True)
+        if columns is not None:
+            available = lazy.collect_schema().names()
+            lazy = lazy.select([column for column in columns if column in available])
+        return lazy.collect()
+    except (pl.exceptions.SchemaError, pl.exceptions.ColumnNotFoundError):
         frames = [pl.read_parquet(file, hive_partitioning=True) for file in files]
-        return pl.concat(frames, how="diagonal_relaxed")
+        frame = pl.concat(frames, how="diagonal_relaxed")
+        if columns is not None:
+            frame = frame.select([column for column in columns if column in frame.columns])
+        return frame
 
 
 def _read_partition_dates(
@@ -1146,7 +1415,10 @@ def _read_existing_paths(paths: Iterable[Path]) -> pl.DataFrame | None:
 
 
 def _latest_company_frame(data_root: Path) -> pl.DataFrame | None:
-    frame = _read_optional(data_root / "bronze/dart_company/snapshot_dt=*/part.parquet")
+    frame = _read_optional(
+        data_root / "bronze/dart_company/snapshot_dt=*/part.parquet",
+        columns=["snapshot_dt", "stock_code", "corp_code", "corp_name"],
+    )
     if frame is None or frame.is_empty():
         return None
     frame = _cast_dates(frame, ["snapshot_dt"])
@@ -1163,7 +1435,10 @@ def _naver_summary_frame(
     frame = (
         _read_partition_dates(data_root, "bronze.naver_summary_raw", dates)
         if dates is not None
-        else _read_optional(data_root / "bronze/naver_summary/dt=*/part.parquet")
+        else _read_optional(
+            data_root / "bronze/naver_summary/dt=*/part.parquet",
+            columns=["snapshot_dt", "ticker", "name", "market", "market_cap", "listed_shares"],
+        )
     )
     if frame is None or frame.is_empty():
         return None
@@ -1195,7 +1470,18 @@ def _market_caps_frame(data_root: Path, dates: set[date] | None = None) -> pl.Da
     frame = (
         _read_partition_dates(data_root, "silver.market_caps", dates)
         if dates is not None
-        else _read_optional(data_root / "silver/market_caps/dt=*/part.parquet")
+        else _read_optional(
+            data_root / "silver/market_caps/dt=*/part.parquet",
+            columns=[
+                "date",
+                "ticker",
+                "name",
+                "market",
+                "trading_value",
+                "market_cap",
+                "listed_shares",
+            ],
+        )
     )
     if frame is None or frame.is_empty():
         return None
@@ -1345,7 +1631,10 @@ def _merge_security_master(data_root: Path, updates: pl.DataFrame) -> pl.DataFra
 
 
 def _load_corporate_actions(data_root: Path) -> pl.DataFrame | None:
-    actions = _read_optional(data_root / "silver/corporate_actions/dt=*/part.parquet")
+    actions = _read_optional(
+        data_root / "silver/corporate_actions/dt=*/part.parquet",
+        columns=["security_id", "effective_date", "adjustment_factor"],
+    )
     if actions is None or actions.is_empty():
         return None
     actions = (
@@ -1582,8 +1871,18 @@ def _previous_gold_close_frame(data_root: Path, before: date) -> pl.DataFrame | 
     return pl.read_parquet(path, hive_partitioning=True)
 
 
-def _price_market_caps_frame(data_root: Path) -> pl.DataFrame | None:
-    frame = _read_optional(data_root / "silver/prices/dt=*/part.parquet")
+def _price_market_caps_frame(
+    data_root: Path,
+    prices: pl.DataFrame | None = None,
+) -> pl.DataFrame | None:
+    frame = (
+        prices
+        if prices is not None
+        else _read_optional(
+            data_root / "silver/prices/dt=*/part.parquet",
+            columns=_MARKET_CAP_PRICE_COLUMNS,
+        )
+    )
     if frame is None or frame.is_empty():
         return None
     return (
@@ -1719,10 +2018,12 @@ def _write_by_partition(
     writer = ParquetDatasetWriter()
     files = 0
     rows = 0
-    for value in sorted(set(values)):
-        partition = frame.filter(pl.col(partition_column) == value)
-        if partition.is_empty():
-            continue
+    selected = set(values)
+    # Single partition pass instead of one full-frame filter per value.
+    partitions = frame.partition_by(partition_column, as_dict=True)
+    for key in sorted(key for key in partitions if key[0] is not None and key[0] in selected):
+        value = key[0]
+        partition = partitions[key]
         if dataset in {"silver.financials", "silver.dividends"}:
             name = dataset.split(".", maxsplit=1)[1]
             path = data_root / "silver" / name / f"fiscal_year={value}" / "part.parquet"
