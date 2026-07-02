@@ -49,6 +49,9 @@ class KisUniverseDailyAdapter:
     chunk_days: int = 90
     sleep_seconds: float = 0.05
     ticker_batch_size: int = 50
+    retry_attempts: int = 3
+    retry_sleep_seconds: float = 1.0
+    retry_backoff_multiplier: float = 2.0
     name: str = "kis_universe_daily"
 
     def list_pending(self, since: date, until: date) -> Iterable[IngestUnit]:
@@ -85,7 +88,7 @@ class KisUniverseDailyAdapter:
         failures: list[str] = []
         for index, ticker in enumerate(tickers, start=1):
             try:
-                rows.extend(self.client.fetch_daily_prices(ticker, since, until))
+                rows.extend(self._fetch_ticker_with_retries(ticker, since, until))
             except Exception as exc:  # noqa: BLE001
                 failures.append(f"{ticker}:{exc}")
             if self.sleep_seconds > 0 and index < len(tickers):
@@ -99,6 +102,26 @@ class KisUniverseDailyAdapter:
         if failures:
             rows.append({"_failures": failures})
         return RawBatch(unit, rows)
+
+    def _fetch_ticker_with_retries(
+        self,
+        ticker: str,
+        since: date,
+        until: date,
+    ) -> list[dict[str, object]]:
+        attempts = max(1, self.retry_attempts)
+        delay = max(0.0, self.retry_sleep_seconds)
+        multiplier = max(1.0, self.retry_backoff_multiplier)
+        for attempt in range(1, attempts + 1):
+            try:
+                return self.client.fetch_daily_prices(ticker, since, until)
+            except Exception as exc:  # noqa: BLE001
+                if attempt >= attempts or not _is_retryable_kis_error(exc):
+                    raise
+                if delay > 0:
+                    sleep(delay)
+                delay *= multiplier
+        raise RuntimeError("unreachable KIS retry state")
 
     def write_bronze(self, batch: RawBatch) -> WriteResult:
         failures = [row for row in batch.rows if "_failures" in row]
@@ -226,3 +249,18 @@ def _existing_tickers_for_date(layout: DataLakeLayout, logical_date: date) -> se
     except (OSError, pl.exceptions.PolarsError):
         return set()
     return set(frame["ticker"].cast(pl.String).str.zfill(6).to_list())
+
+
+def _is_retryable_kis_error(exc: Exception) -> bool:
+    message = str(exc)
+    return any(
+        token in message
+        for token in (
+            "EGW00201",
+            "초당 거래건수",
+            "HTTP 429",
+            "HTTP 500 Internal Server Error",
+            "Timeout",
+            "timed out",
+        )
+    )

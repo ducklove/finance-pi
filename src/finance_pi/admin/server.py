@@ -4011,7 +4011,7 @@ def _dividend_row_dict(row: tuple[Any, ...]) -> dict[str, Any]:
 
 # 스크리너에서 pivot 할 재무 계정. BASIC_FUNDAMENTAL_METRICS 의 부분집합 —
 # ROE/영업이익률/부채비율/PBR 계산에 필요한 네 가지.
-_SCREENER_FUNDAMENTAL_METRICS = ("revenue", "operating_profit", "net_income", "equity")
+_SCREENER_FUNDAMENTAL_METRICS = ("revenue", "operating_profit", "net_income", "equity", "liabilities")
 
 
 def _screener_account_ids() -> list[str]:
@@ -4197,7 +4197,7 @@ def _query_screener_rows_catalog(
                 FROM (
                     SELECT ticker, per, roe,
                            ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY snapshot_dt DESC) AS rn
-                    FROM bronze.naver_summary
+                    FROM bronze.naver_summary_raw
                 ) WHERE rn = 1
             )
             SELECT

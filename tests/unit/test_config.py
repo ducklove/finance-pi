@@ -14,6 +14,9 @@ def test_runtime_settings_treat_empty_base_urls_as_defaults(tmp_path, monkeypatc
                 "KIS_APP_SECRET= app-secret ",
                 "KIS_DAILY_SLEEP_SECONDS=0.4",
                 "KIS_DAILY_TICKER_BATCH_SIZE=12",
+                "KIS_DAILY_RETRY_ATTEMPTS=5",
+                "KIS_DAILY_RETRY_SLEEP_SECONDS=1.5",
+                "KIS_DAILY_RETRY_BACKOFF_MULTIPLIER=3.0",
                 "OPENDART_BASE_URL=",
                 "FRED_API_KEY= fred-key ",
                 "ECOS_API_KEY= ecos-key ",
@@ -30,6 +33,9 @@ def test_runtime_settings_treat_empty_base_urls_as_defaults(tmp_path, monkeypatc
     assert settings.kis_app_secret == "app-secret"
     assert settings.kis_daily_sleep_seconds == 0.4
     assert settings.kis_daily_ticker_batch_size == 12
+    assert settings.kis_daily_retry_attempts == 5
+    assert settings.kis_daily_retry_sleep_seconds == 1.5
+    assert settings.kis_daily_retry_backoff_multiplier == 3.0
     assert settings.fred_api_key == "fred-key"
     assert settings.ecos_api_key == "ecos-key"
     assert settings.has_kis

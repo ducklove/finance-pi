@@ -13,9 +13,11 @@ from finance_pi.cli.app import (
     _backfill_years,
     _catchup_dates,
     _daily_complete,
+    _daily_price_quality_failures,
     _latest_gold_price_date,
     _latest_price_universe_tickers,
     _previous_weekday,
+    _read_daily_marker_status,
     _run_daily_builds,
     _run_daily_ingest,
     _validated_backfill_paths,
@@ -100,6 +102,75 @@ def test_catchup_dates_start_after_daily_marker_for_no_price_day(tmp_path) -> No
     assert not _daily_complete(tmp_path, date(2026, 5, 4))
 
 
+def test_daily_marker_records_complete_with_failures_and_catchup_retries(tmp_path) -> None:
+    latest_partition = tmp_path / "gold" / "daily_prices_adj" / "dt=2026-06-05"
+    latest_partition.mkdir(parents=True)
+    (latest_partition / "part.parquet").write_bytes(b"placeholder")
+    failed_partition = tmp_path / "gold" / "daily_prices_adj" / "dt=2026-05-21"
+    failed_partition.mkdir(parents=True)
+    (failed_partition / "part.parquet").write_bytes(b"placeholder")
+    _write_daily_marker(
+        tmp_path,
+        date(2026, 5, 21),
+        {
+            "report_date": "2026-05-21",
+            "price_date": "2026-05-21",
+            "failures": ["KIS universe price ingest failed: rate limit"],
+            "gold_price_partition": True,
+        },
+    )
+    _write_daily_marker(
+        tmp_path,
+        date(2026, 6, 5),
+        {
+            "report_date": "2026-06-05",
+            "price_date": "2026-06-05",
+            "failures": [],
+            "gold_price_partition": True,
+        },
+    )
+
+    marker = tmp_path / "_state" / "daily" / "2026-05-21.json"
+
+    assert _read_daily_marker_status(marker) == "complete_with_failures"
+    assert _daily_complete(tmp_path, date(2026, 5, 21))
+    assert _catchup_dates(tmp_path, None, date(2026, 6, 5)) == (date(2026, 5, 21),)
+
+
+def test_daily_marker_records_failed_without_gold_partition(tmp_path) -> None:
+    _write_daily_marker(
+        tmp_path,
+        date(2026, 5, 21),
+        {
+            "report_date": "2026-05-21",
+            "price_date": "2026-05-21",
+            "failures": ["KIS universe price ingest failed"],
+            "gold_price_partition": False,
+        },
+    )
+
+    marker = tmp_path / "_state" / "daily" / "2026-05-21.json"
+
+    assert _read_daily_marker_status(marker) == "failed"
+    assert not _daily_complete(tmp_path, date(2026, 5, 21))
+
+
+def test_daily_price_quality_flags_large_row_count_drop(tmp_path) -> None:
+    previous = tmp_path / "gold" / "daily_prices_adj" / "dt=2026-05-20"
+    current = tmp_path / "gold" / "daily_prices_adj" / "dt=2026-05-21"
+    previous.mkdir(parents=True)
+    current.mkdir(parents=True)
+    pl.DataFrame({"date": [date(2026, 5, 20)] * 100}).write_parquet(
+        previous / "part.parquet"
+    )
+    pl.DataFrame({"date": [date(2026, 5, 21)] * 94}).write_parquet(current / "part.parquet")
+
+    failures = _daily_price_quality_failures(tmp_path, date(2026, 5, 21))
+
+    assert len(failures) == 1
+    assert "row count low" in failures[0]
+
+
 def test_daily_ingest_internal_calls_pass_concrete_defaults(tmp_path, monkeypatch) -> None:
     calls: dict[str, tuple[object, ...]] = {}
 
@@ -130,6 +201,9 @@ def test_daily_ingest_internal_calls_pass_concrete_defaults(tmp_path, monkeypatc
             has_kis=True,
             kis_daily_sleep_seconds=0.25,
             kis_daily_ticker_batch_size=25,
+            kis_daily_retry_attempts=3,
+            kis_daily_retry_sleep_seconds=1.0,
+            kis_daily_retry_backoff_multiplier=2.0,
         ),
         date(2026, 4, 30),
     )
@@ -143,6 +217,9 @@ def test_daily_ingest_internal_calls_pass_concrete_defaults(tmp_path, monkeypatc
         1,
         0.25,
         25,
+        3,
+        1.0,
+        2.0,
     )
     assert calls["dart_filings"] == ("2026-04-29", "2026-04-30", tmp_path, 7)
     assert calls["dart_dividends"] == ("2026-04-29", "2026-04-30", tmp_path, None, None, 0.05)

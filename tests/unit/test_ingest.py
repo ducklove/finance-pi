@@ -271,6 +271,56 @@ def test_kis_universe_adapter_batches_and_skips_existing_tickers(tmp_path) -> No
     assert [unit.params["tickers"] for unit in units] == [("035720",), ("000660",)]
 
 
+def test_kis_universe_adapter_retries_retryable_ticker_errors(tmp_path, monkeypatch) -> None:
+    calls: dict[str, int] = {}
+
+    class FakeKisClient:
+        def fetch_daily_prices(self, ticker: str, since: date, until: date):
+            calls[ticker] = calls.get(ticker, 0) + 1
+            if calls[ticker] == 1:
+                raise RuntimeError("kis: HTTP 500 Internal Server Error; body=EGW00201")
+            return [
+                {
+                    "date": since,
+                    "ticker": ticker,
+                    "isin": None,
+                    "name": ticker,
+                    "market": "KRX",
+                    "open": 100.0,
+                    "high": 101.0,
+                    "low": 99.0,
+                    "close": 100.0,
+                    "volume": 10,
+                    "trading_value": 1000,
+                    "market_cap": None,
+                    "listed_shares": None,
+                }
+            ]
+
+    sleeps: list[float] = []
+    monkeypatch.setattr("finance_pi.sources.kis.adapter.sleep", lambda seconds: sleeps.append(seconds))
+
+    layout = DataLakeLayout(tmp_path)
+    layout.ensure_base_dirs()
+    adapter = KisUniverseDailyAdapter(
+        layout,
+        ParquetDatasetWriter(),
+        FakeKisClient(),
+        ("005930",),
+        chunk_days=1,
+        sleep_seconds=0,
+        retry_attempts=2,
+        retry_sleep_seconds=0.1,
+        retry_backoff_multiplier=2.0,
+    )
+    unit = next(iter(adapter.list_pending(date(2026, 4, 28), date(2026, 4, 28))))
+    result = adapter.write_bronze(adapter.fetch(unit))
+
+    assert calls["005930"] == 2
+    assert sleeps == [0.1]
+    assert result.rows == 1
+
+
 def test_naver_daily_backfill_adapter_writes_request_chunks(tmp_path) -> None:
     class FakeNaverClient:
         def fetch_daily_prices(self, ticker: str, since: date, until: date):
