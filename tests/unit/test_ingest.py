@@ -6,8 +6,8 @@ import polars as pl
 
 from finance_pi.cli.app import _dart_financial_requests
 from finance_pi.config import ProjectPaths
-from finance_pi.ingest import ResponseCache, request_hash
-from finance_pi.ingest.models import IngestUnit, RawBatch
+from finance_pi.ingest import IngestOrchestrator, ResponseCache, request_hash
+from finance_pi.ingest.models import IngestUnit, RawBatch, WriteResult
 from finance_pi.sources.kis.adapter import KisUniverseDailyAdapter
 from finance_pi.sources.naver.adapter import NaverDailyBackfillAdapter
 from finance_pi.sources.opendart.adapter import DartFilingsAdapter, DartFinancialsBulkAdapter
@@ -316,6 +316,75 @@ def test_naver_daily_backfill_adapter_writes_request_chunks(tmp_path) -> None:
     assert remaining[0].params["tickers"] == ("035720",)
 
 
+def test_naver_daily_backfill_adapter_retries_only_failed_tickers(tmp_path) -> None:
+    class FlakyNaverClient:
+        def __init__(self) -> None:
+            self.fail_ticker = "035720"
+            self.calls: list[str] = []
+
+        def fetch_daily_prices(self, ticker: str, since: date, until: date):
+            self.calls.append(ticker)
+            if ticker == self.fail_ticker:
+                raise RuntimeError("boom")
+            return [
+                {
+                    "date": since,
+                    "ticker": ticker,
+                    "isin": None,
+                    "name": ticker,
+                    "market": "KRX",
+                    "open": 100.0,
+                    "high": 101.0,
+                    "low": 99.0,
+                    "close": 100.0,
+                    "volume": 10,
+                    "trading_value": None,
+                    "market_cap": None,
+                    "listed_shares": None,
+                }
+            ]
+
+    layout = DataLakeLayout(tmp_path)
+    layout.ensure_base_dirs()
+    client = FlakyNaverClient()
+    adapter = NaverDailyBackfillAdapter(
+        layout,
+        ParquetDatasetWriter(),
+        client,
+        ("005930", "035720"),
+        chunk_days=3650,
+        ticker_batch_size=2,
+        sleep_seconds=0,
+    )
+
+    units = list(adapter.list_pending(date(2026, 4, 28), date(2026, 4, 28)))
+    assert len(units) == 1
+    result = adapter.write_bronze(adapter.fetch(units[0]))
+
+    assert result.rows == 1
+    assert result.reason == "partial Naver failures: 1"
+    chunk_dir = result.path.parent
+    sidecar = chunk_dir / "part.parquet.failures.json"
+    assert sidecar.exists()
+
+    retry_units = list(adapter.list_pending(date(2026, 4, 28), date(2026, 4, 28)))
+    assert len(retry_units) == 1
+    assert retry_units[0].params["tickers"] == ("035720",)
+    assert retry_units[0].params["retry_of"] == units[0].request_hash
+
+    client.fail_ticker = ""
+    retry_result = adapter.write_bronze(adapter.fetch(retry_units[0]))
+
+    assert retry_result.rows == 1
+    assert not sidecar.exists()
+    assert list(adapter.list_pending(date(2026, 4, 28), date(2026, 4, 28))) == []
+
+    chunk_paths = layout.root.glob("bronze/naver_daily/*/*/part.parquet")
+    frames = [pl.read_parquet(path) for path in chunk_paths]
+    tickers = sorted(ticker for frame in frames for ticker in frame["ticker"].to_list())
+    assert tickers == ["005930", "035720"]
+
+
 def test_dart_financials_bulk_merges_same_rcept_date_partitions(tmp_path) -> None:
     class FakeOpenDartClient:
         def fetch_financials(
@@ -377,3 +446,126 @@ def test_dart_financials_bulk_merges_same_rcept_date_partitions(tmp_path) -> Non
     assert second.rows == 1
     assert sorted(frame["corp_code"].to_list()) == ["00126380", "00258801"]
     assert list(adapter.list_pending(date(2026, 3, 1), date(2026, 3, 31))) == []
+
+
+def test_dart_financials_bulk_writes_partial_marker_and_retries(tmp_path) -> None:
+    class FlakyOpenDartClient:
+        def __init__(self) -> None:
+            self.fail_corp_code = "00258801"
+
+        def fetch_financials(
+            self,
+            corp_code: str,
+            bsns_year: int,
+            reprt_code: str,
+            *,
+            available_date: date,
+            fs_div: str = "CFS",
+        ):
+            if corp_code == self.fail_corp_code:
+                raise RuntimeError("quota exceeded")
+            return [
+                {
+                    "security_id": None,
+                    "corp_code": corp_code,
+                    "fiscal_period_end": date(bsns_year, 12, 31),
+                    "event_date": date(bsns_year, 12, 31),
+                    "rcept_dt": available_date,
+                    "available_date": available_date,
+                    "report_type": reprt_code,
+                    "account_id": "ifrs-full_Assets",
+                    "account_name": "Assets",
+                    "amount": 1000.0,
+                    "is_consolidated": fs_div == "CFS",
+                    "accounting_basis": "K-IFRS",
+                }
+            ]
+
+    layout = DataLakeLayout(tmp_path)
+    layout.ensure_base_dirs()
+    client = FlakyOpenDartClient()
+    adapter = DartFinancialsBulkAdapter(
+        layout,
+        ParquetDatasetWriter(),
+        client,
+        (
+            {
+                "corp_code": "00126380",
+                "bsns_year": 2025,
+                "report_code": "11011",
+                "available_date": date(2026, 3, 15),
+            },
+            {
+                "corp_code": "00258801",
+                "bsns_year": 2025,
+                "report_code": "11011",
+                "available_date": date(2026, 3, 15),
+            },
+        ),
+        batch_size=2,
+        sleep_seconds=0,
+    )
+
+    units = list(adapter.list_pending(date(2026, 3, 1), date(2026, 3, 31)))
+    assert len(units) == 1
+    result = adapter.write_bronze(adapter.fetch(units[0]))
+
+    assert result.rows == 1
+    assert "partial OpenDART failures: 1" in result.reason
+    marker = adapter._marker_path(units[0])
+    assert marker.read_text(encoding="utf-8").splitlines()[0] == "partial"
+
+    retry_units = list(adapter.list_pending(date(2026, 3, 1), date(2026, 3, 31)))
+    assert len(retry_units) == 1
+    assert [request["corp_code"] for request in retry_units[0].params["requests"]] == ["00258801"]
+
+    client.fail_corp_code = ""
+    retry_result = adapter.write_bronze(adapter.fetch(retry_units[0]))
+
+    assert retry_result.rows == 1
+    assert marker.read_text(encoding="utf-8") == "ok\n"
+    assert list(adapter.list_pending(date(2026, 3, 1), date(2026, 3, 31))) == []
+
+    frame = pl.read_parquet(layout.partition_path("bronze.dart_financials_raw", date(2026, 3, 15)))
+    assert sorted(frame["corp_code"].to_list()) == ["00126380", "00258801"]
+
+
+def test_orchestrator_isolates_unit_failures(tmp_path) -> None:
+    class FailingAdapter:
+        name = "failing"
+
+        def list_pending(self, since: date, until: date):
+            yield IngestUnit(self.name, since, "/boom", {})
+
+        def fetch(self, unit: IngestUnit) -> RawBatch:
+            raise RuntimeError("adapter exploded")
+
+        def write_bronze(self, batch: RawBatch):
+            raise AssertionError("should not be reached")
+
+    class RecordingAdapter:
+        name = "recording"
+
+        def __init__(self) -> None:
+            self.ran = False
+
+        def list_pending(self, since: date, until: date):
+            yield IngestUnit(self.name, since, "/ok", {})
+
+        def fetch(self, unit: IngestUnit) -> RawBatch:
+            return RawBatch(unit, [{"value": 1}])
+
+        def write_bronze(self, batch: RawBatch):
+            self.ran = True
+            return WriteResult(path=tmp_path / "ok.parquet", rows=1)
+
+    recording = RecordingAdapter()
+    results = IngestOrchestrator([FailingAdapter(), recording]).run(
+        date(2026, 4, 28), date(2026, 4, 28)
+    )
+
+    assert recording.ran is True
+    assert len(results) == 2
+    assert results[0].skipped is True
+    assert "adapter exploded" in results[0].reason
+    assert results[1].rows == 1

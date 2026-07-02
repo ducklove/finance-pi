@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
 from time import sleep
 
 import polars as pl
@@ -217,6 +218,7 @@ class DartFinancialsBulkAdapter:
 
     def list_pending(self, since: date, until: date) -> Iterable[IngestUnit]:
         batch_size = max(1, self.batch_size)
+        requests_by_id = {_request_id(request): request for request in self.requests}
         for start in range(0, len(self.requests), batch_size):
             requests = self.requests[start : start + batch_size]
             unit = IngestUnit(
@@ -231,8 +233,32 @@ class DartFinancialsBulkAdapter:
                     "fs_div": self.fs_div,
                 },
             )
-            if not self._marker_path(unit).exists():
+            marker = self._marker_path(unit)
+            if not marker.exists():
                 yield unit
+                continue
+            status, failed_ids = _read_marker(marker)
+            if status != "partial":
+                continue
+            retry_requests = tuple(
+                requests_by_id[request_id]
+                for request_id in failed_ids
+                if request_id in requests_by_id
+            )
+            if retry_requests:
+                yield IngestUnit(
+                    self.name,
+                    until,
+                    "/api/fnlttSinglAcntAll.json",
+                    {
+                        "requests": retry_requests,
+                        "request_start": start,
+                        "request_count": len(retry_requests),
+                        "total_request_count": len(self.requests),
+                        "fs_div": self.fs_div,
+                        "retry_of": unit.request_hash,
+                    },
+                )
 
     def fetch(self, unit: IngestUnit) -> RawBatch:
         requests = tuple(unit.params["requests"])
@@ -276,14 +302,24 @@ class DartFinancialsBulkAdapter:
         return RawBatch(unit, rows)
 
     def write_bronze(self, batch: RawBatch) -> WriteResult:
-        marker = self._marker_path(batch.unit)
-        if marker.exists():
+        is_retry = "retry_of" in batch.unit.params
+        marker = (
+            self._marker_path_for_hash(str(batch.unit.params["retry_of"]))
+            if is_retry
+            else self._marker_path(batch.unit)
+        )
+        if not is_retry and marker.exists():
             return WriteResult(path=marker, rows=0, skipped=True, reason="bronze chunk exists")
 
         failures = [row for row in batch.rows if "_failures" in row]
         financial_rows = [row for row in batch.rows if "_failures" not in row]
+        failed_ids = [_failure_id(entry) for entry in failures[0]["_failures"]] if failures else []
+
         if not financial_rows:
             marker.parent.mkdir(parents=True, exist_ok=True)
+            if failed_ids:
+                _write_partial_marker(marker, failed_ids)
+                return WriteResult(path=marker, rows=0, skipped=True, reason="all retries failed")
             marker.write_text("no_rows\n", encoding="utf-8")
             return WriteResult(path=marker, rows=0, skipped=True, reason="no financial rows")
 
@@ -293,19 +329,23 @@ class DartFinancialsBulkAdapter:
             RawBatch(batch.unit, financial_rows),
         )
         marker.parent.mkdir(parents=True, exist_ok=True)
-        marker.write_text("ok\n", encoding="utf-8")
-        if failures:
+        if failed_ids:
+            _write_partial_marker(marker, failed_ids)
             reason_parts = [result.reason] if result.reason else []
-            reason_parts.append(f"partial OpenDART failures: {len(failures[0]['_failures'])}")
+            reason_parts.append(f"partial OpenDART failures: {len(failed_ids)}")
             return WriteResult(path=result.path, rows=result.rows, reason="; ".join(reason_parts))
+        marker.write_text("ok\n", encoding="utf-8")
         return result
 
     def _marker_path(self, unit: IngestUnit):
+        return self._marker_path_for_hash(unit.request_hash)
+
+    def _marker_path_for_hash(self, request_hash: str):
         return (
             self.layout.root
             / "_cache"
             / "opendart_financials"
-            / f"chunk={unit.request_hash[:16]}.done"
+            / f"chunk={request_hash[:16]}.done"
         )
 
 
@@ -368,3 +408,22 @@ def _coerce_date(value: object) -> date:
     if isinstance(value, date):
         return value
     return date.fromisoformat(str(value))
+
+
+def _request_id(request: dict[str, object]) -> str:
+    return f"{request['corp_code']}/{request['bsns_year']}/{request['report_code']}"
+
+
+def _failure_id(failure_entry: str) -> str:
+    return failure_entry.split(":", 1)[0]
+
+
+def _write_partial_marker(marker: Path, failed_ids: list[str]) -> None:
+    marker.write_text("partial\n" + "\n".join(failed_ids) + "\n", encoding="utf-8")
+
+
+def _read_marker(marker: Path) -> tuple[str, list[str]]:
+    lines = marker.read_text(encoding="utf-8").splitlines()
+    if not lines:
+        return "", []
+    return lines[0], lines[1:]
