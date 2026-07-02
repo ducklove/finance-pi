@@ -42,6 +42,7 @@ def test_builtin_factors_are_registered() -> None:
         "lowvol_252",
         "reversal_1m",
         "momentum_52w_high",
+        "nps_flow",
         "composite_value_quality",
     } <= set(factor_registry.names())
 
@@ -54,6 +55,8 @@ def test_registry_describe_exposes_direction() -> None:
     assert rows["momentum_12_1"]["direction"] == 1
     assert rows["quality_roa"]["requires"] == ["gold.fundamentals_pit"]
     assert rows["momentum_12_1"]["rebalance"] == "monthly"
+    assert rows["nps_flow"]["direction"] == 1
+    assert rows["nps_flow"]["requires"] == ["gold.nps_holdings_delta", "gold.daily_prices_adj"]
 
 
 def test_momentum_factor_returns_lazy_scores() -> None:
@@ -267,6 +270,80 @@ def test_value_dividend_yield_pit_and_hand_computed() -> None:
     assert scores[("S001", date(2025, 6, 15))] is None
     assert scores[("S002", date(2024, 3, 16))] is None
     assert scores[("S004", date(2024, 3, 11))] == pytest.approx(700.0 * 100 / 2_000_000.0)
+
+
+def _nps_delta_row(
+    security_id: str,
+    snapshot_date: date,
+    available_date: date,
+    delta_ratio: float,
+) -> dict:
+    return {
+        "security_id": security_id,
+        "ticker": security_id.removeprefix("S"),
+        "snapshot_date": snapshot_date,
+        "prev_snapshot_date": snapshot_date - timedelta(days=31),
+        "available_date": available_date,
+        "holding_ratio": max(delta_ratio, 0.0),
+        "prev_holding_ratio": max(-delta_ratio, 0.0),
+        "delta_ratio": delta_ratio,
+        "entered": False,
+        "exited": delta_ratio < 0,
+    }
+
+
+def _flow_price_row(day: date, security_id: str) -> dict:
+    return {"date": day, "security_id": security_id}
+
+
+def test_nps_flow_pit_broadcast_and_staleness() -> None:
+    ctx = InMemoryFactorContext(
+        {
+            "gold.nps_holdings_delta": pl.DataFrame(
+                [
+                    _nps_delta_row("S001", date(2024, 3, 10), date(2024, 3, 15), 0.5),
+                    _nps_delta_row("S001", date(2024, 4, 10), date(2024, 4, 15), -0.2),
+                    # Exit row: NPS selling out scores as a negative flow.
+                    _nps_delta_row("S002", date(2024, 3, 10), date(2024, 3, 15), -3.0),
+                ]
+            ),
+            "gold.daily_prices_adj": pl.DataFrame(
+                [
+                    # Strictly before and ON available_date: delta not knowable yet.
+                    _flow_price_row(date(2024, 3, 11), "S001"),
+                    _flow_price_row(date(2024, 3, 15), "S001"),
+                    _flow_price_row(date(2024, 3, 16), "S001"),
+                    # Broadcast forward until the next delta becomes visible.
+                    _flow_price_row(date(2024, 4, 15), "S001"),
+                    _flow_price_row(date(2024, 4, 16), "S001"),
+                    # 370d staleness cap around the last effective date (2024-04-16).
+                    _flow_price_row(date(2025, 4, 21), "S001"),
+                    _flow_price_row(date(2025, 4, 22), "S001"),
+                    _flow_price_row(date(2024, 3, 16), "S002"),
+                    # No delta disclosed at all for S003.
+                    _flow_price_row(date(2024, 3, 16), "S003"),
+                ]
+            ),
+        }
+    )
+    cls = factor_registry.get("nps_flow")
+    assert cls.direction == 1
+
+    result = cls().compute(ctx).collect()
+
+    scores = {
+        (row["security_id"], row["date"]): row["score"] for row in result.iter_rows(named=True)
+    }
+    assert scores[("S001", date(2024, 3, 11))] is None
+    assert scores[("S001", date(2024, 3, 15))] is None
+    assert scores[("S001", date(2024, 3, 16))] == pytest.approx(0.5)
+    # The second delta (available 2024-04-15) must not leak into 2024-04-15 itself.
+    assert scores[("S001", date(2024, 4, 15))] == pytest.approx(0.5)
+    assert scores[("S001", date(2024, 4, 16))] == pytest.approx(-0.2)
+    assert scores[("S001", date(2025, 4, 21))] == pytest.approx(-0.2)
+    assert scores[("S001", date(2025, 4, 22))] is None
+    assert scores[("S002", date(2024, 3, 16))] == pytest.approx(-3.0)
+    assert scores[("S003", date(2024, 3, 16))] is None
 
 
 def test_quality_gpa_prefers_gross_profit_then_derives_it() -> None:

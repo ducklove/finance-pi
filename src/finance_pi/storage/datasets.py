@@ -222,6 +222,23 @@ def _empty_nps_holdings_silver() -> str:
     """
 
 
+def _empty_nps_holdings_delta() -> str:
+    return """
+    SELECT
+        CAST(NULL AS VARCHAR) AS security_id,
+        CAST(NULL AS VARCHAR) AS ticker,
+        CAST(NULL AS DATE) AS snapshot_date,
+        CAST(NULL AS DATE) AS prev_snapshot_date,
+        CAST(NULL AS DATE) AS available_date,
+        CAST(NULL AS DOUBLE) AS holding_ratio,
+        CAST(NULL AS DOUBLE) AS prev_holding_ratio,
+        CAST(NULL AS DOUBLE) AS delta_ratio,
+        CAST(NULL AS BOOLEAN) AS entered,
+        CAST(NULL AS BOOLEAN) AS exited
+    WHERE FALSE
+    """
+
+
 def _empty_nps_universe() -> str:
     return """
     SELECT
@@ -694,6 +711,12 @@ dataset_registry: dict[str, DatasetSpec] = {
         "gold",
         "gold/nps_universe/dt=*/part.parquet",
         _empty_nps_universe(),
+    ),
+    "gold.nps_holdings_delta": DatasetSpec(
+        "gold.nps_holdings_delta",
+        "gold",
+        "gold/nps_holdings_delta/dt=*/part.parquet",
+        _empty_nps_holdings_delta(),
     ),
     "gold.preferred_discount": DatasetSpec(
         "gold.preferred_discount",

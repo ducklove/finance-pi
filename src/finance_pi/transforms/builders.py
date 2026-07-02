@@ -47,6 +47,17 @@ DART_CORROBORATION_DAYS_AFTER = 14
 PREFERRED_DISCOUNT_WINDOW = 252
 PREFERRED_DISCOUNT_MIN_OBS = 120
 
+# NPS holdings delta PIT stamping. The silver.nps_holdings snapshot ``date`` is
+# the ingest capture (logical) date of already-public sources (the data.go.kr
+# public dataset, the FnGuide institutional page, or the legacy value-invest
+# SQLite crawl) — no official filing/publication date is captured, and
+# ``source_date`` is only the disclosure's valuation reference date. Live
+# crawls were public on the capture day itself, but legacy backfilled rows may
+# carry a reference date instead of a crawl date, so ``available_date`` adds
+# this conservative calendar-day buffer (~5 trading days) to the LATER
+# snapshot's date before a delta becomes knowable.
+NPS_DISCLOSURE_LAG_DAYS = 7
+
 # KRX preferred tickers reuse the common ticker's first 5 digits with a
 # non-zero 6th character: 5/7/9 for legacy classes, or an uppercase letter
 # (e.g. K for 신형우선주). Anything else (fully alphanumeric short codes,
@@ -180,6 +191,7 @@ def build_all_iter(data_root: Path) -> Iterable[BuildSummary]:
     yield from build_preferred_discount(data_root)
     yield from build_nps_holdings_silver(data_root)
     yield from build_nps_universe(data_root)
+    yield from build_nps_holdings_delta(data_root)
     yield from build_financials_silver(data_root)
     yield from build_fundamentals_pit(data_root)
 
@@ -846,6 +858,106 @@ def build_nps_universe(
     if universe.is_empty():
         return [BuildSummary("gold.nps_universe", 0, 0)]
     return _write_by_date(data_root, "gold.nps_universe", universe, "date")
+
+
+def build_nps_holdings_delta(
+    data_root: Path,
+    dates: Iterable[date] | None = None,
+) -> list[BuildSummary]:
+    """Per-security ownership change between consecutive NPS disclosure snapshots.
+
+    One row per security per consecutive snapshot pair: ``delta_ratio =
+    holding_ratio - prev_holding_ratio`` (silver ``ownership_pct``). A security
+    disclosed for the first time gets ``entered=True`` (previous ratio treated
+    as 0); a security that disappears gets an ``exited=True`` row with
+    ``holding_ratio`` 0 — NPS selling out is itself a signal. PIT stamping: a
+    delta is knowable only once the LATER snapshot became public, so
+    ``available_date = snapshot_date + NPS_DISCLOSURE_LAG_DAYS`` (see the
+    constant for the evidence behind that assumption). Consumers must apply
+    the same strict ``available_date < as_of`` policy as gold.fundamentals_pit.
+
+    ``dates`` is accepted for orchestrator symmetry only: each delta depends on
+    the previous snapshot and the dataset is tiny (one row set per disclosure
+    snapshot), so every invocation performs a full rebuild.
+    """
+    del dates  # deltas need consecutive snapshots; a full rebuild is cheap.
+    holdings = _read_optional(
+        data_root / "silver/nps_holdings/dt=*/part.parquet",
+        columns=["date", "security_id", "stock_code", "ownership_pct"],
+    )
+    if holdings is None or holdings.is_empty():
+        return [BuildSummary("gold.nps_holdings_delta", 0, 0)]
+    delta = _nps_holdings_delta_frame(holdings)
+    if delta.is_empty():
+        return [BuildSummary("gold.nps_holdings_delta", 0, 0)]
+    return _write_by_date(data_root, "gold.nps_holdings_delta", delta, "snapshot_date")
+
+
+def _nps_holdings_delta_frame(holdings: pl.DataFrame) -> pl.DataFrame:
+    holdings = (
+        _cast_dates(holdings, ["date"])
+        .filter(pl.col("date").is_not_null() & pl.col("security_id").is_not_null())
+        .with_columns(pl.col("ownership_pct").cast(pl.Float64, strict=False).fill_null(0.0))
+        .unique(subset=["date", "security_id"], keep="last")
+    )
+    snapshot_dates = holdings["date"].unique().sort().to_list()
+    if len(snapshot_dates) < 2:
+        return pl.DataFrame()
+    pairs = pl.DataFrame(
+        {
+            "snapshot_date": snapshot_dates[1:],
+            "prev_snapshot_date": snapshot_dates[:-1],
+        },
+        schema={"snapshot_date": pl.Date, "prev_snapshot_date": pl.Date},
+    )
+    current = holdings.select(
+        pl.col("date").alias("snapshot_date"),
+        "security_id",
+        pl.col("stock_code").alias("ticker"),
+        pl.col("ownership_pct").alias("holding_ratio"),
+    ).join(pairs, on="snapshot_date", how="inner")
+    previous = holdings.select(
+        pl.col("date").alias("prev_snapshot_date"),
+        "security_id",
+        pl.col("stock_code").alias("prev_ticker"),
+        pl.col("ownership_pct").alias("prev_holding_ratio"),
+    ).join(pairs, on="prev_snapshot_date", how="inner")
+    return (
+        current.join(
+            previous,
+            on=["snapshot_date", "prev_snapshot_date", "security_id"],
+            how="full",
+            coalesce=True,
+        )
+        .with_columns(
+            pl.col("prev_holding_ratio").is_null().alias("entered"),
+            pl.col("holding_ratio").is_null().alias("exited"),
+            pl.coalesce(["ticker", "prev_ticker"]).alias("ticker"),
+            pl.col("holding_ratio").fill_null(0.0),
+            pl.col("prev_holding_ratio").fill_null(0.0),
+        )
+        .with_columns(
+            (pl.col("holding_ratio") - pl.col("prev_holding_ratio")).alias("delta_ratio"),
+            pl.col("snapshot_date")
+            .dt.offset_by(f"{NPS_DISCLOSURE_LAG_DAYS}d")
+            .alias("available_date"),
+        )
+        .select(
+            [
+                "security_id",
+                "ticker",
+                "snapshot_date",
+                "prev_snapshot_date",
+                "available_date",
+                "holding_ratio",
+                "prev_holding_ratio",
+                "delta_ratio",
+                "entered",
+                "exited",
+            ]
+        )
+        .sort(["snapshot_date", "security_id"])
+    )
 
 
 def build_daily_prices_adj(

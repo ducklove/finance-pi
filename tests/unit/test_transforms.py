@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import shutil
-from datetime import date
+from datetime import date, timedelta
 
 import polars as pl
 import pytest
@@ -16,6 +16,7 @@ from finance_pi.transforms import (
     build_daily_prices_adj,
     build_financials_silver,
     build_fundamentals_pit,
+    build_nps_holdings_delta,
     build_preferred_discount,
     build_security_master,
     build_security_relations,
@@ -1784,6 +1785,134 @@ def test_build_preferred_discount_incremental_matches_full_build(tmp_path, monke
         tmp_path / "gold" / "preferred_discount" / "dt=2024-01-05" / "part.parquet"
     )
     assert incremental.equals(full_latest)
+
+
+def _nps_silver_row(snapshot: date, stock_code: str, ownership_pct: float) -> dict:
+    return {
+        "date": snapshot,
+        "security_id": f"S{stock_code}",
+        "listing_id": f"L{stock_code}",
+        "stock_code": stock_code,
+        "stock_name": f"Name {stock_code}",
+        "shares": 100,
+        "ownership_pct": ownership_pct,
+        "price": 1000.0,
+        "market_value": 100_000.0,
+        "change_pct": None,
+        "source_rank": None,
+        "source": "fixture",
+        "source_date": snapshot,
+        "source_market_value": None,
+        "source_weight_pct": None,
+        "shares_source": "fixture",
+        "price_date": snapshot,
+        "is_exact_price": True,
+    }
+
+
+def _write_nps_silver(tmp_path, rows: list[dict]) -> None:
+    layout = DataLakeLayout(tmp_path)
+    writer = ParquetDatasetWriter()
+    for key, partition in pl.DataFrame(rows).partition_by("date", as_dict=True).items():
+        logical_date = key[0] if isinstance(key, tuple) else key
+        writer.write(
+            partition,
+            layout.partition_path("silver.nps_holdings", logical_date),
+            mode="overwrite",
+        )
+
+
+def test_build_nps_holdings_delta_tracks_change_enter_exit_and_pit(tmp_path) -> None:
+    layout = DataLakeLayout(tmp_path)
+    layout.ensure_base_dirs()
+    first, second = date(2025, 1, 10), date(2025, 2, 10)
+    _write_nps_silver(
+        tmp_path,
+        [
+            _nps_silver_row(first, "005930", 7.5),
+            _nps_silver_row(first, "000660", 3.0),
+            _nps_silver_row(second, "005930", 8.1),
+            _nps_silver_row(second, "035420", 2.0),
+        ],
+    )
+
+    summary = build_nps_holdings_delta(tmp_path)[0]
+
+    assert summary.dataset == "gold.nps_holdings_delta"
+    assert (summary.rows, summary.files) == (3, 1)
+    partitions = sorted(
+        path.parent.name
+        for path in (tmp_path / "gold" / "nps_holdings_delta").glob("dt=*/part.parquet")
+    )
+    # The first snapshot has no predecessor, so only the later pair is emitted.
+    assert partitions == ["dt=2025-02-10"]
+    delta = pl.read_parquet(tmp_path / "gold/nps_holdings_delta/dt=2025-02-10/part.parquet")
+    rows = {row["security_id"]: row for row in delta.iter_rows(named=True)}
+    assert set(rows) == {"S005930", "S000660", "S035420"}
+    # PIT: the delta is stamped with the LATER snapshot's publish date.
+    expected_available = second + timedelta(days=builders_module.NPS_DISCLOSURE_LAG_DAYS)
+    for row in rows.values():
+        assert row["snapshot_date"] == second
+        assert row["prev_snapshot_date"] == first
+        assert row["available_date"] == expected_available
+    changed = rows["S005930"]
+    assert changed["ticker"] == "005930"
+    assert changed["holding_ratio"] == pytest.approx(8.1)
+    assert changed["prev_holding_ratio"] == pytest.approx(7.5)
+    assert changed["delta_ratio"] == pytest.approx(0.6)
+    assert (changed["entered"], changed["exited"]) == (False, False)
+    entered = rows["S035420"]
+    assert entered["ticker"] == "035420"
+    assert entered["prev_holding_ratio"] == 0.0
+    assert entered["delta_ratio"] == pytest.approx(2.0)
+    assert (entered["entered"], entered["exited"]) == (True, False)
+    exited = rows["S000660"]
+    assert exited["ticker"] == "000660"
+    assert exited["holding_ratio"] == 0.0
+    assert exited["prev_holding_ratio"] == pytest.approx(3.0)
+    assert exited["delta_ratio"] == pytest.approx(-3.0)
+    assert (exited["entered"], exited["exited"]) == (False, True)
+
+
+def test_build_nps_holdings_delta_chains_consecutive_snapshots(tmp_path) -> None:
+    layout = DataLakeLayout(tmp_path)
+    layout.ensure_base_dirs()
+    days = [date(2025, 1, 10), date(2025, 2, 10), date(2025, 3, 10)]
+    _write_nps_silver(
+        tmp_path,
+        [
+            _nps_silver_row(day, "005930", ratio)
+            for day, ratio in zip(days, [7.5, 8.0, 7.0], strict=True)
+        ],
+    )
+
+    # ``dates`` is accepted but always falls back to a full rebuild (documented).
+    summary = build_nps_holdings_delta(tmp_path, dates=[date(2025, 3, 10)])[0]
+
+    assert (summary.rows, summary.files) == (2, 2)
+    march = pl.read_parquet(tmp_path / "gold/nps_holdings_delta/dt=2025-03-10/part.parquet")
+    # Each delta pairs with its immediate predecessor snapshot, not the first.
+    assert march["prev_snapshot_date"].item() == date(2025, 2, 10)
+    assert march["delta_ratio"].item() == pytest.approx(-1.0)
+
+
+def test_build_nps_holdings_delta_empty_and_single_snapshot(tmp_path) -> None:
+    layout = DataLakeLayout(tmp_path)
+    layout.ensure_base_dirs()
+
+    empty = build_nps_holdings_delta(tmp_path)[0]
+
+    assert empty.dataset == "gold.nps_holdings_delta"
+    assert (empty.rows, empty.files) == (0, 0)
+    assert not list((tmp_path / "gold" / "nps_holdings_delta").glob("dt=*/part.parquet"))
+
+    _write_nps_silver(tmp_path, [_nps_silver_row(date(2025, 1, 10), "005930", 7.5)])
+
+    single = build_nps_holdings_delta(tmp_path)[0]
+
+    # One snapshot has no predecessor: still an explicit empty summary, no crash.
+    assert (single.rows, single.files) == (0, 0)
+    assert not list((tmp_path / "gold" / "nps_holdings_delta").glob("dt=*/part.parquet"))
 
 
 def test_preferred_discount_empty_when_no_preferred_shares(tmp_path) -> None:

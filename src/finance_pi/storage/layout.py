@@ -38,6 +38,7 @@ class DataLakeLayout:
             "gold/fundamentals_pit",
             "gold/universe_history",
             "gold/nps_universe",
+            "gold/nps_holdings_delta",
             "gold/preferred_discount",
             "macro/cpi",
             "macro/rates",
@@ -130,6 +131,8 @@ class DataLakeLayout:
                 return self.root / "gold" / "universe_history" / f"dt={dt}" / "part.parquet"
             case "gold.nps_universe":
                 return self.root / "gold" / "nps_universe" / f"dt={dt}" / "part.parquet"
+            case "gold.nps_holdings_delta":
+                return self.root / "gold" / "nps_holdings_delta" / f"dt={dt}" / "part.parquet"
             case "gold.preferred_discount":
                 return self.root / "gold" / "preferred_discount" / f"dt={dt}" / "part.parquet"
             case _:

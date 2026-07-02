@@ -341,6 +341,59 @@ class Momentum52WeekHigh(Factor):
         )
 
 
+@factor_registry.register("nps_flow")
+class NpsFlow(Factor):
+    """NPS holdings-change flow: the pension fund's accumulation is Korean smart money.
+
+    Score is the latest ``delta_ratio`` (ownership_pct change between
+    consecutive disclosure snapshots, including enter/exit rows) from
+    gold.nps_holdings_delta, broadcast forward per security until the next
+    delta so monthly rebalances see the latest known flow. PIT mirrors
+    gold.fundamentals_pit: a delta becomes usable strictly AFTER its
+    ``available_date`` (effective from the next day). A delta older than
+    ``max_staleness`` no longer scores — an old disclosure change carries no
+    flow information.
+    """
+
+    requires = ["gold.nps_holdings_delta", "gold.daily_prices_adj"]
+    rebalance = "monthly"
+    direction = 1
+    max_staleness = "370d"
+
+    def compute(self, ctx) -> pl.LazyFrame:
+        deltas = (
+            ctx.scan("gold.nps_holdings_delta")
+            .filter(
+                pl.col("security_id").is_not_null()
+                & pl.col("available_date").is_not_null()
+                & pl.col("delta_ratio").is_not_null()
+            )
+            .with_columns(pl.col("available_date").dt.offset_by("1d").alias("effective_date"))
+            .group_by(["security_id", "effective_date"])
+            .agg(pl.col("delta_ratio").sort_by("snapshot_date").last().alias("delta_ratio"))
+            .sort(["security_id", "effective_date"])
+        )
+        prices = (
+            ctx.scan("gold.daily_prices_adj")
+            .select(["date", "security_id"])
+            .sort(["security_id", "date"])
+        )
+        return (
+            prices.join_asof(
+                deltas,
+                left_on="date",
+                right_on="effective_date",
+                by="security_id",
+                strategy="backward",
+                tolerance=self.max_staleness,
+                # Both sides are sorted just above; skip the per-group check warning.
+                check_sortedness=False,
+            )
+            .with_columns(pl.col("delta_ratio").alias("score"))
+            .select(["date", "security_id", "score"])
+        )
+
+
 @factor_registry.register("preferred_discount_z")
 class PreferredDiscountZ(Factor):
     """Preferred-share discount z-score; higher = preferred unusually cheap vs common.
