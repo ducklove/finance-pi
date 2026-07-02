@@ -34,6 +34,8 @@ KNOWN_DOTENV_KEYS = frozenset(
         "NPS_PUBLIC_DATA_SOURCE_DATE",
         "NPS_PUBLIC_DATA_DISCOVER",
         "FINANCE_PI_ADMIN_TOKEN",
+        "FINANCE_PI_WEBHOOK_URL",
+        "FINANCE_PI_WEBHOOK_ALWAYS",
         "FRED_API_KEY",
         "ECOS_API_KEY",
         "BOK_ECOS_API_KEY",
@@ -94,6 +96,8 @@ class RuntimeSettings:
     naver_finance_user_agent: str = "Mozilla/5.0 finance-pi/0.1"
     fred_api_key: str | None = None
     ecos_api_key: str | None = None
+    webhook_url: str | None = None
+    webhook_always: bool = False
 
     @classmethod
     def load(cls, root: Path | None = None) -> RuntimeSettings:
@@ -136,6 +140,8 @@ class RuntimeSettings:
             or cls.naver_finance_user_agent,
             fred_api_key=_env_first("FRED_API_KEY"),
             ecos_api_key=_env_first("ECOS_API_KEY", "BOK_ECOS_API_KEY", "BOK_API_KEY"),
+            webhook_url=_env_first("FINANCE_PI_WEBHOOK_URL"),
+            webhook_always=_env_first("FINANCE_PI_WEBHOOK_ALWAYS") == "1",
         )
 
     @property
@@ -149,6 +155,10 @@ class RuntimeSettings:
     @property
     def has_kis(self) -> bool:
         return bool(self.kis_app_key and self.kis_app_secret)
+
+    @property
+    def has_webhook(self) -> bool:
+        return bool(self.webhook_url)
 
 
 def load_dotenv(path: Path) -> None:

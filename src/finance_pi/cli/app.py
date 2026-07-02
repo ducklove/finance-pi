@@ -21,6 +21,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
+import httpx
 import polars as pl
 import typer
 
@@ -38,7 +39,7 @@ from finance_pi.docs_site import build_docs_site
 from finance_pi.factors import ParquetFactorContext, factor_registry
 from finance_pi.http import HttpJsonClient, SourceApiError
 from finance_pi.ingest import IngestOrchestrator, request_hash
-from finance_pi.reports.data_quality import build_data_quality_report
+from finance_pi.reports.data_quality import build_data_quality_report, build_dataset_scorecard
 from finance_pi.reports.fraud import build_fraud_report
 from finance_pi.sources.cnbc import (
     CNBC_COMMODITY_SERIES,
@@ -119,7 +120,9 @@ from finance_pi.transforms import (
     build_fundamentals_pit,
     build_nps_holdings_silver,
     build_nps_universe,
+    build_preferred_discount,
     build_security_master,
+    build_security_relations,
     build_silver_market_caps,
     build_silver_prices,
     build_universe_history,
@@ -329,10 +332,9 @@ def build_docs(
 
 @factors_app.command("list")
 def list_factors() -> None:
-    for name in factor_registry.names():
-        cls = factor_registry.get(name)
-        requires = ", ".join(cls.requires)
-        typer.echo(f"{name}\t{cls.rebalance}\t{requires}")
+    for row in factor_registry.describe():
+        requires = ", ".join(row["requires"])
+        typer.echo(f"{row['name']}\t{row['rebalance']}\tdirection={row['direction']}\t{requires}")
 
 
 @ingest_app.command("krx")
@@ -1095,6 +1097,31 @@ def build_cmd_fundamentals_pit(
     _print_summaries(build_fundamentals_pit(data_root, dates=parsed or None))
 
 
+@build_app.command("relations")
+def build_cmd_relations(root: Path = typer.Option(Path("."), help="Workspace root")) -> None:
+    _print_summaries(build_security_relations(ProjectPaths(root=root).data_root))
+
+
+@build_app.command("preferred-discount")
+def build_cmd_preferred_discount(
+    root: Path = typer.Option(Path("."), help="Workspace root"),
+    dates: list[str] = typer.Option(
+        [], "--date", help="Rebuild only these partitions (YYYY-MM-DD, repeatable)"
+    ),
+    include_low_confidence: bool = typer.Option(
+        False, help="Include low-confidence preferred/common pairs"
+    ),
+) -> None:
+    parsed = [date.fromisoformat(value) for value in dates]
+    _print_summaries(
+        build_preferred_discount(
+            ProjectPaths(root=root).data_root,
+            dates=parsed or None,
+            include_low_confidence=include_low_confidence,
+        )
+    )
+
+
 @build_app.command("nps")
 def build_cmd_nps(root: Path = typer.Option(Path("."), help="Workspace root")) -> None:
     data_root = ProjectPaths(root=root).data_root
@@ -1263,25 +1290,37 @@ def run_daily(
     settings = RuntimeSettings.load(paths.root)
     DataLakeLayout(paths.data_root).ensure_base_dirs()
     failures: list[str] = []
+    build_failures: list[str] = []
     if ingest:
         failures = _run_daily_ingest(paths, settings, parsed_date)
         for failure in failures:
             typer.echo(failure)
         if strict and failures:
+            _notify_daily_webhook(settings, parsed_date, failures, build_failures, None)
             raise typer.Exit(code=1)
-    summaries = _run_daily_builds(
-        paths.data_root,
-        include_fundamentals_pit,
-        _previous_weekday(parsed_date),
-    )
+    try:
+        summaries = _run_daily_builds(
+            paths.data_root,
+            include_fundamentals_pit,
+            _previous_weekday(parsed_date),
+        )
+    except Exception as exc:  # noqa: BLE001
+        build_failures.append(f"Build step failed: {exc}")
+        summaries = []
     created = CatalogBuilder(paths.data_root, paths.catalog_path).build()
 
     dq_path = paths.data_root / "reports" / "data_quality" / f"{parsed_date.isoformat()}.html"
     fraud_path = (
         paths.data_root / "reports" / "backtest_fraud" / f"{parsed_date.isoformat()}.html"
     )
-    build_data_quality_report(paths.data_root, parsed_date).write(dq_path)
-    build_fraud_report(paths.data_root, parsed_date).write(fraud_path)
+    try:
+        build_data_quality_report(paths.data_root, parsed_date).write(dq_path)
+    except Exception as exc:  # noqa: BLE001
+        build_failures.append(f"Data quality report failed: {exc}")
+    try:
+        build_fraud_report(paths.data_root, parsed_date).write(fraud_path)
+    except Exception as exc:  # noqa: BLE001
+        build_failures.append(f"Fraud report failed: {exc}")
 
     for summary in summaries:
         typer.echo(f"Build: {summary.dataset} rows={summary.rows} files={summary.files}")
@@ -1301,6 +1340,9 @@ def run_daily(
                 "gold_price_partition": _gold_price_partition_exists(paths.data_root, price_date),
             },
         )
+
+    scorecard = _safe_build_scorecard(paths.data_root, parsed_date)
+    _notify_daily_webhook(settings, parsed_date, failures, build_failures, scorecard)
 
 
 @app.command("catchup")
@@ -1333,6 +1375,81 @@ def catchup_daily(
         if not _daily_complete(paths.data_root, report_day):
             typer.echo(f"Catch-up stopped: {report_day.isoformat()} did not complete")
             return
+
+
+def _safe_build_scorecard(data_root: Path, report_date: date) -> pl.DataFrame | None:
+    try:
+        return build_dataset_scorecard(data_root, report_date)
+    except Exception as exc:  # noqa: BLE001
+        typer.echo(f"Scorecard build failed: {exc}")
+        return None
+
+
+def _notify_daily_webhook(
+    settings: RuntimeSettings,
+    report_date: date,
+    failures: list[str],
+    build_failures: list[str],
+    scorecard: pl.DataFrame | None,
+) -> None:
+    """Best-effort daily/catchup summary POST. Never raises."""
+
+    if not settings.has_webhook:
+        return
+    try:
+        failed_steps = [*failures, *build_failures]
+        scorecard_grades: dict[str, str] = {}
+        if scorecard is not None and not scorecard.is_empty():
+            scorecard_grades = {
+                row["dataset"]: row["grade"] for row in scorecard.iter_rows(named=True)
+            }
+        worst_grade = _worst_scorecard_grade(scorecard_grades)
+        ok = not failed_steps and worst_grade in (None, "A")
+
+        should_send = (
+            worst_grade in ("C", "F") or bool(failed_steps) or settings.webhook_always
+        )
+        if not should_send:
+            return
+
+        payload = _daily_webhook_payload(
+            report_date, ok, failed_steps, scorecard_grades, worst_grade
+        )
+        httpx.post(settings.webhook_url, json=payload, timeout=5.0)
+    except Exception as exc:  # noqa: BLE001
+        typer.echo(f"Webhook notification failed (ignored): {exc}")
+
+
+def _worst_scorecard_grade(scorecard_grades: dict[str, str]) -> str | None:
+    grades = set(scorecard_grades.values())
+    for grade in ("F", "C", "A"):
+        if grade in grades:
+            return grade
+    return None
+
+
+def _daily_webhook_payload(
+    report_date: date,
+    ok: bool,
+    failed_steps: list[str],
+    scorecard_grades: dict[str, str],
+    worst_grade: str | None,
+) -> dict[str, object]:
+    status_text = "OK" if ok else "ISSUES"
+    lines = [f"finance-pi daily {report_date.isoformat()}: {status_text}"]
+    if failed_steps:
+        lines.append(f"Failed steps ({len(failed_steps)}): " + "; ".join(failed_steps[:5]))
+    if worst_grade is not None and worst_grade != "A":
+        bad = [name for name, grade in scorecard_grades.items() if grade in ("C", "F")]
+        lines.append(f"Worst dataset grade: {worst_grade} ({', '.join(sorted(bad))})")
+    return {
+        "content": "\n".join(lines),
+        "date": report_date.isoformat(),
+        "ok": ok,
+        "failed_steps": failed_steps,
+        "scorecard_grades": scorecard_grades,
+        "worst_grade": worst_grade,
+    }
 
 
 def _kst_today() -> date:
@@ -2256,6 +2373,8 @@ def _run_daily_builds(data_root: Path, include_fundamentals_pit: bool, price_dat
         build_daily_prices_adj,
     ]:
         summaries.extend(builder(data_root, price_dates))
+    summaries.extend(build_security_relations(data_root))
+    summaries.extend(build_preferred_discount(data_root, dates=price_dates))
     summaries.extend(build_financials_silver(data_root))
     if include_fundamentals_pit:
         summaries.extend(build_fundamentals_pit(data_root))
@@ -2266,9 +2385,11 @@ def _run_full_builds(data_root: Path, include_fundamentals_pit: bool) -> list:
     builders = [
         build_silver_prices,
         build_security_master,
+        build_security_relations,
         build_universe_history,
         build_corporate_actions,
         build_daily_prices_adj,
+        build_preferred_discount,
         build_nps_holdings_silver,
         build_nps_universe,
         build_financials_silver,
@@ -2873,6 +2994,23 @@ def _fetch_dart_share_count_rows_parallel(
     return rows
 
 
+def _receipt_date(rcept_no: object) -> date | None:
+    """Derive the true DART receipt date from the first 8 digits of rcept_no.
+
+    Mirrors ``finance_pi.sources.opendart.client._receipt_date``, which is not
+    exported from that module's public surface. Kept in sync manually; see
+    that function for the canonical implementation.
+    """
+
+    text = str(rcept_no or "")
+    if len(text) < 8 or not text[:8].isdigit():
+        return None
+    try:
+        return date(int(text[:4]), int(text[4:6]), int(text[6:8]))
+    except ValueError:
+        return None
+
+
 def _normalize_dart_dividend_rows(
     raw_rows: list[dict[str, object]],
     bsns_year: int,
@@ -2906,7 +3044,7 @@ def _normalize_dart_dividend_rows(
                 {
                     "fiscal_year": fiscal_year,
                     "fiscal_period_end": date(fiscal_year, 12, 31),
-                    "rcept_dt": available_date,
+                    "rcept_dt": _receipt_date(source_rcept_no) or available_date,
                     "available_date": available_date,
                     "corp_code": corp_code,
                     "corp_name": corp_name,
@@ -2946,11 +3084,12 @@ def _normalize_dart_share_count_rows(
         fiscal_period_end = (
             _coerce_date(row.get("stlm_dt")) if row.get("stlm_dt") else date(bsns_year, 12, 31)
         )
+        source_rcept_no = _clean_text(row.get("rcept_no"))
         rows.append(
             {
                 "fiscal_year": bsns_year,
                 "fiscal_period_end": fiscal_period_end,
-                "rcept_dt": available_date,
+                "rcept_dt": _receipt_date(source_rcept_no) or available_date,
                 "available_date": available_date,
                 "corp_code": str(row.get("corp_code") or ""),
                 "corp_name": _clean_text(row.get("corp_name")),
@@ -2966,7 +3105,7 @@ def _normalize_dart_share_count_rows(
                 "issued_shares": _int_or_none(row.get("istc_totqy")),
                 "treasury_shares": _int_or_none(row.get("tesstk_co")),
                 "outstanding_shares": _int_or_none(row.get("distb_stock_co")),
-                "source_rcept_no": _clean_text(row.get("rcept_no")),
+                "source_rcept_no": source_rcept_no,
                 "report_type": report_code,
                 "source": "opendart.stockTotqySttus",
                 "is_estimated": False,

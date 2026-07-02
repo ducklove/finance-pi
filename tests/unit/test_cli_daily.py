@@ -13,9 +13,14 @@ from finance_pi.cli.app import (
     _backfill_years,
     _catchup_dates,
     _daily_complete,
+    _daily_webhook_payload,
     _latest_gold_price_date,
     _latest_price_universe_tickers,
+    _normalize_dart_dividend_rows,
+    _normalize_dart_share_count_rows,
+    _notify_daily_webhook,
     _previous_weekday,
+    _receipt_date,
     _run_daily_builds,
     _run_daily_ingest,
     _validated_backfill_paths,
@@ -23,7 +28,7 @@ from finance_pi.cli.app import (
     _write_daily_marker,
     _yearly_backfill_status,
 )
-from finance_pi.config import ProjectPaths
+from finance_pi.config import ProjectPaths, RuntimeSettings
 from finance_pi.storage import DataLakeLayout, ParquetDatasetWriter
 
 
@@ -503,6 +508,48 @@ def test_daily_marker_uses_report_date_not_price_date(tmp_path, monkeypatch) -> 
     assert not (tmp_path / "data" / "_state" / "daily" / "2026-05-06.json").exists()
 
 
+def test_daily_run_survives_webhook_exception(tmp_path, monkeypatch) -> None:
+    class Report:
+        def write(self, path):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("ok", encoding="utf-8")
+
+    class Catalog:
+        def __init__(self, data_root, catalog_path):
+            self.data_root = data_root
+            self.catalog_path = catalog_path
+
+        def build(self):
+            self.catalog_path.parent.mkdir(parents=True, exist_ok=True)
+            self.catalog_path.write_text("", encoding="utf-8")
+            return []
+
+    monkeypatch.setattr(cli_app, "_run_daily_builds", lambda *args: [])
+    monkeypatch.setattr(cli_app, "CatalogBuilder", Catalog)
+    monkeypatch.setattr(cli_app, "build_data_quality_report", lambda *args: Report())
+    monkeypatch.setattr(cli_app, "build_fraud_report", lambda *args: Report())
+    monkeypatch.setattr(
+        cli_app.RuntimeSettings,
+        "load",
+        classmethod(
+            lambda cls, root=None: cli_app.RuntimeSettings(
+                webhook_url="https://example.test/webhook", webhook_always=True
+            )
+        ),
+    )
+
+    def raise_runtime(*args, **kwargs):
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(cli_app.httpx, "post", raise_runtime)
+    DataLakeLayout(tmp_path / "data").ensure_base_dirs()
+
+    # Must not raise even though the webhook POST fails.
+    cli_app.run_daily(tmp_path, "2026-05-07", False, False, False)
+
+    assert (tmp_path / "data" / "_state" / "daily" / "2026-05-07.json").exists()
+
+
 def test_macro_table_write_merges_by_date_and_series(tmp_path) -> None:
     data_root = tmp_path / "data"
     DataLakeLayout(data_root).ensure_base_dirs()
@@ -881,6 +928,218 @@ def test_backfill_status_uses_markers_and_price_partitions(tmp_path) -> None:
     assert status[0]["price_days"] == 1
     assert status[0]["coverage"] == "2023-01-02..2023-01-02"
     assert status[1]["status"] == "missing"
+
+
+def test_receipt_date_parses_leading_yyyymmdd() -> None:
+    assert _receipt_date("20240315000123") == date(2024, 3, 15)
+
+
+def test_receipt_date_returns_none_for_missing_or_invalid() -> None:
+    assert _receipt_date(None) is None
+    assert _receipt_date("") is None
+    assert _receipt_date("not-a-date") is None
+
+
+def test_normalize_dart_dividend_rows_prefers_rcept_no_over_available_date() -> None:
+    raw_rows = [
+        {
+            "corp_code": "00126380",
+            "corp_name": "Samsung",
+            "stock_knd": "보통주",
+            "se": "주당 현금배당금(원)",
+            "thstrm": "361",
+            "rcept_no": "20240315000123",
+        }
+    ]
+
+    rows = _normalize_dart_dividend_rows(
+        raw_rows, 2023, "11011", date(2024, 4, 1), mapping={}
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["rcept_dt"] == date(2024, 3, 15)
+    assert rows[0]["available_date"] == date(2024, 4, 1)
+
+
+def test_normalize_dart_dividend_rows_falls_back_when_rcept_no_missing() -> None:
+    raw_rows = [
+        {
+            "corp_code": "00126380",
+            "corp_name": "Samsung",
+            "stock_knd": "보통주",
+            "se": "주당 현금배당금(원)",
+            "thstrm": "361",
+            "rcept_no": None,
+        }
+    ]
+
+    rows = _normalize_dart_dividend_rows(
+        raw_rows, 2023, "11011", date(2024, 4, 1), mapping={}
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["rcept_dt"] == date(2024, 4, 1)
+
+
+def test_normalize_dart_share_count_rows_prefers_rcept_no_over_available_date() -> None:
+    raw_rows = [
+        {
+            "corp_code": "00126380",
+            "corp_name": "Samsung",
+            "se": "보통주",
+            "rcept_no": "20240315000123",
+            "istc_totqy": "1000",
+        }
+    ]
+
+    rows = _normalize_dart_share_count_rows(raw_rows, 2023, "11011", date(2024, 4, 1))
+
+    assert len(rows) == 1
+    assert rows[0]["rcept_dt"] == date(2024, 3, 15)
+    assert rows[0]["available_date"] == date(2024, 4, 1)
+
+
+def test_normalize_dart_share_count_rows_falls_back_when_rcept_no_missing() -> None:
+    raw_rows = [
+        {
+            "corp_code": "00126380",
+            "corp_name": "Samsung",
+            "se": "보통주",
+            "rcept_no": None,
+            "istc_totqy": "1000",
+        }
+    ]
+
+    rows = _normalize_dart_share_count_rows(raw_rows, 2023, "11011", date(2024, 4, 1))
+
+    assert len(rows) == 1
+    assert rows[0]["rcept_dt"] == date(2024, 4, 1)
+
+
+def _webhook_settings(url: str | None, *, always: bool = False) -> RuntimeSettings:
+    return RuntimeSettings(webhook_url=url, webhook_always=always)
+
+
+def test_notify_daily_webhook_fires_on_worst_grade_f(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_post(url, json, timeout):  # noqa: A002
+        captured["url"] = url
+        captured["json"] = json
+        captured["timeout"] = timeout
+
+    monkeypatch.setattr(cli_app.httpx, "post", fake_post)
+
+    scorecard = pl.DataFrame(
+        {
+            "dataset": ["silver.prices", "gold.daily_prices_adj"],
+            "grade": ["A", "F"],
+            "detail": ["ok", "empty"],
+        }
+    )
+
+    _notify_daily_webhook(
+        _webhook_settings("https://example.test/webhook"),
+        date(2026, 5, 7),
+        [],
+        [],
+        scorecard,
+    )
+
+    assert captured["url"] == "https://example.test/webhook"
+    assert captured["timeout"] == 5.0
+    payload = captured["json"]
+    assert payload["ok"] is False
+    assert payload["worst_grade"] == "F"
+    assert payload["scorecard_grades"] == {"silver.prices": "A", "gold.daily_prices_adj": "F"}
+    assert "content" in payload
+
+
+def test_notify_daily_webhook_silent_when_all_a_and_always_unset(monkeypatch) -> None:
+    calls = []
+    monkeypatch.setattr(
+        cli_app.httpx, "post", lambda *args, **kwargs: calls.append((args, kwargs))
+    )
+
+    scorecard = pl.DataFrame(
+        {"dataset": ["silver.prices"], "grade": ["A"], "detail": ["ok"]}
+    )
+
+    _notify_daily_webhook(
+        _webhook_settings("https://example.test/webhook"),
+        date(2026, 5, 7),
+        [],
+        [],
+        scorecard,
+    )
+
+    assert calls == []
+
+
+def test_notify_daily_webhook_fires_when_always_set_even_if_healthy(monkeypatch) -> None:
+    calls = []
+    monkeypatch.setattr(
+        cli_app.httpx, "post", lambda *args, **kwargs: calls.append((args, kwargs))
+    )
+
+    scorecard = pl.DataFrame(
+        {"dataset": ["silver.prices"], "grade": ["A"], "detail": ["ok"]}
+    )
+
+    _notify_daily_webhook(
+        _webhook_settings("https://example.test/webhook", always=True),
+        date(2026, 5, 7),
+        [],
+        [],
+        scorecard,
+    )
+
+    assert len(calls) == 1
+
+
+def test_notify_daily_webhook_disabled_when_url_missing(monkeypatch) -> None:
+    calls = []
+    monkeypatch.setattr(
+        cli_app.httpx, "post", lambda *args, **kwargs: calls.append((args, kwargs))
+    )
+
+    _notify_daily_webhook(_webhook_settings(None), date(2026, 5, 7), ["some failure"], [], None)
+
+    assert calls == []
+
+
+def test_notify_daily_webhook_survives_post_exception(monkeypatch) -> None:
+    def raise_runtime(*args, **kwargs):
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(cli_app.httpx, "post", raise_runtime)
+
+    # Should not raise.
+    _notify_daily_webhook(
+        _webhook_settings("https://example.test/webhook"),
+        date(2026, 5, 7),
+        ["ingest failed"],
+        [],
+        None,
+    )
+
+
+def test_daily_webhook_payload_shape() -> None:
+    payload = _daily_webhook_payload(
+        date(2026, 5, 7),
+        False,
+        ["ingest failed"],
+        {"silver.prices": "F"},
+        "F",
+    )
+
+    assert payload["date"] == "2026-05-07"
+    assert payload["ok"] is False
+    assert payload["failed_steps"] == ["ingest failed"]
+    assert payload["scorecard_grades"] == {"silver.prices": "F"}
+    assert payload["worst_grade"] == "F"
+    assert isinstance(payload["content"], str)
+    assert "2026-05-07" in payload["content"]
 
 
 def test_backfill_root_must_be_workspace_root(tmp_path) -> None:
