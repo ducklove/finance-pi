@@ -9,9 +9,11 @@ def build_fundamentals_pit_sql(
     """Return DuckDB SQL for point-in-time fundamentals.
 
     Mirrors ``transforms.builders.build_fundamentals_pit``: keeps only rows whose
-    available date is no later than the as-of date, then keeps a single row per
-    (date, security_id, account_id) — the latest fiscal period, tie-broken by
-    available_date then rcept_dt (so the newest correction wins).
+    available date is strictly before the as-of date (next-trading-day
+    availability, so intraday filings never inform same-day decisions), then
+    keeps a single row per (date, security_id, account_id) — the latest fiscal
+    period, tie-broken by available_date, rcept_dt, then consolidated statements
+    over separate ones.
     """
 
     return f"""
@@ -21,12 +23,13 @@ def build_fundamentals_pit_sql(
     FROM {calendar_view} AS u
     JOIN {financials_view} AS f
       ON f.security_id = u.security_id
-     AND f.available_date <= u.date
+     AND f.available_date < u.date
     QUALIFY ROW_NUMBER() OVER (
         PARTITION BY u.date, u.security_id, f.account_id
         ORDER BY
             f.fiscal_period_end DESC NULLS LAST,
             f.available_date DESC NULLS LAST,
-            f.rcept_dt DESC NULLS LAST
+            f.rcept_dt DESC NULLS LAST,
+            f.is_consolidated DESC NULLS LAST
     ) = 1
     """

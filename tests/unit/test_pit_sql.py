@@ -19,6 +19,7 @@ def _financials_row(
     fiscal_period_end: date,
     available_date: date,
     rcept_dt: date | None = None,
+    is_consolidated: bool = True,
 ) -> dict:
     rcept = rcept_dt or available_date
     return {
@@ -32,7 +33,7 @@ def _financials_row(
         "account_id": account_id,
         "account_name": account_id,
         "amount": amount,
-        "is_consolidated": True,
+        "is_consolidated": is_consolidated,
         "accounting_basis": "K-IFRS",
         "fiscal_year": fiscal_period_end.year,
     }
@@ -85,6 +86,23 @@ def _synthetic_data() -> tuple[pl.DataFrame, pl.DataFrame]:
                 500.0,
                 fiscal_period_end=date(2022, 12, 31),
                 available_date=date(2023, 4, 1),
+            ),
+            # Same dates for the same account: consolidated must beat separate.
+            _financials_row(
+                "S002",
+                "ifrs-full_Equity",
+                111.0,
+                fiscal_period_end=date(2022, 12, 31),
+                available_date=date(2023, 4, 1),
+                is_consolidated=False,
+            ),
+            _financials_row(
+                "S002",
+                "ifrs-full_Equity",
+                222.0,
+                fiscal_period_end=date(2022, 12, 31),
+                available_date=date(2023, 4, 1),
+                is_consolidated=True,
             ),
         ]
     )
@@ -154,12 +172,15 @@ def test_pit_sql_matches_polars_builder(tmp_path) -> None:
         for row in sql_result.iter_rows(named=True)
     }
     assert amounts == {
-        # Newer fiscal period wins over the 2022 filing.
-        (date(2024, 1, 2), "S001", "ifrs-full_Assets"): 2000.0,
+        # available_date == as_of_date is NOT visible (strict next-day policy),
+        # so the FY2023 filing available on 2024-01-02 only shows up on 01-03.
+        (date(2024, 1, 2), "S001", "ifrs-full_Assets"): 1000.0,
         (date(2024, 1, 3), "S001", "ifrs-full_Assets"): 2000.0,
-        # Correction only becomes visible from its own available_date.
-        (date(2024, 1, 2), "S001", "ifrs-full_ProfitLoss"): 300.0,
-        (date(2024, 1, 3), "S001", "ifrs-full_ProfitLoss"): 310.0,
+        # The correction available on 01-03 is not visible until 01-04.
+        (date(2024, 1, 3), "S001", "ifrs-full_ProfitLoss"): 300.0,
         (date(2024, 1, 2), "S002", "ifrs-full_Assets"): 500.0,
         (date(2024, 1, 3), "S002", "ifrs-full_Assets"): 500.0,
+        # Consolidated beats separate when every date key ties.
+        (date(2024, 1, 2), "S002", "ifrs-full_Equity"): 222.0,
+        (date(2024, 1, 3), "S002", "ifrs-full_Equity"): 222.0,
     }

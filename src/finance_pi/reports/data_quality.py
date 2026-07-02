@@ -165,7 +165,8 @@ def _with_previous_prices(data_root: Path, prices: pl.DataFrame, report_date: da
     previous = _previous_price_frame(data_root, report_date)
     if previous is None or previous.is_empty():
         return prices
-    return pl.concat([previous.select(prices.columns), prices], how="diagonal_relaxed")
+    shared = [column for column in prices.columns if column in previous.columns]
+    return pl.concat([previous.select(shared), prices], how="diagonal_relaxed")
 
 
 def _previous_price_frame(data_root: Path, report_date: date) -> pl.DataFrame | None:

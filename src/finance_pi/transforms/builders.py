@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
+import logging
 from collections.abc import Iterable
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import date
 from glob import glob
@@ -10,6 +13,30 @@ import polars as pl
 
 from finance_pi.storage.layout import DataLakeLayout
 from finance_pi.storage.parquet import ParquetDatasetWriter
+
+logger = logging.getLogger(__name__)
+
+# A security whose last price row is more than this many trading days before the
+# newest silver.prices date is considered delisted as of its last seen date.
+DELISTING_BUFFER_TRADING_DAYS = 10
+
+# Corporate-action detection: listed_shares must jump by at least this ratio
+# (or its inverse) between consecutive observed rows to be a candidate event.
+SHARES_JUMP_MIN_RATIO = 1.5
+# ... and by no more than this ratio, to reject unit/data glitches.
+SHARES_JUMP_MAX_RATIO = 100.0
+# Cross-check: close must move inversely to shares (|close_ratio * shares_ratio - 1|).
+SHARES_PRICE_CROSS_TOLERANCE = 0.10
+# Market cap should stay roughly continuous across the event when both sides exist.
+MARKET_CAP_CONTINUITY_TOLERANCE = 0.25
+# Warn when detection over a non-trivial history yields no events at all.
+CORPORATE_ACTIONS_WARN_MIN_DATES = 250
+# DART filing corroboration window around the effective date (calendar days).
+DART_CORROBORATION_DAYS_BEFORE = 120
+DART_CORROBORATION_DAYS_AFTER = 14
+
+_CORPORATE_ACTION_SPLIT_PATTERN = "주식분할|액면분할"
+_CORPORATE_ACTION_MERGE_PATTERN = "주식병합|액면병합|감자"
 
 
 @dataclass(frozen=True)
@@ -29,6 +56,7 @@ def build_all_iter(data_root: Path) -> Iterable[BuildSummary]:
         build_silver_prices,
         build_security_master,
         build_universe_history,
+        build_corporate_actions,
         build_daily_prices_adj,
         build_daily_market_caps,
         build_nps_holdings_silver,
@@ -95,9 +123,12 @@ def build_security_master(
         return [BuildSummary("gold.security_master", 0, 0)]
 
     companies = _latest_company_frame(data_root)
-    master = _security_master_from_prices(prices, companies)
+    delisting_cutoff = _delisting_cutoff(prices) if selected_dates is None else None
+    master = _security_master_from_prices(prices, companies, delisting_cutoff)
     if selected_dates is not None:
         master = _merge_security_master(data_root, master)
+    if "_last_seen_date" in master.columns:
+        master = master.drop("_last_seen_date")
 
     writer = ParquetDatasetWriter()
     layout = DataLakeLayout(data_root)
@@ -131,7 +162,9 @@ def build_universe_history(
         )
         .join(master, on="ticker", how="inner")
         .with_columns(
-            pl.lit(True).alias("is_active"),
+            (
+                pl.col("delisted_date").is_null() | (pl.col("date") <= pl.col("delisted_date"))
+            ).alias("is_active"),
             (pl.col("security_type") == "spac_pre").alias("is_spac_pre"),
         )
         .select(
@@ -151,6 +184,214 @@ def build_universe_history(
         )
     )
     return _write_by_date(data_root, "gold.universe_history", universe, "date")
+
+
+def build_corporate_actions(
+    data_root: Path,
+    dates: Iterable[date] | None = None,
+) -> list[BuildSummary]:
+    """Detect split/merge/capital-reduction events from silver.prices share jumps.
+
+    An event is emitted when listed_shares moves by ~N between consecutive
+    observed rows, close moves inversely by ~1/N (cross-checked within
+    ``SHARES_PRICE_CROSS_TOLERANCE``), and market cap stays roughly continuous.
+    ``adjustment_factor`` is derived from the shares ratio. DART filings
+    (주식분할/주식병합/감자) near the effective date upgrade ``confidence`` to
+    "high" and refine ``action_type``. Detection needs the previous trading row
+    for context, so it always scans the full history; ``dates`` is accepted for
+    pipeline symmetry but ignored. Rows written by other sources (e.g. manual
+    curation) are preserved and win over detected rows for the same event.
+    """
+    del dates
+    prices = _read_price_history_columns(
+        data_root,
+        ["date", "security_id", "ticker", "close", "listed_shares", "market_cap"],
+    )
+    if prices is None or prices.is_empty():
+        return [BuildSummary("silver.corporate_actions", 0, 0)]
+    detected = _detect_share_jump_actions(prices)
+    detected = _corroborate_actions_with_dart(data_root, detected)
+    trading_days = prices["date"].n_unique()
+    if detected.is_empty() and trading_days >= CORPORATE_ACTIONS_WARN_MIN_DATES:
+        logger.warning(
+            "silver.corporate_actions is empty after scanning %d trading days of "
+            "silver.prices; gold 'adjusted' prices will equal raw prices",
+            trading_days,
+        )
+    return _write_corporate_actions(data_root, detected)
+
+
+def _detect_share_jump_actions(prices: pl.DataFrame) -> pl.DataFrame:
+    observed = (
+        prices.filter(
+            pl.col("close").is_not_null()
+            & (pl.col("close") > 0)
+            & pl.col("listed_shares").is_not_null()
+            & (pl.col("listed_shares") > 0)
+        )
+        .sort(["security_id", "date"])
+        .with_columns(
+            pl.col("close").shift(1).over("security_id").alias("_prev_close"),
+            pl.col("listed_shares").shift(1).over("security_id").alias("_prev_shares"),
+            pl.col("market_cap").shift(1).over("security_id").alias("_prev_market_cap"),
+        )
+        .filter(pl.col("_prev_close").is_not_null() & pl.col("_prev_shares").is_not_null())
+        .with_columns(
+            (pl.col("listed_shares") / pl.col("_prev_shares")).alias("_shares_ratio"),
+            (pl.col("close") / pl.col("_prev_close")).alias("_close_ratio"),
+        )
+    )
+    shares_jump = pl.max_horizontal("_shares_ratio", 1.0 / pl.col("_shares_ratio"))
+    market_cap_continuous = (
+        pl.col("market_cap").is_null()
+        | pl.col("_prev_market_cap").is_null()
+        | (pl.col("market_cap") <= 0)
+        | (pl.col("_prev_market_cap") <= 0)
+        | (
+            (pl.col("market_cap") / pl.col("_prev_market_cap") - 1.0).abs()
+            <= MARKET_CAP_CONTINUITY_TOLERANCE
+        )
+    )
+    return (
+        observed.filter(
+            (shares_jump >= SHARES_JUMP_MIN_RATIO)
+            & (shares_jump <= SHARES_JUMP_MAX_RATIO)
+            & (
+                (pl.col("_close_ratio") * pl.col("_shares_ratio") - 1.0).abs()
+                <= SHARES_PRICE_CROSS_TOLERANCE
+            )
+            & market_cap_continuous
+        )
+        .select(
+            pl.col("date").alias("effective_date"),
+            "security_id",
+            "ticker",
+            pl.when(pl.col("_shares_ratio") > 1.0)
+            .then(pl.lit("split"))
+            .otherwise(pl.lit("merge"))
+            .alias("action_type"),
+            (1.0 / pl.col("_shares_ratio")).cast(pl.Float64).alias("adjustment_factor"),
+            pl.lit(None, dtype=pl.String).alias("source_rcept_no"),
+            pl.lit("shares_jump").alias("source"),
+            pl.lit("medium").alias("confidence"),
+        )
+        .sort(["effective_date", "security_id"])
+    )
+
+
+def _corroborate_actions_with_dart(data_root: Path, actions: pl.DataFrame) -> pl.DataFrame:
+    if actions.is_empty():
+        return actions
+    filings = _read_optional(data_root / "bronze/dart_filings/dt=*/part.parquet")
+    if filings is None or filings.is_empty():
+        return actions
+    filings = (
+        _cast_dates(filings, ["rcept_dt"])
+        .filter(
+            pl.col("stock_code").is_not_null()
+            & pl.col("rcept_dt").is_not_null()
+            & pl.col("report_nm")
+            .cast(pl.String)
+            .str.contains(f"{_CORPORATE_ACTION_SPLIT_PATTERN}|{_CORPORATE_ACTION_MERGE_PATTERN}")
+        )
+        .with_columns(_ticker_expr("stock_code").alias("ticker"))
+        .select("ticker", "rcept_dt", "rcept_no", "report_nm")
+    )
+    if filings.is_empty():
+        return actions
+    matched = (
+        actions.join(filings, on="ticker", how="inner")
+        .with_columns(
+            (pl.col("effective_date") - pl.col("rcept_dt")).dt.total_days().alias("_lead_days")
+        )
+        .filter(
+            (pl.col("_lead_days") >= -DART_CORROBORATION_DAYS_AFTER)
+            & (pl.col("_lead_days") <= DART_CORROBORATION_DAYS_BEFORE)
+            & pl.when(pl.col("action_type") == "split")
+            .then(pl.col("report_nm").str.contains(_CORPORATE_ACTION_SPLIT_PATTERN))
+            .otherwise(pl.col("report_nm").str.contains(_CORPORATE_ACTION_MERGE_PATTERN))
+        )
+        .with_columns(pl.col("_lead_days").abs().alias("_lag_days"))
+        .sort(["security_id", "effective_date", "_lag_days"])
+        .unique(subset=["security_id", "effective_date"], keep="first")
+        .select(
+            "security_id",
+            "effective_date",
+            pl.col("rcept_no").alias("_matched_rcept_no"),
+            pl.when(pl.col("report_nm").str.contains("감자"))
+            .then(pl.lit("capital_reduction"))
+            .when(pl.col("report_nm").str.contains(_CORPORATE_ACTION_SPLIT_PATTERN))
+            .then(pl.lit("split"))
+            .otherwise(pl.lit("merge"))
+            .alias("_matched_action_type"),
+        )
+    )
+    if matched.is_empty():
+        return actions
+    return (
+        actions.join(matched, on=["security_id", "effective_date"], how="left")
+        .with_columns(
+            pl.coalesce(["_matched_rcept_no", "source_rcept_no"]).alias("source_rcept_no"),
+            pl.coalesce(["_matched_action_type", "action_type"]).alias("action_type"),
+            pl.when(pl.col("_matched_rcept_no").is_not_null())
+            .then(pl.lit("high"))
+            .otherwise(pl.col("confidence"))
+            .alias("confidence"),
+        )
+        .drop("_matched_rcept_no", "_matched_action_type")
+    )
+
+
+def _write_corporate_actions(data_root: Path, detected: pl.DataFrame) -> list[BuildSummary]:
+    layout = DataLakeLayout(data_root)
+    writer = ParquetDatasetWriter()
+    detected = detected.select(
+        "effective_date",
+        "security_id",
+        "action_type",
+        "adjustment_factor",
+        "source_rcept_no",
+        "source",
+        "confidence",
+    )
+    existing_paths = {
+        _partition_date_from_path(Path(file), "dt"): Path(file)
+        for file in glob((data_root / "silver/corporate_actions/dt=*/part.parquet").as_posix())
+    }
+    rows = 0
+    files = 0
+    detected_dates = set(detected["effective_date"].to_list())
+    for value in sorted(detected_dates | set(existing_paths)):
+        partition = detected.filter(pl.col("effective_date") == value)
+        existing = existing_paths.get(value)
+        if existing is not None:
+            preserved = pl.read_parquet(existing, hive_partitioning=True)
+            if "dt" in preserved.columns:
+                preserved = preserved.drop("dt")
+            if "source" in preserved.columns:
+                preserved = preserved.filter(
+                    pl.col("source").is_null() | (pl.col("source") != "shares_jump")
+                )
+            if not preserved.is_empty():
+                partition = partition.join(
+                    preserved.select("security_id"), on="security_id", how="anti"
+                )
+                partition = pl.concat([preserved, partition], how="diagonal_relaxed")
+        if partition.is_empty():
+            if existing is not None:
+                existing.unlink()
+                with suppress(OSError):
+                    existing.parent.rmdir()
+            continue
+        partition = partition.sort("security_id")
+        writer.write(
+            partition,
+            layout.partition_path("silver.corporate_actions", value),
+            mode="overwrite",
+        )
+        rows += partition.height
+        files += 1
+    return [BuildSummary("silver.corporate_actions", rows, files)]
 
 
 def build_nps_holdings_silver(
@@ -287,13 +528,49 @@ def build_daily_prices_adj(
     )
     if prices is None or prices.is_empty():
         return [BuildSummary("gold.daily_prices_adj", 0, 0)]
+    actions = _load_corporate_actions(data_root)
     output_dates = selected_dates
+    rebuilt_rows = 0
+    rebuilt_files = 0
     if selected_dates is not None:
-        prices = _with_previous_gold_close(data_root, prices, selected_dates)
+        stale_ids = _stale_adjustment_security_ids(data_root, actions)
+        if stale_ids:
+            logger.info(
+                "corporate action events changed for %d securities; rebuilding their full "
+                "adjusted price history: %s",
+                len(stale_ids),
+                sorted(stale_ids),
+            )
+            rebuilt_rows, rebuilt_files = _rebuild_adjusted_history(data_root, stale_ids, actions)
+            prices = prices.filter(~pl.col("security_id").is_in(sorted(stale_ids)))
+        if not prices.is_empty():
+            prices = _with_previous_gold_close(data_root, prices, selected_dates)
         if prices.is_empty():
-            return [BuildSummary("gold.daily_prices_adj", 0, 0)]
-    prices = _apply_price_adjustment_factors(data_root, prices)
-    adjusted = (
+            _write_corporate_actions_state(data_root, actions)
+            return [BuildSummary("gold.daily_prices_adj", rebuilt_rows, rebuilt_files)]
+    adjusted = _adjusted_price_frame(prices, actions)
+    if output_dates is not None:
+        adjusted = adjusted.filter(pl.col("date").is_in(output_dates))
+    summary = _write_by_date(data_root, "gold.daily_prices_adj", adjusted, "date")[0]
+    _write_corporate_actions_state(data_root, actions)
+    return [
+        BuildSummary(
+            "gold.daily_prices_adj",
+            summary.rows + rebuilt_rows,
+            summary.files + rebuilt_files,
+        )
+    ]
+
+
+def _adjusted_price_frame(prices: pl.DataFrame, actions: pl.DataFrame | None) -> pl.DataFrame:
+    prices = _apply_corporate_action_factors(prices, actions)
+    previous_source = pl.col("price_source").shift(1).over("security_id")
+    source_boundary = (
+        pl.col("price_source").is_not_null()
+        & previous_source.is_not_null()
+        & (pl.col("price_source") != previous_source)
+    )
+    return (
         prices.sort(["security_id", "date"])
         .with_columns(
             pl.col("open").alias("open_adj"),
@@ -303,6 +580,7 @@ def build_daily_prices_adj(
             pl.when(
                 (pl.col("volume").fill_null(0) > 0)
                 & (pl.col("volume").shift(1).over("security_id").fill_null(0) > 0)
+                & ~source_boundary
             )
             .then(pl.col("close").pct_change().over("security_id"))
             .otherwise(None)
@@ -328,9 +606,6 @@ def build_daily_prices_adj(
             ]
         )
     )
-    if output_dates is not None:
-        adjusted = adjusted.filter(pl.col("date").is_in(output_dates))
-    return _write_by_date(data_root, "gold.daily_prices_adj", adjusted, "date")
 
 
 def build_daily_market_caps(data_root: Path) -> list[BuildSummary]:
@@ -427,6 +702,16 @@ def _normalize_financial_account_ids(financials: pl.DataFrame) -> pl.DataFrame:
 
 
 def build_fundamentals_pit(data_root: Path) -> list[BuildSummary]:
+    """Materialize point-in-time fundamentals per universe day.
+
+    PIT availability policy: a filing is visible strictly AFTER its
+    ``available_date`` (``available_date < as_of_date``), i.e. next-trading-day
+    availability — an intraday filing can never inform a same-day decision.
+    Ties within (as_of_date, security_id, account_id) are broken by the newest
+    fiscal_period_end, then available_date, then rcept_dt, then consolidated
+    statements over separate ones. Must stay row-for-row identical to
+    ``finance_pi.pit.build_fundamentals_pit_sql``.
+    """
     financials = _read_optional(data_root / "silver/financials/fiscal_year=*/part.parquet")
     universe_pattern = data_root / "gold/universe_history/dt=*/part.parquet"
     universe_files = sorted(glob(universe_pattern.as_posix()))
@@ -455,7 +740,7 @@ def build_fundamentals_pit(data_root: Path) -> list[BuildSummary]:
             continue
         eligible = financials.filter(
             pl.col("security_id").is_in(security_ids)
-            & (pl.col("available_date") <= pl.lit(as_of_date))
+            & (pl.col("available_date") < pl.lit(as_of_date))
         )
         if eligible.is_empty():
             continue
@@ -469,6 +754,7 @@ def build_fundamentals_pit(data_root: Path) -> list[BuildSummary]:
                     "fiscal_period_end",
                     "available_date",
                     "rcept_dt",
+                    "is_consolidated",
                 ]
             )
             .unique(subset=["date", "security_id", "account_id"], keep="last")
@@ -540,6 +826,7 @@ def _normalize_price_frame(frame: pl.DataFrame, source: str) -> pl.DataFrame:
         pl.concat_str([pl.lit("S"), _ticker_expr("ticker")]).alias("security_id"),
         pl.concat_str([pl.lit("L"), _ticker_expr("ticker")]).alias("listing_id"),
         pl.lit(source).alias("price_source"),
+        pl.lit(_price_basis_for_source(source)).alias("price_basis"),
         pl.lit(False).alias("is_halted"),
         pl.lit(False).alias("is_designated"),
         pl.lit(False).alias("is_liquidation_window"),
@@ -560,11 +847,18 @@ def _normalize_price_frame(frame: pl.DataFrame, source: str) -> pl.DataFrame:
             "market_cap",
             "listed_shares",
             "price_source",
+            "price_basis",
             "is_halted",
             "is_designated",
             "is_liquidation_window",
         ]
     )
+
+
+def _price_basis_for_source(source: str) -> str:
+    # Naver siseJson returns split-adjusted prices; KRX/KIS return raw exchange
+    # prices. pre2010 provenance is mixed, so it is never factor-multiplied.
+    return {"naver": "adjusted", "pre2010": "unknown"}.get(source, "raw")
 
 
 def _deduplicate_price_candidates(prices: pl.DataFrame) -> pl.DataFrame:
@@ -814,21 +1108,31 @@ def _read_price_source_dates(
         ]
         return _read_existing_paths(paths)
     if source == "naver":
-        paths = [
-            Path(file)
-            for value in dates
-            for file in glob(
-                (
-                    data_root
-                    / f"bronze/naver_daily/request_dt={value.isoformat()}/chunk=*/part.parquet"
-                ).as_posix()
-            )
-        ]
-        frame = _read_existing_paths(paths)
-        if frame is None or frame.is_empty():
-            return frame
-        return _cast_dates(frame, ["date"]).filter(pl.col("date").is_in(dates))
+        return _read_naver_daily_dates(data_root, dates)
     raise ValueError(f"unknown price source: {source}")
+
+
+def _read_naver_daily_dates(data_root: Path, dates: set[date]) -> pl.DataFrame | None:
+    # Naver bronze chunks are partitioned by REQUEST date, so backfilled rows for
+    # an older data date can live under any request_dt: scan them all and filter
+    # by the data date column instead of globbing request_dt={date}.
+    files = sorted(
+        glob((data_root / "bronze/naver_daily/request_dt=*/chunk=*/part.parquet").as_posix())
+    )
+    if not files:
+        return None
+    selected = sorted(dates)
+    try:
+        return (
+            pl.scan_parquet(files, hive_partitioning=False)
+            .with_columns(pl.col("date").cast(pl.Date, strict=False))
+            .filter(pl.col("date").is_in(selected))
+            .collect()
+        )
+    except pl.exceptions.SchemaError:
+        frames = [pl.read_parquet(file, hive_partitioning=False) for file in files]
+        frame = pl.concat(frames, how="diagonal_relaxed")
+        return _cast_dates(frame, ["date"]).filter(pl.col("date").is_in(selected))
 
 
 def _read_existing_paths(paths: Iterable[Path]) -> pl.DataFrame | None:
@@ -909,9 +1213,17 @@ def _market_caps_frame(data_root: Path, dates: set[date] | None = None) -> pl.Da
     return result
 
 
+def _delisting_cutoff(prices: pl.DataFrame) -> date | None:
+    trading_dates = prices["date"].unique().sort().to_list()
+    if len(trading_dates) <= DELISTING_BUFFER_TRADING_DAYS:
+        return None
+    return trading_dates[-(DELISTING_BUFFER_TRADING_DAYS + 1)]
+
+
 def _security_master_from_prices(
     prices: pl.DataFrame,
     companies: pl.DataFrame | None,
+    delisting_cutoff: date | None = None,
 ) -> pl.DataFrame:
     grouped = (
         prices.group_by("ticker")
@@ -939,6 +1251,14 @@ def _security_master_from_prices(
             pl.lit(None, dtype=pl.String).alias("corp_name"),
         )
 
+    if delisting_cutoff is None:
+        delisted_expr = pl.lit(None, dtype=pl.Date)
+    else:
+        delisted_expr = (
+            pl.when(pl.col("last_seen_date") < delisting_cutoff)
+            .then(pl.col("last_seen_date"))
+            .otherwise(pl.lit(None, dtype=pl.Date))
+        )
     return grouped.with_columns(
         pl.concat_str([pl.lit("I"), pl.coalesce(["corp_code", "ticker"])]).alias("issuer_id"),
         pl.concat_str([pl.lit("S"), pl.col("ticker")]).alias("security_id"),
@@ -952,7 +1272,7 @@ def _security_master_from_prices(
         .then(pl.lit("spac_pre"))
         .otherwise(pl.lit("equity"))
         .alias("security_type"),
-        pl.lit(None, dtype=pl.Date).alias("delisted_date"),
+        delisted_expr.alias("delisted_date"),
         pl.lit("unknown").alias("delisting_reason"),
     ).select(
         [
@@ -969,6 +1289,7 @@ def _security_master_from_prices(
             "listed_date",
             "delisted_date",
             "delisting_reason",
+            pl.col("last_seen_date").alias("_last_seen_date"),
         ]
     )
 
@@ -994,14 +1315,25 @@ def _merge_security_master(data_root: Path, updates: pl.DataFrame) -> pl.DataFra
             existing_updates.select(
                 "ticker",
                 pl.col("listed_date").alias("_existing_listed_date"),
+                pl.col("delisted_date").alias("_existing_delisted_date"),
             ),
             on="ticker",
             how="left",
         )
         .with_columns(
-            pl.min_horizontal("listed_date", "_existing_listed_date").alias("listed_date")
+            pl.min_horizontal("listed_date", "_existing_listed_date").alias("listed_date"),
+            # Incremental updates only see the selected dates, so keep a known
+            # delisted_date unless the update proves trading after it.
+            pl.when(
+                pl.col("delisted_date").is_null()
+                & pl.col("_existing_delisted_date").is_not_null()
+                & (pl.col("_last_seen_date") <= pl.col("_existing_delisted_date"))
+            )
+            .then(pl.col("_existing_delisted_date"))
+            .otherwise(pl.col("delisted_date"))
+            .alias("delisted_date"),
         )
-        .drop("_existing_listed_date")
+        .drop("_existing_listed_date", "_existing_delisted_date")
     )
     unchanged = existing.join(
         updates.select(pl.col("ticker").alias("_update_ticker")),
@@ -1012,14 +1344,10 @@ def _merge_security_master(data_root: Path, updates: pl.DataFrame) -> pl.DataFra
     return pl.concat([unchanged, adjusted_updates], how="diagonal_relaxed").sort("ticker")
 
 
-def _apply_price_adjustment_factors(data_root: Path, prices: pl.DataFrame) -> pl.DataFrame:
+def _load_corporate_actions(data_root: Path) -> pl.DataFrame | None:
     actions = _read_optional(data_root / "silver/corporate_actions/dt=*/part.parquet")
     if actions is None or actions.is_empty():
-        return prices
-
-    # adjustment_factor is a price multiplier applied to rows before effective_date.
-    # For example, a 2-for-1 split uses 0.5, while a 1-for-21 reverse split uses 21
-    # when the source prices are still raw.
+        return None
     actions = (
         _cast_dates(actions, ["effective_date"])
         .filter(
@@ -1033,10 +1361,24 @@ def _apply_price_adjustment_factors(data_root: Path, prices: pl.DataFrame) -> pl
             "effective_date",
             pl.col("adjustment_factor").cast(pl.Float64),
         )
+        .sort(["security_id", "effective_date"])
+        .unique(subset=["security_id", "effective_date"], keep="first")
     )
-    if actions.is_empty():
+    return None if actions.is_empty() else actions
+
+
+def _apply_corporate_action_factors(
+    prices: pl.DataFrame,
+    actions: pl.DataFrame | None,
+) -> pl.DataFrame:
+    if actions is None or actions.is_empty():
         return prices
 
+    # adjustment_factor is a price multiplier applied to rows before effective_date.
+    # For example, a 2-for-1 split uses 0.5, while a 1-for-21 reverse split uses 21
+    # when the source prices are still raw. Only rows on a raw price basis are
+    # multiplied: Naver history is already split-adjusted at fetch time, and
+    # previous-gold-close rows injected for incremental builds are adjusted too.
     factors = (
         prices.with_row_index("_price_row")
         .select("_price_row", "date", "security_id")
@@ -1054,7 +1396,10 @@ def _apply_price_adjustment_factors(data_root: Path, prices: pl.DataFrame) -> pl
         prices.with_row_index("_price_row")
         .join(factors, on="_price_row", how="left")
         .with_columns(
-            pl.coalesce(["_price_adjustment_factor", pl.lit(1.0)]).alias("_price_adjustment_factor")
+            pl.when(_price_basis_expr(prices) == "raw")
+            .then(pl.coalesce(["_price_adjustment_factor", pl.lit(1.0)]))
+            .otherwise(1.0)
+            .alias("_price_adjustment_factor")
         )
         .with_columns(
             (pl.col("open") * pl.col("_price_adjustment_factor")).alias("open"),
@@ -1064,6 +1409,134 @@ def _apply_price_adjustment_factors(data_root: Path, prices: pl.DataFrame) -> pl
         )
         .drop("_price_row", "_price_adjustment_factor")
     )
+
+
+def _price_basis_expr(prices: pl.DataFrame) -> pl.Expr:
+    derived = (
+        pl.when(pl.col("price_source") == "naver")
+        .then(pl.lit("adjusted"))
+        .when(pl.col("price_source") == "pre2010")
+        .then(pl.lit("unknown"))
+        .when(pl.col("price_source").is_null())
+        .then(pl.lit("adjusted"))
+        .otherwise(pl.lit("raw"))
+    )
+    if "price_basis" in prices.columns:
+        return pl.coalesce([pl.col("price_basis"), derived])
+    return derived
+
+
+def _corporate_actions_state_path(data_root: Path) -> Path:
+    return data_root / "_state" / "corporate_actions_applied.json"
+
+
+def _corporate_action_event_keys(actions: pl.DataFrame | None) -> set[tuple[str, str, float]]:
+    if actions is None or actions.is_empty():
+        return set()
+    return {
+        (
+            row["security_id"],
+            row["effective_date"].isoformat(),
+            round(row["adjustment_factor"], 9),
+        )
+        for row in actions.iter_rows(named=True)
+    }
+
+
+def _applied_corporate_action_keys(data_root: Path) -> set[tuple[str, str, float]]:
+    path = _corporate_actions_state_path(data_root)
+    if not path.exists():
+        return set()
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    return {
+        (
+            event["security_id"],
+            event["effective_date"],
+            round(float(event["adjustment_factor"]), 9),
+        )
+        for event in payload.get("events", [])
+    }
+
+
+def _stale_adjustment_security_ids(
+    data_root: Path,
+    actions: pl.DataFrame | None,
+) -> set[str]:
+    changed = _corporate_action_event_keys(actions) ^ _applied_corporate_action_keys(data_root)
+    return {security_id for security_id, _, _ in changed}
+
+
+def _write_corporate_actions_state(data_root: Path, actions: pl.DataFrame | None) -> None:
+    path = _corporate_actions_state_path(data_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    events = [
+        {"security_id": security_id, "effective_date": effective_date, "adjustment_factor": factor}
+        for security_id, effective_date, factor in sorted(_corporate_action_event_keys(actions))
+    ]
+    path.write_text(json.dumps({"events": events}, indent=2), encoding="utf-8")
+
+
+def _rebuild_adjusted_history(
+    data_root: Path,
+    security_ids: set[str],
+    actions: pl.DataFrame | None,
+) -> tuple[int, int]:
+    ids = sorted(security_ids)
+    prices = _read_silver_prices_for_securities(data_root, ids)
+    if prices is None or prices.is_empty():
+        return 0, 0
+    adjusted = _adjusted_price_frame(prices, actions)
+    layout = DataLakeLayout(data_root)
+    writer = ParquetDatasetWriter()
+    files = 0
+    for value in adjusted["date"].unique().sort().to_list():
+        partition = adjusted.filter(pl.col("date") == value)
+        path = layout.partition_path("gold.daily_prices_adj", value)
+        if path.exists():
+            existing = pl.read_parquet(path, hive_partitioning=True)
+            if "dt" in existing.columns:
+                existing = existing.drop("dt")
+            existing = existing.filter(~pl.col("security_id").is_in(ids))
+            partition = pl.concat([existing, partition], how="diagonal_relaxed").sort(
+                ["date", "security_id"]
+            )
+        writer.write(partition, path, mode="overwrite")
+        files += 1
+    return adjusted.height, files
+
+
+def _read_silver_prices_for_securities(
+    data_root: Path,
+    security_ids: list[str],
+) -> pl.DataFrame | None:
+    files = sorted(glob((data_root / "silver/prices/dt=*/part.parquet").as_posix()))
+    if not files:
+        return None
+    try:
+        return (
+            pl.scan_parquet(files, hive_partitioning=False)
+            .filter(pl.col("security_id").is_in(security_ids))
+            .collect()
+        )
+    except pl.exceptions.SchemaError:
+        frames = [
+            pl.read_parquet(file, hive_partitioning=False).filter(
+                pl.col("security_id").is_in(security_ids)
+            )
+            for file in files
+        ]
+        return pl.concat(frames, how="diagonal_relaxed")
+
+
+def _read_price_history_columns(data_root: Path, columns: list[str]) -> pl.DataFrame | None:
+    files = sorted(glob((data_root / "silver/prices/dt=*/part.parquet").as_posix()))
+    if not files:
+        return None
+    try:
+        return pl.scan_parquet(files, hive_partitioning=False).select(columns).collect()
+    except pl.exceptions.SchemaError:
+        frames = [pl.read_parquet(file, columns=columns) for file in files]
+        return pl.concat(frames, how="diagonal_relaxed")
 
 
 def _with_previous_gold_close(
@@ -1089,6 +1562,8 @@ def _with_previous_gold_close(
             pl.lit(None, dtype=pl.String).alias("name"),
             pl.lit(None, dtype=pl.String).alias("market"),
             pl.lit(None, dtype=pl.String).alias("price_source"),
+            # Gold closes already carry every applied adjustment factor.
+            pl.lit("adjusted").alias("price_basis"),
         )
         .select(target.columns)
     )

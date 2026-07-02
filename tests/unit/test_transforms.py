@@ -1,17 +1,71 @@
 from __future__ import annotations
 
+import json
+import logging
 from datetime import date
 
 import polars as pl
+import pytest
 
 from finance_pi.reports import build_data_quality_report, build_fraud_report
 from finance_pi.storage import DataLakeLayout, ParquetDatasetWriter
 from finance_pi.transforms import (
     build_all,
+    build_corporate_actions,
     build_daily_prices_adj,
     build_financials_silver,
+    build_fundamentals_pit,
+    build_security_master,
     build_silver_prices,
+    build_universe_history,
 )
+from finance_pi.transforms import builders as builders_module
+
+
+def _silver_price_row(
+    logical_date: date,
+    ticker: str,
+    *,
+    close: float,
+    volume: int = 1000,
+    listed_shares: int | None = None,
+    market_cap: int | None = None,
+    price_source: str = "krx",
+) -> dict:
+    return {
+        "date": logical_date,
+        "security_id": f"S{ticker}",
+        "listing_id": f"L{ticker}",
+        "ticker": ticker,
+        "name": f"Name {ticker}",
+        "market": "KOSPI",
+        "open": close,
+        "high": close,
+        "low": close,
+        "close": close,
+        "volume": volume,
+        "trading_value": None,
+        "market_cap": market_cap,
+        "listed_shares": listed_shares,
+        "price_source": price_source,
+        "price_basis": "adjusted" if price_source == "naver" else "raw",
+        "is_halted": False,
+        "is_designated": False,
+        "is_liquidation_window": False,
+    }
+
+
+def _write_silver_prices(tmp_path, rows: list[dict]) -> None:
+    layout = DataLakeLayout(tmp_path)
+    writer = ParquetDatasetWriter()
+    frame = pl.DataFrame(rows)
+    for key, partition in frame.partition_by("date", as_dict=True).items():
+        logical_date = key[0] if isinstance(key, tuple) else key
+        writer.write(
+            partition,
+            layout.partition_path("silver.prices", logical_date),
+            mode="overwrite",
+        )
 
 
 def test_build_all_promotes_bronze_to_gold(tmp_path) -> None:
@@ -715,10 +769,634 @@ def test_fundamentals_pit_keeps_latest_account_per_day(tmp_path) -> None:
         ]
     ).write_parquet(silver_path)
 
-    from finance_pi.transforms import build_fundamentals_pit
-
     summary = build_fundamentals_pit(tmp_path)[0]
 
     pit = pl.read_parquet(tmp_path / "gold" / "fundamentals_pit" / "dt=2024-01-03" / "part.parquet")
     assert summary.rows == 1
     assert pit.select("amount").item() == 2000.0
+
+
+def test_fundamentals_pit_prefers_consolidated_and_next_day_availability(tmp_path) -> None:
+    layout = DataLakeLayout(tmp_path)
+    layout.ensure_base_dirs()
+    writer = ParquetDatasetWriter()
+    for as_of in (date(2024, 1, 2), date(2024, 1, 3)):
+        writer.write(
+            pl.DataFrame(
+                [
+                    {
+                        "date": as_of,
+                        "security_id": "S005930",
+                        "listing_id": "L005930",
+                        "market": "KOSPI",
+                        "is_active": True,
+                        "share_class": "common",
+                        "security_type": "equity",
+                        "is_spac_pre": False,
+                        "is_halted": False,
+                        "is_designated": False,
+                        "is_liquidation_window": False,
+                    }
+                ]
+            ),
+            layout.partition_path("gold.universe_history", as_of),
+        )
+    silver_path = tmp_path / "silver" / "financials" / "fiscal_year=2023" / "part.parquet"
+    silver_path.parent.mkdir(parents=True)
+    base = {
+        "security_id": "S005930",
+        "corp_code": "00126380",
+        "fiscal_period_end": date(2023, 12, 31),
+        "event_date": date(2023, 12, 31),
+        "report_type": "11011",
+        "account_id": "ifrs-full_Assets",
+        "account_name": "Assets",
+        "accounting_basis": "K-IFRS",
+    }
+    pl.DataFrame(
+        [
+            {
+                **base,
+                "rcept_dt": date(2024, 1, 2),
+                "available_date": date(2024, 1, 2),
+                "amount": 111.0,
+                "is_consolidated": False,
+            },
+            {
+                **base,
+                "rcept_dt": date(2024, 1, 2),
+                "available_date": date(2024, 1, 2),
+                "amount": 222.0,
+                "is_consolidated": True,
+            },
+            # Correction available on the as-of day itself: strictly invisible.
+            {
+                **base,
+                "rcept_dt": date(2024, 1, 3),
+                "available_date": date(2024, 1, 3),
+                "amount": 999.0,
+                "is_consolidated": True,
+            },
+        ]
+    ).write_parquet(silver_path)
+
+    build_fundamentals_pit(tmp_path)
+
+    assert not (tmp_path / "gold" / "fundamentals_pit" / "dt=2024-01-02" / "part.parquet").exists()
+    pit = pl.read_parquet(tmp_path / "gold" / "fundamentals_pit" / "dt=2024-01-03" / "part.parquet")
+    assert pit.height == 1
+    assert pit.select("amount").item() == 222.0
+
+
+def test_build_corporate_actions_detects_split_and_adjusts_gold(tmp_path) -> None:
+    layout = DataLakeLayout(tmp_path)
+    layout.ensure_base_dirs()
+    _write_silver_prices(
+        tmp_path,
+        [
+            _silver_price_row(
+                date(2024, 1, 2),
+                "111111",
+                close=10_000.0,
+                listed_shares=1_000_000,
+                market_cap=10_000_000_000,
+            ),
+            _silver_price_row(
+                date(2024, 1, 3),
+                "111111",
+                close=10_100.0,
+                listed_shares=1_000_000,
+                market_cap=10_100_000_000,
+            ),
+            _silver_price_row(
+                date(2024, 1, 4),
+                "111111",
+                close=2_020.0,
+                listed_shares=5_000_000,
+                market_cap=10_100_000_000,
+            ),
+            _silver_price_row(
+                date(2024, 1, 5),
+                "111111",
+                close=2_040.0,
+                listed_shares=5_000_000,
+                market_cap=10_200_000_000,
+            ),
+        ],
+    )
+
+    summary = build_corporate_actions(tmp_path)[0]
+
+    actions = pl.read_parquet(
+        tmp_path / "silver" / "corporate_actions" / "dt=2024-01-04" / "part.parquet"
+    )
+    row = actions.row(0, named=True)
+    assert summary.rows == 1
+    assert row["security_id"] == "S111111"
+    assert row["action_type"] == "split"
+    assert row["adjustment_factor"] == pytest.approx(0.2)
+    assert row["source"] == "shares_jump"
+    assert row["confidence"] == "medium"
+
+    build_daily_prices_adj(tmp_path)
+
+    first = pl.read_parquet(
+        tmp_path / "gold" / "daily_prices_adj" / "dt=2024-01-02" / "part.parquet"
+    )
+    split_day = pl.read_parquet(
+        tmp_path / "gold" / "daily_prices_adj" / "dt=2024-01-04" / "part.parquet"
+    )
+    assert first.select("close_adj").item() == pytest.approx(2_000.0)
+    assert split_day.select("close_adj").item() == pytest.approx(2_020.0)
+    assert split_day.select("return_1d").item() == pytest.approx(0.0)
+
+
+def test_build_corporate_actions_corroborates_with_dart_filings(tmp_path) -> None:
+    layout = DataLakeLayout(tmp_path)
+    layout.ensure_base_dirs()
+    writer = ParquetDatasetWriter()
+    _write_silver_prices(
+        tmp_path,
+        [
+            _silver_price_row(
+                date(2024, 1, 2),
+                "111111",
+                close=10_000.0,
+                listed_shares=1_000_000,
+                market_cap=10_000_000_000,
+            ),
+            _silver_price_row(
+                date(2024, 1, 3),
+                "111111",
+                close=2_000.0,
+                listed_shares=5_000_000,
+                market_cap=10_000_000_000,
+            ),
+            _silver_price_row(
+                date(2024, 1, 2),
+                "222222",
+                close=505.0,
+                listed_shares=1_000_000,
+                market_cap=505_000_000,
+            ),
+            _silver_price_row(
+                date(2024, 1, 3),
+                "222222",
+                close=5_050.0,
+                listed_shares=100_000,
+                market_cap=505_000_000,
+            ),
+        ],
+    )
+    writer.write(
+        pl.DataFrame(
+            [
+                {
+                    "rcept_dt": date(2023, 12, 20),
+                    "corp_code": "00000001",
+                    "corp_name": "Split Corp",
+                    "stock_code": "111111",
+                    "rcept_no": "20231220000001",
+                    "report_nm": "주식분할결정",
+                    "rm": "",
+                },
+                {
+                    "rcept_dt": date(2023, 12, 27),
+                    "corp_code": "00000002",
+                    "corp_name": "Reduction Corp",
+                    "stock_code": "222222",
+                    "rcept_no": "20231227000002",
+                    "report_nm": "감자결정",
+                    "rm": "",
+                },
+            ]
+        ),
+        layout.partition_path("bronze.dart_filings_raw", date(2023, 12, 20)),
+    )
+
+    build_corporate_actions(tmp_path)
+
+    actions = pl.read_parquet(
+        tmp_path / "silver" / "corporate_actions" / "dt=2024-01-03" / "part.parquet"
+    ).sort("security_id")
+    by_security = {row["security_id"]: row for row in actions.iter_rows(named=True)}
+    assert by_security["S111111"]["action_type"] == "split"
+    assert by_security["S111111"]["confidence"] == "high"
+    assert by_security["S111111"]["source_rcept_no"] == "20231220000001"
+    assert by_security["S222222"]["action_type"] == "capital_reduction"
+    assert by_security["S222222"]["adjustment_factor"] == pytest.approx(10.0)
+    assert by_security["S222222"]["source_rcept_no"] == "20231227000002"
+
+
+def test_build_corporate_actions_ignores_non_action_changes(tmp_path) -> None:
+    layout = DataLakeLayout(tmp_path)
+    layout.ensure_base_dirs()
+    _write_silver_prices(
+        tmp_path,
+        [
+            # Share issuance: shares double but the price does not halve.
+            _silver_price_row(date(2024, 1, 2), "111111", close=100.0, listed_shares=1_000_000),
+            _silver_price_row(date(2024, 1, 3), "111111", close=100.0, listed_shares=2_000_000),
+            # Crash: price halves but shares stay flat.
+            _silver_price_row(date(2024, 1, 2), "222222", close=100.0, listed_shares=1_000_000),
+            _silver_price_row(date(2024, 1, 3), "222222", close=50.0, listed_shares=1_000_000),
+        ],
+    )
+
+    summary = build_corporate_actions(tmp_path)[0]
+
+    assert summary.rows == 0
+    assert not list((tmp_path / "silver" / "corporate_actions").glob("dt=*/part.parquet"))
+
+
+def test_build_corporate_actions_warns_when_long_history_yields_nothing(
+    tmp_path, caplog, monkeypatch
+) -> None:
+    layout = DataLakeLayout(tmp_path)
+    layout.ensure_base_dirs()
+    monkeypatch.setattr(builders_module, "CORPORATE_ACTIONS_WARN_MIN_DATES", 3)
+    _write_silver_prices(
+        tmp_path,
+        [
+            _silver_price_row(date(2024, 1, day), "111111", close=100.0, listed_shares=1_000_000)
+            for day in (2, 3, 4)
+        ],
+    )
+
+    with caplog.at_level(logging.WARNING, logger="finance_pi.transforms.builders"):
+        build_corporate_actions(tmp_path)
+
+    assert any("corporate_actions is empty" in record.message for record in caplog.records)
+
+
+def test_build_corporate_actions_preserves_manual_rows_and_removes_stale(tmp_path) -> None:
+    layout = DataLakeLayout(tmp_path)
+    layout.ensure_base_dirs()
+    writer = ParquetDatasetWriter()
+    _write_silver_prices(
+        tmp_path,
+        [
+            _silver_price_row(
+                date(2024, 1, 2),
+                "111111",
+                close=10_000.0,
+                listed_shares=1_000_000,
+                market_cap=10_000_000_000,
+            ),
+            _silver_price_row(
+                date(2024, 1, 3),
+                "111111",
+                close=2_000.0,
+                listed_shares=5_000_000,
+                market_cap=10_000_000_000,
+            ),
+        ],
+    )
+    # Manually curated row for the same event (legacy schema without source).
+    writer.write(
+        pl.DataFrame(
+            [
+                {
+                    "effective_date": date(2024, 1, 3),
+                    "security_id": "S111111",
+                    "action_type": "split",
+                    "adjustment_factor": 0.25,
+                    "source_rcept_no": "manual",
+                }
+            ]
+        ),
+        layout.partition_path("silver.corporate_actions", date(2024, 1, 3)),
+    )
+    # Stale detector-produced partition that no longer matches any detection.
+    writer.write(
+        pl.DataFrame(
+            [
+                {
+                    "effective_date": date(2024, 2, 1),
+                    "security_id": "S999999",
+                    "action_type": "split",
+                    "adjustment_factor": 0.5,
+                    "source_rcept_no": None,
+                    "source": "shares_jump",
+                    "confidence": "medium",
+                }
+            ]
+        ),
+        layout.partition_path("silver.corporate_actions", date(2024, 2, 1)),
+    )
+
+    build_corporate_actions(tmp_path)
+
+    kept = pl.read_parquet(
+        tmp_path / "silver" / "corporate_actions" / "dt=2024-01-03" / "part.parquet"
+    )
+    assert kept.height == 1
+    assert kept.select("adjustment_factor").item() == 0.25
+    assert kept.select("source_rcept_no").item() == "manual"
+    assert not (
+        tmp_path / "silver" / "corporate_actions" / "dt=2024-02-01" / "part.parquet"
+    ).exists()
+
+
+def test_incremental_adj_rebuilds_history_when_new_action_appears(tmp_path) -> None:
+    layout = DataLakeLayout(tmp_path)
+    layout.ensure_base_dirs()
+    writer = ParquetDatasetWriter()
+    _write_silver_prices(
+        tmp_path,
+        [
+            _silver_price_row(date(2024, 1, day), "111111", close=100.0, volume=10)
+            for day in (2, 3, 4)
+        ],
+    )
+
+    build_daily_prices_adj(tmp_path)
+
+    state_path = tmp_path / "_state" / "corporate_actions_applied.json"
+    assert json.loads(state_path.read_text(encoding="utf-8")) == {"events": []}
+
+    _write_silver_prices(
+        tmp_path,
+        [_silver_price_row(date(2024, 1, 5), "111111", close=50.0, volume=10)],
+    )
+    writer.write(
+        pl.DataFrame(
+            [
+                {
+                    "effective_date": date(2024, 1, 5),
+                    "security_id": "S111111",
+                    "action_type": "split",
+                    "adjustment_factor": 0.5,
+                    "source_rcept_no": "manual",
+                }
+            ]
+        ),
+        layout.partition_path("silver.corporate_actions", date(2024, 1, 5)),
+    )
+
+    build_daily_prices_adj(tmp_path, dates=[date(2024, 1, 5)])
+
+    first = pl.read_parquet(
+        tmp_path / "gold" / "daily_prices_adj" / "dt=2024-01-02" / "part.parquet"
+    )
+    latest = pl.read_parquet(
+        tmp_path / "gold" / "daily_prices_adj" / "dt=2024-01-05" / "part.parquet"
+    )
+    assert first.select("close_adj").item() == pytest.approx(50.0)
+    assert latest.select("close_adj").item() == pytest.approx(50.0)
+    assert latest.select("return_1d").item() == pytest.approx(0.0)
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["events"] == [
+        {
+            "security_id": "S111111",
+            "effective_date": "2024-01-05",
+            "adjustment_factor": 0.5,
+        }
+    ]
+
+    # Without new events the incremental build must NOT rewrite old partitions.
+    _write_silver_prices(
+        tmp_path,
+        [_silver_price_row(date(2024, 1, 2), "111111", close=999.0, volume=10)],
+    )
+    build_daily_prices_adj(tmp_path, dates=[date(2024, 1, 5)])
+    first_again = pl.read_parquet(
+        tmp_path / "gold" / "daily_prices_adj" / "dt=2024-01-02" / "part.parquet"
+    )
+    assert first_again.select("close_adj").item() == pytest.approx(50.0)
+
+
+def test_adjustment_multiplies_only_raw_basis_rows(tmp_path) -> None:
+    layout = DataLakeLayout(tmp_path)
+    layout.ensure_base_dirs()
+    writer = ParquetDatasetWriter()
+    _write_silver_prices(
+        tmp_path,
+        [
+            _silver_price_row(date(2024, 1, 2), "111111", close=100.0, price_source="krx"),
+            _silver_price_row(date(2024, 1, 3), "111111", close=50.0, price_source="krx"),
+            _silver_price_row(date(2024, 1, 2), "222222", close=100.0, price_source="naver"),
+            _silver_price_row(date(2024, 1, 3), "222222", close=100.0, price_source="naver"),
+        ],
+    )
+    writer.write(
+        pl.DataFrame(
+            [
+                {
+                    "effective_date": date(2024, 1, 3),
+                    "security_id": security_id,
+                    "action_type": "split",
+                    "adjustment_factor": 0.5,
+                    "source_rcept_no": "manual",
+                }
+                for security_id in ("S111111", "S222222")
+            ]
+        ),
+        layout.partition_path("silver.corporate_actions", date(2024, 1, 3)),
+    )
+
+    build_daily_prices_adj(tmp_path)
+
+    first = pl.read_parquet(
+        tmp_path / "gold" / "daily_prices_adj" / "dt=2024-01-02" / "part.parquet"
+    ).sort("security_id")
+    by_security = {row["security_id"]: row for row in first.iter_rows(named=True)}
+    assert by_security["S111111"]["close_adj"] == pytest.approx(50.0)
+    assert by_security["S222222"]["close_adj"] == pytest.approx(100.0)
+
+
+def test_build_silver_prices_labels_price_basis(tmp_path) -> None:
+    layout = DataLakeLayout(tmp_path)
+    layout.ensure_base_dirs()
+    writer = ParquetDatasetWriter()
+    writer.write(
+        pl.DataFrame(
+            [
+                {
+                    "date": date(2024, 1, 2),
+                    "ticker": "005930",
+                    "isin": None,
+                    "name": "Samsung",
+                    "market": "KOSPI",
+                    "open": 100.0,
+                    "high": 100.0,
+                    "low": 100.0,
+                    "close": 100.0,
+                    "volume": 10,
+                    "trading_value": None,
+                    "market_cap": None,
+                    "listed_shares": None,
+                }
+            ]
+        ),
+        layout.partition_path("bronze.krx_daily_raw", date(2024, 1, 2)),
+    )
+    naver_path = (
+        tmp_path
+        / "bronze"
+        / "naver_daily"
+        / "request_dt=2024-01-04"
+        / "chunk=000001"
+        / "part.parquet"
+    )
+    naver_path.parent.mkdir(parents=True)
+    pl.DataFrame(
+        [
+            {
+                "date": date(2024, 1, 3),
+                "ticker": "005930",
+                "isin": None,
+                "name": "Samsung",
+                "market": "KOSPI",
+                "open": 101.0,
+                "high": 101.0,
+                "low": 101.0,
+                "close": 101.0,
+                "volume": 10,
+                "trading_value": None,
+                "market_cap": None,
+                "listed_shares": None,
+            }
+        ]
+    ).write_parquet(naver_path)
+
+    build_silver_prices(tmp_path)
+
+    krx_day = pl.read_parquet(tmp_path / "silver" / "prices" / "dt=2024-01-02" / "part.parquet")
+    naver_day = pl.read_parquet(tmp_path / "silver" / "prices" / "dt=2024-01-03" / "part.parquet")
+    assert krx_day.select("price_basis").item() == "raw"
+    assert naver_day.select("price_basis").item() == "adjusted"
+
+
+def test_return_1d_nulled_on_price_source_boundary(tmp_path) -> None:
+    layout = DataLakeLayout(tmp_path)
+    layout.ensure_base_dirs()
+    _write_silver_prices(
+        tmp_path,
+        [
+            _silver_price_row(date(2024, 1, 2), "111111", close=100.0, price_source="krx"),
+            _silver_price_row(date(2024, 1, 3), "111111", close=101.0, price_source="naver"),
+            _silver_price_row(date(2024, 1, 4), "111111", close=102.0, price_source="naver"),
+        ],
+    )
+
+    build_daily_prices_adj(tmp_path)
+
+    boundary = pl.read_parquet(
+        tmp_path / "gold" / "daily_prices_adj" / "dt=2024-01-03" / "part.parquet"
+    )
+    after = pl.read_parquet(
+        tmp_path / "gold" / "daily_prices_adj" / "dt=2024-01-04" / "part.parquet"
+    )
+    assert boundary.select("return_1d").item() is None
+    assert after.select("return_1d").item() == pytest.approx(102.0 / 101.0 - 1.0)
+
+
+def test_security_master_sets_delisted_date_for_stale_securities(tmp_path) -> None:
+    layout = DataLakeLayout(tmp_path)
+    layout.ensure_base_dirs()
+    rows = []
+    for day in range(1, 16):
+        rows.append(_silver_price_row(date(2024, 1, day), "111111", close=100.0))
+        if day <= 3:
+            rows.append(_silver_price_row(date(2024, 1, day), "222222", close=50.0))
+        if day <= 10:
+            rows.append(_silver_price_row(date(2024, 1, day), "333333", close=75.0))
+    _write_silver_prices(tmp_path, rows)
+
+    build_security_master(tmp_path)
+
+    master = pl.read_parquet(tmp_path / "gold" / "security_master.parquet")
+    by_ticker = {row["ticker"]: row for row in master.iter_rows(named=True)}
+    assert by_ticker["111111"]["delisted_date"] is None
+    assert by_ticker["222222"]["delisted_date"] == date(2024, 1, 3)
+    # Inside the N-trading-day buffer at the right edge: still considered active.
+    assert by_ticker["333333"]["delisted_date"] is None
+    assert "_last_seen_date" not in master.columns
+
+    # A spurious later price row for the delisted security becomes inactive.
+    _write_silver_prices(
+        tmp_path,
+        [
+            _silver_price_row(date(2024, 1, 16), "111111", close=100.0),
+            _silver_price_row(date(2024, 1, 16), "222222", close=50.0),
+        ],
+    )
+    build_universe_history(tmp_path, dates=[date(2024, 1, 16)])
+
+    universe = pl.read_parquet(
+        tmp_path / "gold" / "universe_history" / "dt=2024-01-16" / "part.parquet"
+    )
+    active = {
+        row["security_id"]: row["is_active"] for row in universe.iter_rows(named=True)
+    }
+    assert active["S111111"] is True
+    assert active["S222222"] is False
+
+
+def test_incremental_master_merge_preserves_delisted_date(tmp_path) -> None:
+    layout = DataLakeLayout(tmp_path)
+    layout.ensure_base_dirs()
+    rows = []
+    for day in range(1, 16):
+        rows.append(_silver_price_row(date(2024, 1, day), "111111", close=100.0))
+        if day <= 3:
+            rows.append(_silver_price_row(date(2024, 1, day), "222222", close=50.0))
+    _write_silver_prices(tmp_path, rows)
+    build_security_master(tmp_path)
+
+    # Backfill of an old date must not resurrect the delisted security.
+    build_security_master(tmp_path, dates=[date(2024, 1, 2)])
+    master = pl.read_parquet(tmp_path / "gold" / "security_master.parquet")
+    by_ticker = {row["ticker"]: row for row in master.iter_rows(named=True)}
+    assert by_ticker["222222"]["delisted_date"] == date(2024, 1, 3)
+
+    # Trading after the recorded delisting clears it.
+    _write_silver_prices(
+        tmp_path,
+        [_silver_price_row(date(2024, 1, 16), "222222", close=50.0)],
+    )
+    build_security_master(tmp_path, dates=[date(2024, 1, 16)])
+    master = pl.read_parquet(tmp_path / "gold" / "security_master.parquet")
+    by_ticker = {row["ticker"]: row for row in master.iter_rows(named=True)}
+    assert by_ticker["222222"]["delisted_date"] is None
+
+
+def test_incremental_silver_prices_picks_up_backfilled_naver_dates(tmp_path) -> None:
+    layout = DataLakeLayout(tmp_path)
+    layout.ensure_base_dirs()
+    naver_path = (
+        tmp_path
+        / "bronze"
+        / "naver_daily"
+        / "request_dt=2024-01-10"
+        / "chunk=000001"
+        / "part.parquet"
+    )
+    naver_path.parent.mkdir(parents=True)
+    pl.DataFrame(
+        [
+            {
+                "date": date(2024, 1, 3),
+                "ticker": "005930",
+                "isin": None,
+                "name": "Samsung",
+                "market": "KOSPI",
+                "open": 100.0,
+                "high": 100.0,
+                "low": 100.0,
+                "close": 100.0,
+                "volume": 10,
+                "trading_value": None,
+                "market_cap": None,
+                "listed_shares": None,
+            }
+        ]
+    ).write_parquet(naver_path)
+
+    build_silver_prices(tmp_path, dates=[date(2024, 1, 3)])
+
+    silver = pl.read_parquet(tmp_path / "silver" / "prices" / "dt=2024-01-03" / "part.parquet")
+    assert silver.height == 1
+    assert silver.select("close").item() == 100.0
+    assert silver.select("price_source").item() == "naver"

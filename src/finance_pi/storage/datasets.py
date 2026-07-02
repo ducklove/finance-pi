@@ -65,6 +65,7 @@ def _empty_prices_silver() -> str:
         CAST(NULL AS BIGINT) AS market_cap,
         CAST(NULL AS BIGINT) AS listed_shares,
         CAST(NULL AS VARCHAR) AS price_source,
+        CAST(NULL AS VARCHAR) AS price_basis,
         CAST(NULL AS BOOLEAN) AS is_halted,
         CAST(NULL AS BOOLEAN) AS is_designated,
         CAST(NULL AS BOOLEAN) AS is_liquidation_window
@@ -575,7 +576,9 @@ dataset_registry: dict[str, DatasetSpec] = {
             CAST(NULL AS VARCHAR) AS security_id,
             CAST(NULL AS VARCHAR) AS action_type,
             CAST(NULL AS DOUBLE) AS adjustment_factor,
-            CAST(NULL AS VARCHAR) AS source_rcept_no
+            CAST(NULL AS VARCHAR) AS source_rcept_no,
+            CAST(NULL AS VARCHAR) AS source,
+            CAST(NULL AS VARCHAR) AS confidence
         WHERE FALSE
         """,
     ),

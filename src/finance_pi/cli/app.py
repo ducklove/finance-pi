@@ -70,6 +70,7 @@ from finance_pi.transforms import (
     BuildSummary,
     build_all,
     build_all_iter,
+    build_corporate_actions,
     build_daily_market_caps,
     build_daily_prices_adj,
     build_financials_silver,
@@ -3487,6 +3488,7 @@ def _run_daily_builds(data_root: Path, include_fundamentals_pit: bool, price_dat
         build_silver_prices,
         build_security_master,
         build_universe_history,
+        build_corporate_actions,
         build_daily_prices_adj,
     ]:
         summaries.extend(builder(data_root, price_dates))
@@ -3501,6 +3503,7 @@ def _run_full_builds(data_root: Path, include_fundamentals_pit: bool) -> list:
         build_silver_prices,
         build_security_master,
         build_universe_history,
+        build_corporate_actions,
         build_daily_prices_adj,
         build_nps_holdings_silver,
         build_nps_universe,
