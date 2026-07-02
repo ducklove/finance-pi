@@ -16,6 +16,10 @@ class BacktestConfig(BaseModel):
     signal_lag_days: int = Field(default=1, ge=0)
     entry_lag_days: int = Field(default=1, ge=0)
     max_position_weight: float = Field(default=0.2, gt=0, le=1)
+    missing_return: float = 0.0
+    drop_after_missing: bool = True
+    exclude_flagged: bool = True
+    charge_final_liquidation: bool = False
 
     @model_validator(mode="after")
     def ordered_dates(self) -> BacktestConfig:
