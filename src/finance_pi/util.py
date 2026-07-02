@@ -2,9 +2,16 @@ from __future__ import annotations
 
 import json
 from contextlib import suppress
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+
+KST = timezone(timedelta(hours=9))
+
+
+def kst_today() -> date:
+    """Korean-market calendar date, independent of the host timezone."""
+    return datetime.now(KST).date()
 
 
 def iso_or_none(value: Any) -> str | None:

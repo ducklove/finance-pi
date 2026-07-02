@@ -10,6 +10,7 @@ def build_api_docs_payload(
     workspace: str,
     max_request_threads: int,
     max_admin_jobs: int,
+    max_jobs_retained: int,
     max_price_queries: int,
     price_query_wait_seconds: float,
     max_price_tickers: int,
@@ -28,12 +29,17 @@ def build_api_docs_payload(
         "generated_at": generated_at,
         "workspace": workspace,
         "auth": {
-            "local_network": "LAN clients are allowed without a token",
+            "local_network": "Read-only GET endpoints allow loopback and private-LAN clients without a token",
+            "job_execution": (
+                "POST /api/jobs requires the token unless the client is loopback; "
+                "cross-origin POSTs are rejected (Origin/Sec-Fetch-Site checks)"
+            ),
             "token": "Use X-Admin-Token or token query parameter outside local networks",
         },
         "limits": {
             "max_request_threads": max_request_threads,
             "max_admin_jobs": max_admin_jobs,
+            "max_jobs_retained": max_jobs_retained,
             "max_price_queries": max_price_queries,
             "price_query_wait_seconds": price_query_wait_seconds,
             "max_price_tickers": max_price_tickers,
@@ -45,6 +51,40 @@ def build_api_docs_payload(
                 "method": "GET",
                 "path": f"{base_url}/health",
                 "description": "Lightweight service health check.",
+            },
+            "docs": {
+                "method": "GET",
+                "path": f"{base_url}/docs",
+                "description": "This API documentation payload.",
+            },
+            "overview": {
+                "method": "GET",
+                "path": f"{base_url}/overview",
+                "description": "Workspace overview: dataset partitions/coverage, backfill progress, and recent jobs.",
+            },
+            "jobs_list": {
+                "method": "GET",
+                "path": f"{base_url}/jobs",
+                "description": f"Recent admin jobs with status and return codes. The {max_jobs_retained} most recent jobs are retained; older completed jobs and their logs are evicted.",
+            },
+            "job_log": {
+                "method": "GET",
+                "path": f"{base_url}/jobs/<job_id>/log",
+                "description": "Tail (last ~120KB) of one job's captured output.",
+            },
+            "jobs_run": {
+                "method": "POST",
+                "path": f"{base_url}/jobs",
+                "description": "Queue a pipeline job as a subprocess. Requires the admin token unless the client is loopback; cross-origin requests are rejected.",
+                "body": {
+                    "action": "One of: build_all, catalog_build, daily, daily_no_ingest, reports, docs_build, backfill_yearly, backtest.",
+                    "report_date": "Optional YYYY-MM-DD for reports.",
+                    "start_year/end_year/max_years": "Optional integers for backfill_yearly.",
+                },
+                "examples": [
+                    f"POST {base_url}/jobs {{\"action\": \"daily_no_ingest\"}}",
+                    f"POST {base_url}/jobs {{\"action\": \"reports\", \"report_date\": \"2026-07-02\"}}",
+                ],
             },
             "close_prices": {
                 "method": "GET",
@@ -189,6 +229,18 @@ def build_api_docs_payload(
                 "examples": [
                     f"{base_url}/fundamentals/dividends?tickers=005930,005935&start_year=2022&end_year=2024",
                     f"{base_url}/fundamentals/dividends?ticker=005935&as_of=2026-04-30",
+                ],
+            },
+            "screener": {
+                "method": "GET",
+                "path": f"{base_url}/fundamentals/screener",
+                "description": "Full-universe value screen over the latest trading day (no ticker parameter): per-security valuation metrics such as PER/PBR/debt ratio computed from the latest annual financials.",
+                "query": {
+                    "as_of": "Optional YYYY-MM-DD point-in-time cutoff. Defaults to today.",
+                },
+                "examples": [
+                    f"{base_url}/fundamentals/screener",
+                    f"{base_url}/fundamentals/screener?as_of=2026-06-30",
                 ],
             },
             "cpi": {

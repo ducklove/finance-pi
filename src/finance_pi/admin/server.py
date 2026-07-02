@@ -70,6 +70,9 @@ from finance_pi.util import (
     iso_or_none as _iso_or_none,
 )
 from finance_pi.util import (
+    kst_today as _kst_today,
+)
+from finance_pi.util import (
     parse_iso_date as _parse_iso_date,
 )
 from finance_pi.util import (
@@ -443,7 +446,7 @@ class AdminState:
         return result
 
     def nps_universe(self, params: dict[str, list[str]]) -> dict[str, Any]:
-        requested_date = _optional_date_param(params, "date") or date.today()
+        requested_date = _optional_date_param(params, "date") or _kst_today()
         top = _optional_int_param(params, "top") or 100
         if top < 1 or top > 1000:
             raise ValueError("top must be between 1 and 1000")
@@ -458,7 +461,7 @@ class AdminState:
 
     def basic_fundamentals(self, params: dict[str, list[str]]) -> dict[str, Any]:
         tickers = _ticker_params(params)
-        as_of = _optional_date_param(params, "as_of") or date.today()
+        as_of = _optional_date_param(params, "as_of") or _kst_today()
         fiscal_year = _optional_int_param(params, "fiscal_year")
         if len(tickers) > _admin_max_price_tickers():
             raise ValueError(f"too many tickers; max is {_admin_max_price_tickers()}")
@@ -475,7 +478,7 @@ class AdminState:
 
     def capital_actions(self, params: dict[str, list[str]]) -> dict[str, Any]:
         tickers = _ticker_params(params)
-        as_of = _optional_date_param(params, "as_of") or date.today()
+        as_of = _optional_date_param(params, "as_of") or _kst_today()
         start_year = _optional_int_param(params, "start_year")
         end_year = _optional_int_param(params, "end_year")
         if len(tickers) > _admin_max_price_tickers():
@@ -496,7 +499,7 @@ class AdminState:
 
     def dividends(self, params: dict[str, list[str]]) -> dict[str, Any]:
         tickers = _ticker_params(params)
-        as_of = _optional_date_param(params, "as_of") or date.today()
+        as_of = _optional_date_param(params, "as_of") or _kst_today()
         start_year = _optional_int_param(params, "start_year")
         end_year = _optional_int_param(params, "end_year")
         if len(tickers) > _admin_max_price_tickers():
@@ -516,7 +519,7 @@ class AdminState:
     def screener(self, params: dict[str, list[str]]) -> dict[str, Any]:
         # 전 유니버스 스냅샷 — ticker 파라미터가 필요 없다(다른 endpoints 와 다름).
         # 최신 거래일 기준 KOSPI/KOSDAQ 전 종목에서 가치 지표를 계산한다.
-        as_of = _optional_date_param(params, "as_of") or date.today()
+        as_of = _optional_date_param(params, "as_of") or _kst_today()
         return self._run_screener_query(as_of)
 
     def cpi(self, params: dict[str, list[str]]) -> dict[str, Any]:
@@ -1181,6 +1184,7 @@ def _api_docs_payload(state: AdminState) -> dict[str, Any]:
         workspace=state.paths.root.resolve().name,
         max_request_threads=_admin_max_request_threads(),
         max_admin_jobs=_admin_max_jobs(),
+        max_jobs_retained=MAX_JOBS_RETAINED,
         max_price_queries=_admin_max_price_queries(),
         price_query_wait_seconds=_admin_price_query_wait_seconds(),
         max_price_tickers=_admin_max_price_tickers(),
