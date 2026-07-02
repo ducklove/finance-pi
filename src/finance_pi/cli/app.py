@@ -13,7 +13,7 @@ import subprocess
 import sys
 from concurrent import futures
 from contextlib import suppress
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta, timezone
 from glob import glob
 from pathlib import Path
 from time import sleep
@@ -1860,7 +1860,7 @@ def bootstrap(
     paths = ProjectPaths(root=root)
     settings = RuntimeSettings.load(paths.root)
     start = _parse_report_date(since)
-    end = _parse_report_date(until) if until else _previous_weekday(date.today())
+    end = _parse_report_date(until) if until else _previous_weekday(_kst_today())
     source_choice = _parse_price_source(price_source)
     DataLakeLayout(paths.data_root).ensure_base_dirs()
     failures: list[str] = []
@@ -2318,9 +2318,13 @@ def catchup_daily(
             return
 
 
+def _kst_today() -> date:
+    return datetime.now(timezone(timedelta(hours=9))).date()
+
+
 def _parse_report_date(value: str | None) -> date:
     if value is None:
-        return date.today()
+        return _kst_today()
     try:
         return date.fromisoformat(value)
     except ValueError as exc:
@@ -3522,13 +3526,13 @@ def _run_yearly_backfill(
         paths.data_root.glob("bronze/dart_company/snapshot_dt=*/part.parquet")
     ):
         try:
-            ingest_dart_company(date.today().isoformat(), paths.root)
+            ingest_dart_company(_kst_today().isoformat(), paths.root)
         except Exception as exc:  # noqa: BLE001
             failures.append(f"OpenDART company ingest failed: {exc}")
 
     if not _has_naver_summary(paths):
         try:
-            ingest_naver_summary(date.today().isoformat(), paths.root, "KOSPI,KOSDAQ")
+            ingest_naver_summary(_kst_today().isoformat(), paths.root, "KOSPI,KOSDAQ")
         except Exception as exc:  # noqa: BLE001
             failures.append(f"Naver summary universe ingest failed: {exc}")
 
@@ -3801,11 +3805,13 @@ def _compare_nps_shadow(
 
 
 def _float_or_none(value: object) -> float | None:
-    if value is None:
+    if isinstance(value, (int, float)):
+        return float(value)
+    if value in (None, "", " ", "-"):
         return None
     try:
-        return float(value)
-    except (TypeError, ValueError):
+        return float(str(value).replace(",", "").strip())
+    except ValueError:
         return None
 
 
@@ -4324,15 +4330,6 @@ def _clean_text(value: object) -> str | None:
     if value in (None, "", " ", "-"):
         return None
     return str(value).strip()
-
-
-def _float_or_none(value: object) -> float | None:
-    if value in (None, "", " ", "-"):
-        return None
-    try:
-        return float(str(value).replace(",", "").strip())
-    except ValueError:
-        return None
 
 
 def _int_or_none(value: object) -> int | None:

@@ -88,13 +88,22 @@ def build_fraud_report(data_root: Path, report_date: date) -> FraudReport:
 
     day_universe = universe.filter(pl.col("date") == report_date)
     size = day_universe.height
-    checks.append(
-        ReportCheck(
-            "tiny_universe",
-            "PASS" if size >= 30 or size == 0 else "WARN",
-            f"{size} securities in universe for {report_date.isoformat()}",
+    if size == 0:
+        checks.append(
+            ReportCheck(
+                "tiny_universe",
+                "WARN",
+                f"universe empty for report date {report_date.isoformat()}",
+            )
         )
-    )
+    else:
+        checks.append(
+            ReportCheck(
+                "tiny_universe",
+                "PASS" if size >= 30 else "WARN",
+                f"{size} securities in universe for {report_date.isoformat()}",
+            )
+        )
 
     spac_pre = day_universe.filter(pl.col("is_spac_pre").fill_null(False)).height
     checks.append(
