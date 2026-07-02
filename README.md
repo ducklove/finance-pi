@@ -142,10 +142,11 @@ python -m finance_pi.cli.app admin --root . --host 0.0.0.0 --port 8400
 ```
 
 `admin` prints a tokenized URL. `/api/health` is open for reachability checks.
-Clients from loopback or a private LAN address can use the admin without a
-token; public/forwarded clients still need the token for dataset APIs, logs,
-files, and job execution. To pin the token across restarts, set
-`FINANCE_PI_ADMIN_TOKEN` in `.env`.
+Clients from loopback or a private LAN address can read the dataset APIs, logs,
+and files without a token; public/forwarded clients still need the token for
+those. Job execution (`POST /api/jobs`) always requires the token unless the
+client is loopback, and cross-origin requests are rejected. To pin the token
+across restarts, set `FINANCE_PI_ADMIN_TOKEN` in `.env`.
 For Raspberry Pi stability, the admin overview does not scan Parquet contents by
 default; it uses file and partition metadata. Set `FINANCE_PI_ADMIN_SCAN_PARQUET=1`
 only when you explicitly want live row counts and are comfortable with the extra
@@ -216,6 +217,46 @@ WHERE market = 'KOSPI'
 ORDER BY date DESC, market_cap DESC
 LIMIT 20;
 ```
+
+## MCP Server
+
+Expose the research data lake to LLM clients (Claude Code, Claude Desktop)
+through the Model Context Protocol. Install the optional extra and start the
+stdio server:
+
+```bash
+pip install "finance-pi[mcp]"
+python -m finance_pi.cli.app mcp --root .
+```
+
+Tools: `list_datasets`, `describe_table`, `query` (single read-only
+SELECT/WITH statement, row-capped), `list_factors`, `run_backtest` (compact
+in-memory summary), and `get_fundamentals` (PIT annual snapshot per ticker).
+The `query` tool needs the DuckDB catalog, so run `catalog build` first.
+
+Register with Claude Code:
+
+```bash
+claude mcp add finance-pi -- python -m finance_pi.cli.app mcp --root /path/to/workspace
+```
+
+or add it to Claude Desktop's `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "finance-pi": {
+      "command": "python",
+      "args": ["-m", "finance_pi.cli.app", "mcp", "--root", "/path/to/workspace"]
+    }
+  }
+}
+```
+
+Example prompts:
+
+- "2015년 이후 PBR 0.5 미만 종목의 1년 보유 수익률 분포를 보여줘"
+- "momentum_12_1 팩터를 2018-01-01부터 2020-12-31까지 백테스트하고 MDD와 비용 드래그를 알려줘"
 
 ## Current Scope
 

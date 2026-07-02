@@ -118,6 +118,7 @@ from finance_pi.transforms import (
     build_daily_prices_adj,
     build_financials_silver,
     build_fundamentals_pit,
+    build_nps_holdings_delta,
     build_nps_holdings_silver,
     build_nps_universe,
     build_preferred_discount,
@@ -335,6 +336,20 @@ def list_factors() -> None:
     for row in factor_registry.describe():
         requires = ", ".join(row["requires"])
         typer.echo(f"{row['name']}\t{row['rebalance']}\tdirection={row['direction']}\t{requires}")
+
+
+@app.command("mcp")
+def run_mcp_server(root: Path = typer.Option(Path("."), help="Workspace root")) -> None:
+    """Run the MCP stdio server so LLM clients can query the data lake."""
+
+    from finance_pi.mcp_server.server import McpDependencyError, run_stdio
+
+    paths = ProjectPaths(root=root)
+    try:
+        run_stdio(paths.data_root)
+    except McpDependencyError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
 
 
 @ingest_app.command("krx")
@@ -1127,6 +1142,7 @@ def build_cmd_nps(root: Path = typer.Option(Path("."), help="Workspace root")) -
     data_root = ProjectPaths(root=root).data_root
     _print_summaries(build_nps_holdings_silver(data_root))
     _print_summaries(build_nps_universe(data_root))
+    _print_summaries(build_nps_holdings_delta(data_root))
 
 
 @app.command("nps-shadow")
@@ -2392,6 +2408,7 @@ def _run_full_builds(data_root: Path, include_fundamentals_pit: bool) -> list:
         build_preferred_discount,
         build_nps_holdings_silver,
         build_nps_universe,
+        build_nps_holdings_delta,
         build_financials_silver,
     ]
     if include_fundamentals_pit:
