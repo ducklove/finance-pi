@@ -291,12 +291,41 @@ ExecStart=/home/cantabile/Works/finance-pi/.venv/bin/python -m finance_pi.cli.ap
 
 ## 7. Update Deployment
 
+Use the deployment script. It pulls the branch, reinstalls dependencies, runs
+`doctor` and the test suite, restarts the admin service, and verifies the
+runtime (admin health, factor registry, MCP tools import):
+
 ```bash
-cd /opt/finance-pi
+cd ~/Works/finance-pi
+bash ops/deploy.sh
+```
+
+After a release that changes price adjustment or gold semantics, run the
+one-time full rebuild variant (backgrounds `build all` + `catalog build` and
+prints the log path):
+
+```bash
+bash ops/deploy.sh --full-rebuild        # optionally add --pit
+```
+
+From a Windows workstation, the same flow runs over SSH (piping the script, so
+it works even before this commit is on the server):
+
+```powershell
+powershell -File ops\deploy-from-windows.ps1 -SetupKey   # once: install an SSH key
+powershell -File ops\deploy-from-windows.ps1             # deploy + verify
+powershell -File ops\deploy-from-windows.ps1 -FullRebuild
+```
+
+The manual equivalent remains:
+
+```bash
+cd ~/Works/finance-pi
 git pull
 source .venv/bin/activate
 python -m pip install -e ".[dev]"
 python -m pytest
+sudo systemctl restart finance-pi-admin.service
 ```
 
 ## Current Runtime Scope
