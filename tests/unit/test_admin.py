@@ -1,10 +1,16 @@
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+import json
+from datetime import UTC, date, datetime, timedelta
+from http import HTTPStatus
+from http.client import HTTPMessage
+from io import BytesIO
 
 import polars as pl
 
 from finance_pi.admin.server import (
+    MAX_JOBS_RETAINED,
+    AdminJob,
     AdminServiceBusy,
     AdminState,
     _admin_max_jobs,
@@ -15,12 +21,40 @@ from finance_pi.admin.server import (
     _admin_price_query_wait_seconds,
     _api_docs_payload,
     _ensure_docs_built,
+    _handler_for,
     _health_payload,
     _is_local_admin_client,
     _job_command,
 )
 from finance_pi.cli import app as cli_app
 from finance_pi.storage import DataLakeLayout, ParquetDatasetWriter
+
+
+def _make_handler(state, *, client_ip="127.0.0.1", path="/api/jobs", method="POST",
+                   headers=None, body=b"{}"):
+    handler_cls = _handler_for(state)
+    handler = handler_cls.__new__(handler_cls)
+    handler.client_address = (client_ip, 55555)
+    handler.headers = HTTPMessage()
+    for key, value in (headers or {}).items():
+        handler.headers[key] = value
+    handler.headers["Content-Length"] = str(len(body))
+    handler.path = path
+    handler.command = method
+    handler.request_version = "HTTP/1.1"
+    handler.protocol_version = "HTTP/1.0"
+    handler.requestline = f"{method} {path} HTTP/1.1"
+    handler.rfile = BytesIO(body)
+    handler.wfile = BytesIO()
+    handler.close_connection = True
+    handler._request_started_at = 0.0
+    return handler
+
+
+def _handler_response_status(handler) -> int:
+    handler.wfile.seek(0)
+    status_line = handler.wfile.readline()
+    return int(status_line.split(b" ")[1])
 
 
 def test_admin_overview_reports_lightweight_dataset_metadata(tmp_path) -> None:
@@ -1044,6 +1078,8 @@ def test_admin_dividends_returns_security_level_dps(tmp_path) -> None:
 def test_admin_api_docs_describe_price_endpoints(tmp_path) -> None:
     payload = _api_docs_payload(AdminState(tmp_path))
 
+    assert payload["workspace"] == tmp_path.resolve().name
+    assert str(tmp_path.resolve()) not in json.dumps(payload)
     assert payload["endpoints"]["close_prices"]["path"] == "/api/prices/close"
     assert payload["endpoints"]["daily_prices"]["path"] == "/api/prices/daily"
     assert payload["endpoints"]["quotes"]["path"] == "/api/quotes"
@@ -1186,6 +1222,25 @@ def test_admin_daily_prices_rejects_large_requests(tmp_path, monkeypatch) -> Non
         assert "date range is too large" in str(exc)
     else:
         raise AssertionError("expected date range error")
+
+
+def test_admin_daily_prices_rejects_excessive_ticker_by_day_cells(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("FINANCE_PI_ADMIN_MAX_PRICE_TICKERS", "500")
+    monkeypatch.setenv("FINANCE_PI_ADMIN_MAX_PRICE_DAYS", "3700")
+
+    tickers = ",".join(f"{100000 + i:06d}" for i in range(400))
+    try:
+        AdminState(tmp_path).daily_prices(
+            {
+                "tickers": [tickers],
+                "since": ["2016-01-01"],
+                "until": ["2025-01-01"],
+            }
+        )
+    except ValueError as exc:
+        assert "tickers x days is too large" in str(exc)
+    else:
+        raise AssertionError("expected tickers x days error")
 
 
 def test_admin_macro_tables_return_filtered_rows(tmp_path) -> None:
@@ -1561,8 +1616,12 @@ def test_admin_health_is_minimal_and_token_state_is_kept(tmp_path) -> None:
 
     assert state.token == "secret-token"
     assert health["status"] == "ok"
-    assert health["workspace"] == str(tmp_path.resolve())
+    assert health["workspace"] == tmp_path.resolve().name
+    assert health["data_root_exists"] is False
     assert health["auth"] == "local-or-token"
+    assert not any(
+        isinstance(value, str) and str(tmp_path.resolve()) in value for value in health.values()
+    )
 
 
 def test_admin_local_network_clients_bypass_token() -> None:
@@ -1574,6 +1633,165 @@ def test_admin_local_network_clients_bypass_token() -> None:
     assert _is_local_admin_client("::1")
     assert _is_local_admin_client("::ffff:192.168.0.10")
     assert not _is_local_admin_client("8.8.8.8")
+
+
+def test_admin_post_jobs_from_private_lan_peer_requires_token(tmp_path) -> None:
+    state = AdminState(tmp_path, token="secret-token")
+    body = b'{"action": "docs_build"}'
+
+    handler = _make_handler(state, client_ip="192.168.1.50", body=body)
+    handler.do_POST()
+    assert _handler_response_status(handler) == HTTPStatus.UNAUTHORIZED
+
+    handler = _make_handler(
+        state,
+        client_ip="192.168.1.50",
+        body=body,
+        headers={"X-Admin-Token": "secret-token"},
+    )
+    handler.do_POST()
+    assert _handler_response_status(handler) == HTTPStatus.CREATED
+
+
+def test_admin_post_jobs_from_loopback_bypasses_token(tmp_path) -> None:
+    state = AdminState(tmp_path, token="secret-token")
+
+    handler = _make_handler(state, client_ip="127.0.0.1", body=b'{"action": "docs_build"}')
+    handler.do_POST()
+
+    assert _handler_response_status(handler) == HTTPStatus.CREATED
+
+
+def test_admin_post_jobs_rejects_mismatched_origin(tmp_path) -> None:
+    state = AdminState(tmp_path, token="secret-token")
+
+    handler = _make_handler(
+        state,
+        client_ip="127.0.0.1",
+        body=b'{"action": "docs_build"}',
+        headers={"Host": "127.0.0.1:8400", "Origin": "http://evil.example.com"},
+    )
+    handler.do_POST()
+
+    assert _handler_response_status(handler) == HTTPStatus.FORBIDDEN
+
+
+def test_admin_post_jobs_rejects_cross_site_sec_fetch_site(tmp_path) -> None:
+    state = AdminState(tmp_path, token="secret-token")
+
+    handler = _make_handler(
+        state,
+        client_ip="127.0.0.1",
+        body=b'{"action": "docs_build"}',
+        headers={"Host": "127.0.0.1:8400", "Sec-Fetch-Site": "cross-site"},
+    )
+    handler.do_POST()
+
+    assert _handler_response_status(handler) == HTTPStatus.FORBIDDEN
+
+
+def test_admin_post_jobs_allows_matching_origin(tmp_path) -> None:
+    state = AdminState(tmp_path, token="secret-token")
+
+    handler = _make_handler(
+        state,
+        client_ip="127.0.0.1",
+        body=b'{"action": "docs_build"}',
+        headers={"Host": "127.0.0.1:8400", "Origin": "http://127.0.0.1:8400"},
+    )
+    handler.do_POST()
+
+    assert _handler_response_status(handler) == HTTPStatus.CREATED
+
+
+def test_admin_health_endpoint_has_no_absolute_paths(tmp_path) -> None:
+    state = AdminState(tmp_path, token="secret-token")
+
+    handler = _make_handler(state, client_ip="8.8.8.8", path="/api/health", method="GET")
+    handler.do_GET()
+
+    handler.wfile.seek(0)
+    raw = handler.wfile.read()
+    body = raw.split(b"\r\n\r\n", 1)[1]
+    assert str(tmp_path.resolve()).encode("utf-8") not in raw
+    assert b":\\\\" not in body  # no windows-style absolute path fragments leak either
+
+
+def test_admin_job_eviction_keeps_only_recent_completed_jobs(tmp_path) -> None:
+    state = AdminState(tmp_path)
+    log_dir = state.paths.data_root / "admin" / "jobs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    base_time = datetime.now(UTC)
+    for i in range(55):
+        job_id = f"job{i:04d}"
+        log_path = log_dir / f"{job_id}.log"
+        log_path.write_text("done", encoding="utf-8")
+        job = AdminJob(
+            id=job_id,
+            action="docs_build",
+            label="Build Docs",
+            command=["true"],
+            log_path=log_path,
+            status="done",
+            returncode=0,
+            started_at=base_time + timedelta(seconds=i),
+            ended_at=base_time + timedelta(seconds=i + 1),
+        )
+        with state.lock:
+            state.jobs[job.id] = job
+            state._evict_old_jobs()
+
+    assert len(state.jobs) == MAX_JOBS_RETAINED
+    remaining_ids = set(state.jobs)
+    # the oldest jobs should have been evicted, newest retained
+    assert "job0000" not in remaining_ids
+    assert "job0054" in remaining_ids
+    for i in range(55 - MAX_JOBS_RETAINED):
+        assert not (log_dir / f"job{i:04d}.log").exists()
+    for i in range(55 - MAX_JOBS_RETAINED, 55):
+        assert (log_dir / f"job{i:04d}.log").exists()
+
+
+def test_admin_job_eviction_never_drops_running_jobs(tmp_path) -> None:
+    state = AdminState(tmp_path)
+    log_dir = state.paths.data_root / "admin" / "jobs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    base_time = datetime.now(UTC)
+    running_job = AdminJob(
+        id="running-job",
+        action="docs_build",
+        label="Build Docs",
+        command=["true"],
+        log_path=log_dir / "running-job.log",
+        status="running",
+        started_at=base_time,
+    )
+    with state.lock:
+        state.jobs[running_job.id] = running_job
+
+    for i in range(60):
+        job_id = f"done{i:04d}"
+        log_path = log_dir / f"{job_id}.log"
+        log_path.write_text("done", encoding="utf-8")
+        job = AdminJob(
+            id=job_id,
+            action="docs_build",
+            label="Build Docs",
+            command=["true"],
+            log_path=log_path,
+            status="done",
+            returncode=0,
+            started_at=base_time + timedelta(seconds=i + 1),
+            ended_at=base_time + timedelta(seconds=i + 2),
+        )
+        with state.lock:
+            state.jobs[job.id] = job
+            state._evict_old_jobs()
+
+    assert "running-job" in state.jobs
+    assert state.jobs["running-job"].status == "running"
 
 
 def test_admin_ensure_docs_built_creates_site(tmp_path) -> None:

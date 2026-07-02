@@ -34,6 +34,8 @@ DEFAULT_MAX_PRICE_QUERIES = 4
 DEFAULT_MAX_PRICE_TICKERS = 500
 DEFAULT_MAX_PRICE_DAYS = 3700
 DEFAULT_PRICE_QUERY_WAIT_SECONDS = 15.0
+MAX_PRICE_CELLS = 200_000
+MAX_JOBS_RETAINED = 50
 MACRO_TABLE_COLUMNS = {
     "cpi": (
         "date",
@@ -1176,6 +1178,7 @@ class AdminState:
     overview_cache_seconds = 120.0
     price_cache_seconds = 60.0
     realtime_cache_seconds = 15.0
+    quotes_cache_seconds = 15.0
     price_cache_max_entries = 512
 
     def __init__(self, root: Path, token: str | None = None) -> None:
@@ -1189,6 +1192,11 @@ class AdminState:
             tuple[float, dict[str, list[dict[str, Any]]]],
         ] = {}
         self._realtime_cache: dict[tuple[str | None, str | None], tuple[float, dict[str, Any]]] = {}
+        self._quotes_cache: dict[tuple[str, ...], tuple[float, list[dict[str, Any]]]] = {}
+        self._search_cache: dict[
+            tuple[tuple[str, ...], int],
+            tuple[float, dict[str, list[dict[str, Any]]]],
+        ] = {}
         self._job_slots = threading.BoundedSemaphore(_admin_max_jobs())
         self._price_query_slots = threading.BoundedSemaphore(_admin_max_price_queries())
 
@@ -1274,7 +1282,7 @@ class AdminState:
         symbols = _symbol_params(params)
         if len(symbols) > _admin_max_price_tickers():
             raise ValueError(f"too many symbols; max is {_admin_max_price_tickers()}")
-        quotes = _query_quotes(self.paths, symbols)
+        quotes = self._run_quotes_query(symbols)
         return {
             "symbols": symbols,
             "generated_at": datetime.now(UTC).isoformat(),
@@ -1287,13 +1295,57 @@ class AdminState:
         limit = _optional_int_param(params, "limit") or 10
         if limit < 1 or limit > 50:
             raise ValueError("limit must be between 1 and 50")
-        results = _search_securities(self.paths, queries, limit)
+        results = self._run_search_query(queries, limit)
         return {
             "queries": queries,
             "limit": limit,
             "count": sum(len(rows) for rows in results.values()),
             "results": results,
         }
+
+    def _run_quotes_query(self, symbols: list[str]) -> list[dict[str, Any]]:
+        cache_key = tuple(symbols)
+        now = time.monotonic()
+        with self.lock:
+            cached_item = self._quotes_cache.get(cache_key)
+            if cached_item is not None:
+                cached_at, cached = cached_item
+                if now - cached_at < self.quotes_cache_seconds:
+                    return deepcopy(cached)
+
+        self._acquire_data_query_slot("quotes", symbols, None, None)
+        try:
+            result = _query_quotes(self.paths, symbols)
+        finally:
+            self._price_query_slots.release()
+        with self.lock:
+            self._quotes_cache[cache_key] = (time.monotonic(), deepcopy(result))
+            if len(self._quotes_cache) > 128:
+                oldest_key = min(self._quotes_cache, key=lambda key: self._quotes_cache[key][0])
+                self._quotes_cache.pop(oldest_key, None)
+        return result
+
+    def _run_search_query(self, queries: list[str], limit: int) -> dict[str, list[dict[str, Any]]]:
+        cache_key = (tuple(queries), limit)
+        now = time.monotonic()
+        with self.lock:
+            cached_item = self._search_cache.get(cache_key)
+            if cached_item is not None:
+                cached_at, cached = cached_item
+                if now - cached_at < self.quotes_cache_seconds:
+                    return deepcopy(cached)
+
+        self._acquire_data_query_slot("security_search", queries, None, None)
+        try:
+            result = _search_securities(self.paths, queries, limit)
+        finally:
+            self._price_query_slots.release()
+        with self.lock:
+            self._search_cache[cache_key] = (time.monotonic(), deepcopy(result))
+            if len(self._search_cache) > 128:
+                oldest_key = min(self._search_cache, key=lambda key: self._search_cache[key][0])
+                self._search_cache.pop(oldest_key, None)
+        return result
 
     def nps_universe(self, params: dict[str, list[str]]) -> dict[str, Any]:
         requested_date = _optional_date_param(params, "date") or date.today()
@@ -1573,6 +1625,7 @@ class AdminState:
         with self.lock:
             self.jobs[job.id] = job
             self._overview_cache = None
+            self._evict_old_jobs()
         try:
             threading.Thread(target=self._run_job, args=(job,), daemon=True).start()
         except Exception:
@@ -1580,15 +1633,27 @@ class AdminState:
             raise
         return job.to_dict()
 
+    def _evict_old_jobs(self) -> None:
+        """Caller must hold self.lock. Never evicts queued/running jobs."""
+        completed = sorted(
+            (job for job in self.jobs.values() if job.status in {"done", "failed"}),
+            key=lambda item: item.started_at,
+        )
+        overflow = len(self.jobs) - MAX_JOBS_RETAINED
+        for job in completed:
+            if overflow <= 0:
+                break
+            del self.jobs[job.id]
+            with suppress(OSError):
+                job.log_path.unlink(missing_ok=True)
+            overflow -= 1
+
     def job_log(self, job_id: str) -> dict[str, Any]:
         with self.lock:
             job = self.jobs.get(job_id)
         if job is None:
             raise KeyError(job_id)
-        if not job.log_path.exists():
-            log = ""
-        else:
-            log = job.log_path.read_text(encoding="utf-8", errors="replace")[-120_000:]
+        log = "" if not job.log_path.exists() else _tail_file(job.log_path, 120_000)
         result = job.to_dict()
         result["log"] = log
         return result
@@ -1620,11 +1685,15 @@ class AdminState:
                 job.returncode = returncode
                 job.status = "done" if returncode == 0 else "failed"
                 job.ended_at = datetime.now(UTC)
+                self._evict_old_jobs()
         except Exception as exc:  # noqa: BLE001
-            job.log_path.write_text(str(exc), encoding="utf-8")
+            with job.log_path.open("a", encoding="utf-8", errors="replace") as log:
+                log.write(str(exc))
             with self.lock:
+                job.returncode = -1
                 job.status = "failed"
                 job.ended_at = datetime.now(UTC)
+                self._evict_old_jobs()
         finally:
             self._job_slots.release()
 
@@ -1682,6 +1751,11 @@ def run_admin(
     port: int = 8400,
     token: str | None = None,
 ) -> None:
+    # host defaults to 0.0.0.0 so the admin is reachable from other devices on the
+    # LAN. Read-only GET endpoints trust any private/link-local peer (convenience
+    # for trusted home networks); state-changing POST endpoints require a token
+    # unless the peer is strictly loopback, and are also guarded against CSRF via
+    # Origin/Sec-Fetch-Site checks (see _authorized/_csrf_safe below).
     load_dotenv(root / ".env")
     auth_token = token or os.environ.get("FINANCE_PI_ADMIN_TOKEN") or secrets.token_urlsafe(24)
     _ensure_docs_built(root)
@@ -1834,7 +1908,10 @@ def _handler_for(state: AdminState) -> type[BaseHTTPRequestHandler]:
             if self.path != "/api/jobs":
                 self._send_json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
                 return
-            if not self._authorized():
+            if not self._csrf_safe():
+                self._send_json({"error": "forbidden"}, status=HTTPStatus.FORBIDDEN)
+                return
+            if not self._authorized(require_loopback=True):
                 return
             try:
                 length = int(self.headers.get("Content-Length", "0"))
@@ -1875,8 +1952,17 @@ def _handler_for(state: AdminState) -> type[BaseHTTPRequestHandler]:
                 return
             self._send_bytes(path.read_bytes(), _content_type(path))
 
-        def _authorized(self) -> bool:
-            if _is_local_admin_client(self.client_address[0]):
+        def _authorized(self, require_loopback: bool = False) -> bool:
+            # Read-only GET endpoints trust any private-LAN peer (see
+            # _is_local_admin_client). State-changing requests (require_loopback=True,
+            # currently POST /api/jobs) only bypass the token for strictly loopback
+            # peers (127.0.0.0/8, ::1) so another device on the LAN cannot trigger
+            # jobs without a token.
+            client_ip = self.client_address[0]
+            if require_loopback:
+                if _is_loopback_client(client_ip):
+                    return True
+            elif _is_local_admin_client(client_ip):
                 return True
             if state.token is None:
                 return True
@@ -1886,6 +1972,14 @@ def _handler_for(state: AdminState) -> type[BaseHTTPRequestHandler]:
                 return True
             self._send_json({"error": "unauthorized"}, status=HTTPStatus.UNAUTHORIZED)
             return False
+
+        def _csrf_safe(self) -> bool:
+            host = self.headers.get("Host", "")
+            origin = self.headers.get("Origin")
+            if origin and not _origin_matches_host(origin, host):
+                return False
+            sec_fetch_site = self.headers.get("Sec-Fetch-Site")
+            return sec_fetch_site is None or sec_fetch_site in {"same-origin", "none"}
 
         def _send_json(self, payload: Any, status: HTTPStatus = HTTPStatus.OK) -> None:
             body = json.dumps(payload, default=str).encode("utf-8")
@@ -1956,26 +2050,43 @@ def _is_local_admin_client(host: str) -> bool:
     return address.is_loopback or address.is_private or address.is_link_local
 
 
+def _is_loopback_client(host: str) -> bool:
+    try:
+        address = ip_address(host)
+    except ValueError:
+        return False
+    if getattr(address, "ipv4_mapped", None) is not None:
+        address = address.ipv4_mapped
+    return address.is_loopback
+
+
+def _origin_matches_host(origin: str, host: str) -> bool:
+    origin_host = urlparse(origin).netloc
+    return origin_host.lower() == host.lower()
+
+
 def _redact_admin_request_target(target: str) -> str:
     return re.sub(r"([?&]token=)[^&]+", r"\1<redacted>", target)
 
 
 def _health_payload(state: AdminState) -> dict[str, Any]:
+    # Unauthenticated endpoint: no absolute filesystem paths in the response.
     return {
         "status": "ok",
         "generated_at": datetime.now(UTC).isoformat(),
-        "workspace": str(state.paths.root.resolve()),
-        "data_root": str(state.paths.data_root.resolve()),
+        "workspace": state.paths.root.resolve().name,
+        "data_root_exists": state.paths.data_root.resolve().exists(),
         "auth": "local-or-token",
     }
 
 
 def _api_docs_payload(state: AdminState) -> dict[str, Any]:
     base_url = "/api"
+    # Unauthenticated endpoint: no absolute filesystem paths in the response.
     return {
         "service": "finance-pi admin API",
         "generated_at": datetime.now(UTC).isoformat(),
-        "workspace": str(state.paths.root.resolve()),
+        "workspace": state.paths.root.resolve().name,
         "auth": {
             "local_network": "LAN clients are allowed without a token",
             "token": "Use X-Admin-Token or token query parameter outside local networks",
@@ -1987,6 +2098,7 @@ def _api_docs_payload(state: AdminState) -> dict[str, Any]:
             "price_query_wait_seconds": _admin_price_query_wait_seconds(),
             "max_price_tickers": _admin_max_price_tickers(),
             "max_price_days": _admin_max_price_days(),
+            "max_price_cells": MAX_PRICE_CELLS,
         },
         "endpoints": {
             "health": {
@@ -1997,7 +2109,10 @@ def _api_docs_payload(state: AdminState) -> dict[str, Any]:
             "close_prices": {
                 "method": "GET",
                 "path": f"{base_url}/prices/close",
-                "description": "Adjusted close prices. Supports one ticker or batched tickers.",
+                "description": (
+                    "Adjusted close prices. Supports one ticker or batched tickers. "
+                    f"tickers x days must not exceed {MAX_PRICE_CELLS}."
+                ),
                 "query": {
                     "ticker": "Single ticker, e.g. 005930 or 5930.",
                     "tickers": "Comma-separated tickers, e.g. 005930,000660.",
@@ -2012,7 +2127,10 @@ def _api_docs_payload(state: AdminState) -> dict[str, Any]:
             "daily_prices": {
                 "method": "GET",
                 "path": f"{base_url}/prices/daily",
-                "description": "Daily adjusted OHLCV rows with optional market fields.",
+                "description": (
+                    "Daily adjusted OHLCV rows with optional market fields. "
+                    f"tickers x days must not exceed {MAX_PRICE_CELLS}."
+                ),
                 "query": {
                     "ticker": "Single ticker, e.g. 005930 or 5930.",
                     "tickers": "Comma-separated tickers, e.g. 005930,000660.",
@@ -2444,6 +2562,11 @@ def _validate_price_request(tickers: list[str], since: date, until: date) -> Non
     days = (until - since).days + 1
     if days > _admin_max_price_days():
         raise ValueError(f"date range is too large; max days is {_admin_max_price_days()}")
+    if len(tickers) * days > MAX_PRICE_CELLS:
+        raise ValueError(
+            f"tickers x days is too large; max is {MAX_PRICE_CELLS} "
+            f"(requested {len(tickers)} tickers x {days} days)"
+        )
 
 
 def _query_nps_universe(
@@ -5294,6 +5417,15 @@ def _mtime(path: Path) -> float:
         return path.stat().st_mtime
     except FileNotFoundError:
         return 0.0
+
+
+def _tail_file(path: Path, max_bytes: int) -> str:
+    size = path.stat().st_size
+    with path.open("rb") as handle:
+        if size > max_bytes:
+            handle.seek(size - max_bytes)
+        data = handle.read()
+    return data.decode("utf-8", errors="replace")
 
 
 def _content_type(path: Path) -> str:
