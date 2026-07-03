@@ -253,41 +253,49 @@ python -m finance_pi.cli.app ingest dart-financials-bulk \
   --root .
 ```
 
-## 6. Schedule With systemd
+## 6. Schedule With systemd (user units)
 
-Copy the templates and adjust paths/user names if needed. The timer uses the
-server's local timezone, so keep the server timezone set to `Asia/Seoul`.
+The production server runs all finance-pi units as **systemd user units**
+(`~/.config/systemd/user/`): `finance-pi-daily.timer` (scheduled catch-up),
+`finance-pi-admin.service` (web admin), and
+`finance-pi-admin-watchdog.timer` (per-minute HTTP health check that restarts
+the admin user unit — the watchdog calls `systemctl --user restart`, which is
+why the admin must stay a user unit). The daily timer fires twice per weekday
+(17:30 and 20:30 KST, plus up to 10 minutes of randomized delay); the second
+run is a same-evening catch-up for sources that publish late. The templates in
+`ops/systemd/` install unchanged at the user level.
 
 ```bash
-sudo cp ops/systemd/finance-pi-daily.service /etc/systemd/system/
-sudo cp ops/systemd/finance-pi-daily.timer /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now finance-pi-daily.timer
+mkdir -p ~/.config/systemd/user
+cp ops/systemd/finance-pi-daily.service ~/.config/systemd/user/
+cp ops/systemd/finance-pi-daily.timer ~/.config/systemd/user/
+cp ops/systemd/finance-pi-admin.service ~/.config/systemd/user/
+cp ops/systemd/finance-pi-admin-watchdog.service ~/.config/systemd/user/
+cp ops/systemd/finance-pi-admin-watchdog.timer ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now finance-pi-daily.timer finance-pi-admin.service finance-pi-admin-watchdog.timer
+sudo loginctl enable-linger "$USER"   # keep user units running without a login session
 ```
 
 Check status and logs:
 
 ```bash
-systemctl status finance-pi-daily.timer
-journalctl -u finance-pi-daily.service -n 100 --no-pager
+systemctl --user list-timers | grep finance
+systemctl --user status finance-pi-admin.service
+journalctl --user -u finance-pi-daily.service -n 100 --no-pager
 ```
 
 Run once manually:
 
 ```bash
-sudo systemctl start finance-pi-daily.service
+systemctl --user start finance-pi-daily.service
 ```
 
-For this server, adjust the template path/user before copying or override the
-unit after copying:
-
-```ini
-User=cantabile
-Group=cantabile
-WorkingDirectory=/home/cantabile/Works/finance-pi
-EnvironmentFile=-/home/cantabile/Works/finance-pi/.env
-ExecStart=/home/cantabile/Works/finance-pi/.venv/bin/python -m finance_pi.cli.app catchup --root /home/cantabile/Works/finance-pi --no-strict
-```
+> **Do not also install these units under `/etc/systemd/system/`.** A
+> system-level duplicate of `finance-pi-daily.timer` once ran the daily job
+> twice per day, and a system-level admin unit fights the user unit over port
+> 8400 in a restart loop. Keep everything at the user level. The timer uses the
+> server's local timezone, so keep the server timezone set to `Asia/Seoul`.
 
 ## 7. Update Deployment
 
@@ -317,6 +325,10 @@ powershell -File ops\deploy-from-windows.ps1             # deploy + verify
 powershell -File ops\deploy-from-windows.ps1 -FullRebuild
 ```
 
+If the server tree has uncommitted local changes, the script aborts with the
+file list; rerun with `--stash` (wrapper: `-Stash`) to set them aside as a
+labeled stash, or commit them to a branch first.
+
 The manual equivalent remains:
 
 ```bash
@@ -325,17 +337,25 @@ git pull
 source .venv/bin/activate
 python -m pip install -e ".[dev]"
 python -m pytest
-sudo systemctl restart finance-pi-admin.service
+systemctl --user restart finance-pi-admin.service
 ```
 
 ## Current Runtime Scope
 
 The scheduled `daily` command initializes the data lake, refreshes the OpenDART
 company snapshot, ingests the Naver same-day market summary, attempts KIS
-universe price ingest and OpenDART filing/financial ingest when keys are configured,
-rebuilds Silver/Gold datasets, rebuilds the DuckDB view catalog, and writes
-DQ/Fraud reports.
+universe price ingest and OpenDART filing/financial ingest when keys are
+configured, rebuilds Silver/Gold datasets (including corporate actions,
+preferred-share discount, and NPS delta), rebuilds the DuckDB view catalog, and
+writes DQ/Fraud reports with the dataset reliability scorecard. Each run leaves
+a completeness marker (`complete` / `complete_with_failures` / `failed`) under
+`data/_state/daily/`, checked by a gold price-quality gate; catch-up re-runs
+incomplete dates. With `FINANCE_PI_WEBHOOK_URL` set in `.env`, failing runs or
+C/F dataset grades POST a Slack/Discord-compatible alert.
 
 The `admin` command serves a local operations dashboard with dataset status,
 recent reports, backtest artifacts, and allowlisted job buttons for daily runs,
-builds, catalog refreshes, historical backfills, reports, and backtests.
+builds, catalog refreshes, historical backfills, reports, and backtests. Job
+execution (`POST /api/jobs`) always requires the admin token unless the client
+is loopback; read-only GET endpoints remain open to the private LAN. The full
+API reference is served at `/api/docs`.
