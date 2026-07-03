@@ -25,6 +25,9 @@ KNOWN_DOTENV_KEYS = frozenset(
         "KIS_ACCESS_TOKEN",
         "KIS_DAILY_SLEEP_SECONDS",
         "KIS_DAILY_TICKER_BATCH_SIZE",
+        "KIS_DAILY_RETRY_ATTEMPTS",
+        "KIS_DAILY_RETRY_SLEEP_SECONDS",
+        "KIS_DAILY_RETRY_BACKOFF_MULTIPLIER",
         "KIS_ACCOUNT_NO",
         "KIS_ACCOUNT_PRODUCT_CODE",
         "NAVER_FINANCE_BASE_URL",
@@ -91,6 +94,9 @@ class RuntimeSettings:
     kis_access_token: str | None = None
     kis_daily_sleep_seconds: float = 0.25
     kis_daily_ticker_batch_size: int = 25
+    kis_daily_retry_attempts: int = 3
+    kis_daily_retry_sleep_seconds: float = 1.0
+    kis_daily_retry_backoff_multiplier: float = 2.0
     naver_finance_base_url: str = "https://finance.naver.com"
     naver_finance_api_base_url: str = "https://api.finance.naver.com"
     naver_finance_user_agent: str = "Mozilla/5.0 finance-pi/0.1"
@@ -131,6 +137,18 @@ class RuntimeSettings:
             kis_daily_ticker_batch_size=_env_int(
                 "KIS_DAILY_TICKER_BATCH_SIZE",
                 cls.kis_daily_ticker_batch_size,
+            ),
+            kis_daily_retry_attempts=_env_int(
+                "KIS_DAILY_RETRY_ATTEMPTS",
+                cls.kis_daily_retry_attempts,
+            ),
+            kis_daily_retry_sleep_seconds=_env_float(
+                "KIS_DAILY_RETRY_SLEEP_SECONDS",
+                cls.kis_daily_retry_sleep_seconds,
+            ),
+            kis_daily_retry_backoff_multiplier=_env_float(
+                "KIS_DAILY_RETRY_BACKOFF_MULTIPLIER",
+                cls.kis_daily_retry_backoff_multiplier,
             ),
             naver_finance_base_url=_env_first("NAVER_FINANCE_BASE_URL")
             or cls.naver_finance_base_url,

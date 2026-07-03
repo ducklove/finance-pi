@@ -1305,6 +1305,7 @@ def run_daily(
     paths = ProjectPaths(root=root)
     settings = RuntimeSettings.load(paths.root)
     DataLakeLayout(paths.data_root).ensure_base_dirs()
+    price_date = _previous_weekday(parsed_date)
     failures: list[str] = []
     build_failures: list[str] = []
     if ingest:
@@ -1312,17 +1313,22 @@ def run_daily(
         for failure in failures:
             typer.echo(failure)
         if strict and failures:
+            _record_daily_marker(paths.data_root, parsed_date, price_date, failures)
             _notify_daily_webhook(settings, parsed_date, failures, build_failures, None)
             raise typer.Exit(code=1)
     try:
         summaries = _run_daily_builds(
             paths.data_root,
             include_fundamentals_pit,
-            _previous_weekday(parsed_date),
+            price_date,
         )
     except Exception as exc:  # noqa: BLE001
         build_failures.append(f"Build step failed: {exc}")
         summaries = []
+    quality_failures = _daily_price_quality_failures(paths.data_root, price_date)
+    for failure in quality_failures:
+        typer.echo(failure)
+    build_failures.extend(quality_failures)
     created = CatalogBuilder(paths.data_root, paths.catalog_path).build()
 
     dq_path = paths.data_root / "reports" / "data_quality" / f"{parsed_date.isoformat()}.html"
@@ -1344,21 +1350,17 @@ def run_daily(
     typer.echo(f"Views: {len(created)}")
     typer.echo(f"Data quality report: {dq_path}")
     typer.echo(f"Fraud report: {fraud_path}")
-    price_date = _previous_weekday(parsed_date)
-    if not failures or _gold_price_partition_exists(paths.data_root, price_date):
-        _write_daily_marker(
-            paths.data_root,
-            parsed_date,
-            {
-                "report_date": parsed_date.isoformat(),
-                "price_date": price_date.isoformat(),
-                "failures": failures,
-                "gold_price_partition": _gold_price_partition_exists(paths.data_root, price_date),
-            },
-        )
+    _record_daily_marker(
+        paths.data_root,
+        parsed_date,
+        price_date,
+        [*failures, *build_failures],
+    )
 
     scorecard = _safe_build_scorecard(paths.data_root, parsed_date)
     _notify_daily_webhook(settings, parsed_date, failures, build_failures, scorecard)
+    if strict and quality_failures:
+        raise typer.Exit(code=1)
 
 
 @app.command("catchup")
@@ -1399,6 +1401,24 @@ def _safe_build_scorecard(data_root: Path, report_date: date) -> pl.DataFrame | 
     except Exception as exc:  # noqa: BLE001
         typer.echo(f"Scorecard build failed: {exc}")
         return None
+
+
+def _record_daily_marker(
+    data_root: Path,
+    report_date: date,
+    price_date: date,
+    failures: list[str],
+) -> Path:
+    return _write_daily_marker(
+        data_root,
+        report_date,
+        {
+            "report_date": report_date.isoformat(),
+            "price_date": price_date.isoformat(),
+            "failures": failures,
+            "gold_price_partition": _gold_price_partition_exists(data_root, price_date),
+        },
+    )
 
 
 def _notify_daily_webhook(
@@ -1516,6 +1536,9 @@ def _kis_client(settings: RuntimeSettings, paths: ProjectPaths) -> KisDailyPrice
         settings.kis_app_key,
         settings.kis_app_secret,
         token,
+        retry_attempts=settings.kis_daily_retry_attempts,
+        retry_sleep_seconds=settings.kis_daily_retry_sleep_seconds,
+        retry_backoff_multiplier=settings.kis_daily_retry_backoff_multiplier,
     )
 
 
@@ -1625,7 +1648,10 @@ def _run_daily_ingest(
                 0.05,
             )
         except Exception as exc:  # noqa: BLE001
-            failures.append(f"OpenDART dividend ingest failed: {exc}")
+            if _is_no_matching_dart_report_error(exc):
+                typer.echo(f"OpenDART dividend ingest skipped: {exc}")
+            else:
+                failures.append(f"OpenDART dividend ingest failed: {exc}")
         try:
             ingest_dart_share_counts(
                 filing_start.isoformat(),
@@ -1637,7 +1663,10 @@ def _run_daily_ingest(
                 0.05,
             )
         except Exception as exc:  # noqa: BLE001
-            failures.append(f"OpenDART share-count ingest failed: {exc}")
+            if _is_no_matching_dart_report_error(exc):
+                typer.echo(f"OpenDART share-count ingest skipped: {exc}")
+            else:
+                failures.append(f"OpenDART share-count ingest failed: {exc}")
     macro_since = _macro_ingest_start(paths.data_root, report_date)
     for failure in _ingest_macro(paths, macro_since, report_date, settings):
         typer.echo(failure)
@@ -2559,10 +2588,18 @@ def _daily_marker_path(data_root: Path, logical_date: date) -> Path:
 def _write_daily_marker(data_root: Path, logical_date: date, payload: dict[str, object]) -> Path:
     marker = _daily_marker_path(data_root, logical_date)
     marker.parent.mkdir(parents=True, exist_ok=True)
+    failures = payload.get("failures") or []
+    has_gold = bool(payload.get("gold_price_partition"))
+    if failures and not has_gold:
+        status = "failed"
+    elif failures:
+        status = "complete_with_failures"
+    else:
+        status = "complete"
     marker.write_text(
         json.dumps(
             {
-                "status": "complete",
+                "status": status,
                 "completed_at": datetime.now(UTC).isoformat(),
                 **payload,
             },
@@ -2574,6 +2611,20 @@ def _write_daily_marker(data_root: Path, logical_date: date, payload: dict[str, 
         encoding="utf-8",
     )
     return marker
+
+
+def _read_daily_marker_status(marker: Path) -> str | None:
+    if not marker.exists():
+        return None
+    try:
+        data = json.loads(marker.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return "marker_invalid"
+    status = data.get("status")
+    if status:
+        return str(status)
+    failures = data.get("failures") or []
+    return "complete_with_failures" if failures else "complete"
 
 
 def _yearly_backfill_status(
@@ -2757,17 +2808,21 @@ def _count_parquet_rows(files: list[Path]) -> int:
 
 
 def _catchup_dates(data_root: Path, since: date | None, until: date) -> tuple[date, ...]:
+    incomplete_dates = _incomplete_daily_marker_dates(data_root, since, until)
     if since is None:
         latest = _latest_gold_price_date(data_root)
-        latest_marker = _latest_daily_marker_date(data_root)
+        latest_marker = _latest_complete_daily_marker_date(data_root)
         latest_values = [value for value in (latest, latest_marker) if value is not None]
         latest = max(latest_values) if latest_values else None
         if latest is None:
+            if incomplete_dates:
+                return incomplete_dates
             raise typer.BadParameter("No gold price data found. Pass --since explicitly.")
         since = latest + timedelta(days=1)
     if until < since:
-        return ()
-    return TradingCalendar.krx_trading_days(since, until).dates
+        return incomplete_dates
+    scheduled_dates = TradingCalendar.krx_trading_days(since, until).dates
+    return tuple(sorted(set(incomplete_dates) | set(scheduled_dates)))
 
 
 def _latest_gold_price_date(data_root: Path) -> date | None:
@@ -2781,12 +2836,33 @@ def _latest_gold_price_date(data_root: Path) -> date | None:
     return max(values) if values else None
 
 
-def _latest_daily_marker_date(data_root: Path) -> date | None:
+def _latest_complete_daily_marker_date(data_root: Path) -> date | None:
     values: list[date] = []
     for path in data_root.glob("_state/daily/*.json"):
+        if _read_daily_marker_status(path) != "complete":
+            continue
         with suppress(ValueError):
             values.append(date.fromisoformat(path.stem))
     return max(values) if values else None
+
+
+def _incomplete_daily_marker_dates(
+    data_root: Path,
+    since: date | None,
+    until: date,
+) -> tuple[date, ...]:
+    values: list[date] = []
+    for path in data_root.glob("_state/daily/*.json"):
+        status = _read_daily_marker_status(path)
+        if status in (None, "complete"):
+            continue
+        with suppress(ValueError):
+            value = date.fromisoformat(path.stem)
+            if since is not None and value < since:
+                continue
+            if value <= until and TradingCalendar.is_krx_trading_day(value):
+                values.append(value)
+    return tuple(sorted(set(values)))
 
 
 def _gold_price_partition_exists(data_root: Path, logical_date: date) -> bool:
@@ -2796,9 +2872,52 @@ def _gold_price_partition_exists(data_root: Path, logical_date: date) -> bool:
 
 
 def _daily_complete(data_root: Path, logical_date: date) -> bool:
-    return _gold_price_partition_exists(data_root, logical_date) or _daily_marker_path(
-        data_root, logical_date
-    ).exists()
+    marker = _daily_marker_path(data_root, logical_date)
+    if marker.exists():
+        return _read_daily_marker_status(marker) in {"complete", "complete_with_failures"}
+    return _gold_price_partition_exists(data_root, logical_date)
+
+
+def _daily_price_quality_failures(data_root: Path, logical_date: date) -> list[str]:
+    current_rows = _gold_price_row_count(data_root, logical_date)
+    if current_rows <= 0:
+        return [f"Gold price partition missing or empty for {logical_date.isoformat()}"]
+    previous = _previous_gold_price_row_count(data_root, logical_date)
+    if previous is None:
+        return []
+    previous_date, previous_rows = previous
+    if previous_rows >= 100 and current_rows < int(previous_rows * 0.95):
+        return [
+            (
+                f"Gold price row count low for {logical_date.isoformat()}: "
+                f"{current_rows} rows vs {previous_rows} rows on {previous_date.isoformat()}"
+            )
+        ]
+    return []
+
+
+def _gold_price_row_count(data_root: Path, logical_date: date) -> int:
+    path = (
+        data_root / "gold" / "daily_prices_adj" / f"dt={logical_date.isoformat()}" / "part.parquet"
+    )
+    return _count_parquet_rows([path]) if path.exists() else 0
+
+
+def _previous_gold_price_row_count(data_root: Path, logical_date: date) -> tuple[date, int] | None:
+    previous_dates = [
+        value
+        for value in _partition_dates(data_root.glob("gold/daily_prices_adj/dt=*/part.parquet"))
+        if value < logical_date
+    ]
+    if not previous_dates:
+        return None
+    previous_date = max(previous_dates)
+    rows = _gold_price_row_count(data_root, previous_date)
+    return previous_date, rows
+
+
+def _is_no_matching_dart_report_error(exc: Exception) -> bool:
+    return "No filings matched the requested financial report codes" in str(exc)
 
 
 def _dart_financial_requests(

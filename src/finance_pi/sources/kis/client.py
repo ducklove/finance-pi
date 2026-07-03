@@ -10,7 +10,6 @@ from finance_pi.http import HttpJsonClient, SourceApiError
 from finance_pi.sources.parsing import parse_date, parse_float, parse_int, value_for
 
 _RATE_LIMIT_MSG_CD = "EGW00201"
-_RATE_LIMIT_BACKOFF_SECONDS = (1, 2)
 
 
 @dataclass(frozen=True)
@@ -19,6 +18,9 @@ class KisDailyPriceClient:
     app_key: str
     app_secret: str
     access_token: str
+    retry_attempts: int = 3
+    retry_sleep_seconds: float = 1.0
+    retry_backoff_multiplier: float = 2.0
 
     def fetch_daily_prices(self, ticker: str, since: date, until: date) -> list[dict[str, Any]]:
         payload = self._fetch_daily_prices_payload(ticker, since, until)
@@ -36,7 +38,10 @@ class KisDailyPriceClient:
     def _fetch_daily_prices_payload(
         self, ticker: str, since: date, until: date
     ) -> dict[str, Any]:
-        for backoff in (*_RATE_LIMIT_BACKOFF_SECONDS, None):
+        attempts = max(1, self.retry_attempts)
+        delay = max(0.0, self.retry_sleep_seconds)
+        multiplier = max(1.0, self.retry_backoff_multiplier)
+        for attempt in range(1, attempts + 1):
             payload = self.http.get_json(
                 "/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice",
                 headers={
@@ -57,8 +62,10 @@ class KisDailyPriceClient:
             )
             if str(payload.get("rt_cd", "0")) == "0":
                 return payload
-            if str(payload.get("msg_cd", "")) == _RATE_LIMIT_MSG_CD and backoff is not None:
-                sleep(backoff)
+            if str(payload.get("msg_cd", "")) == _RATE_LIMIT_MSG_CD and attempt < attempts:
+                if delay > 0:
+                    sleep(delay)
+                delay *= multiplier
                 continue
             raise SourceApiError(
                 "kis", str(payload.get("msg1", "request failed")), payload=payload

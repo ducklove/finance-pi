@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import polars as pl
 import pytest
+import typer
 
 from finance_pi.cli import app as cli_app
 from finance_pi.cli.app import (
@@ -13,6 +14,7 @@ from finance_pi.cli.app import (
     _backfill_years,
     _catchup_dates,
     _daily_complete,
+    _daily_price_quality_failures,
     _daily_webhook_payload,
     _latest_gold_price_date,
     _latest_price_universe_tickers,
@@ -20,6 +22,7 @@ from finance_pi.cli.app import (
     _normalize_dart_share_count_rows,
     _notify_daily_webhook,
     _previous_weekday,
+    _read_daily_marker_status,
     _receipt_date,
     _run_daily_builds,
     _run_daily_ingest,
@@ -103,6 +106,155 @@ def test_catchup_dates_start_after_daily_marker_for_no_price_day(tmp_path) -> No
     assert _catchup_dates(tmp_path, None, date(2026, 5, 4)) == (date(2026, 5, 4),)
     assert _daily_complete(tmp_path, date(2026, 5, 1))
     assert not _daily_complete(tmp_path, date(2026, 5, 4))
+
+
+def test_daily_marker_records_complete_with_failures_and_catchup_retries(tmp_path) -> None:
+    latest_partition = tmp_path / "gold" / "daily_prices_adj" / "dt=2026-06-05"
+    latest_partition.mkdir(parents=True)
+    (latest_partition / "part.parquet").write_bytes(b"placeholder")
+    failed_partition = tmp_path / "gold" / "daily_prices_adj" / "dt=2026-05-21"
+    failed_partition.mkdir(parents=True)
+    (failed_partition / "part.parquet").write_bytes(b"placeholder")
+    _write_daily_marker(
+        tmp_path,
+        date(2026, 5, 21),
+        {
+            "report_date": "2026-05-21",
+            "price_date": "2026-05-21",
+            "failures": ["KIS universe price ingest failed: rate limit"],
+            "gold_price_partition": True,
+        },
+    )
+    _write_daily_marker(
+        tmp_path,
+        date(2026, 6, 5),
+        {
+            "report_date": "2026-06-05",
+            "price_date": "2026-06-05",
+            "failures": [],
+            "gold_price_partition": True,
+        },
+    )
+
+    marker = tmp_path / "_state" / "daily" / "2026-05-21.json"
+
+    assert _read_daily_marker_status(marker) == "complete_with_failures"
+    assert _daily_complete(tmp_path, date(2026, 5, 21))
+    assert _catchup_dates(tmp_path, None, date(2026, 6, 5)) == (date(2026, 5, 21),)
+
+
+def test_daily_marker_records_failed_without_gold_partition(tmp_path) -> None:
+    _write_daily_marker(
+        tmp_path,
+        date(2026, 5, 21),
+        {
+            "report_date": "2026-05-21",
+            "price_date": "2026-05-21",
+            "failures": ["KIS universe price ingest failed"],
+            "gold_price_partition": False,
+        },
+    )
+
+    marker = tmp_path / "_state" / "daily" / "2026-05-21.json"
+
+    assert _read_daily_marker_status(marker) == "failed"
+    assert not _daily_complete(tmp_path, date(2026, 5, 21))
+
+
+def test_daily_price_quality_flags_large_row_count_drop(tmp_path) -> None:
+    previous = tmp_path / "gold" / "daily_prices_adj" / "dt=2026-05-20"
+    current = tmp_path / "gold" / "daily_prices_adj" / "dt=2026-05-21"
+    previous.mkdir(parents=True)
+    current.mkdir(parents=True)
+    pl.DataFrame({"date": [date(2026, 5, 20)] * 100}).write_parquet(previous / "part.parquet")
+    pl.DataFrame({"date": [date(2026, 5, 21)] * 94}).write_parquet(current / "part.parquet")
+
+    failures = _daily_price_quality_failures(tmp_path, date(2026, 5, 21))
+
+    assert len(failures) == 1
+    assert "row count low" in failures[0]
+
+
+def test_daily_price_quality_accepts_small_row_count_drop(tmp_path) -> None:
+    previous = tmp_path / "gold" / "daily_prices_adj" / "dt=2026-05-20"
+    current = tmp_path / "gold" / "daily_prices_adj" / "dt=2026-05-21"
+    previous.mkdir(parents=True)
+    current.mkdir(parents=True)
+    pl.DataFrame({"date": [date(2026, 5, 20)] * 100}).write_parquet(previous / "part.parquet")
+    pl.DataFrame({"date": [date(2026, 5, 21)] * 95}).write_parquet(current / "part.parquet")
+
+    assert _daily_price_quality_failures(tmp_path, date(2026, 5, 21)) == []
+
+
+def test_daily_price_quality_flags_missing_partition(tmp_path) -> None:
+    failures = _daily_price_quality_failures(tmp_path, date(2026, 5, 21))
+
+    assert failures == ["Gold price partition missing or empty for 2026-05-21"]
+
+
+def test_daily_strict_ingest_failure_writes_failed_marker(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        cli_app,
+        "_run_daily_ingest",
+        lambda *args: ["KIS universe price ingest failed: boom"],
+    )
+    DataLakeLayout(tmp_path / "data").ensure_base_dirs()
+
+    with pytest.raises(typer.Exit):
+        cli_app.run_daily(tmp_path, "2026-05-07", True, True, False)
+
+    marker = tmp_path / "data" / "_state" / "daily" / "2026-05-07.json"
+
+    assert _read_daily_marker_status(marker) == "failed"
+    assert not _daily_complete(tmp_path / "data", date(2026, 5, 7))
+
+
+def test_daily_ingest_treats_no_matching_dart_reports_as_skip(tmp_path, monkeypatch) -> None:
+    def noop(*args: object) -> None:
+        return None
+
+    def raise_no_match(*args: object) -> None:
+        raise typer.BadParameter("No filings matched the requested financial report codes.")
+
+    monkeypatch.setattr(cli_app, "ingest_dart_company", noop)
+    monkeypatch.setattr(cli_app, "ingest_naver_summary", noop)
+    monkeypatch.setattr(cli_app, "ingest_dart_filings", noop)
+    monkeypatch.setattr(cli_app, "ingest_dart_financials_bulk", noop)
+    monkeypatch.setattr(cli_app, "ingest_dart_dividends", raise_no_match)
+    monkeypatch.setattr(cli_app, "ingest_dart_share_counts", raise_no_match)
+    monkeypatch.setattr(cli_app, "_ingest_macro", lambda *args: [])
+
+    failures = _run_daily_ingest(
+        ProjectPaths(tmp_path),
+        SimpleNamespace(has_opendart=True, has_kis=False),
+        date(2026, 4, 30),
+    )
+
+    assert failures == []
+
+
+def test_daily_ingest_keeps_other_dart_errors_as_failures(tmp_path, monkeypatch) -> None:
+    def noop(*args: object) -> None:
+        return None
+
+    def raise_runtime(*args: object) -> None:
+        raise RuntimeError("OpenDART down")
+
+    monkeypatch.setattr(cli_app, "ingest_dart_company", noop)
+    monkeypatch.setattr(cli_app, "ingest_naver_summary", noop)
+    monkeypatch.setattr(cli_app, "ingest_dart_filings", noop)
+    monkeypatch.setattr(cli_app, "ingest_dart_financials_bulk", noop)
+    monkeypatch.setattr(cli_app, "ingest_dart_dividends", raise_runtime)
+    monkeypatch.setattr(cli_app, "ingest_dart_share_counts", noop)
+    monkeypatch.setattr(cli_app, "_ingest_macro", lambda *args: [])
+
+    failures = _run_daily_ingest(
+        ProjectPaths(tmp_path),
+        SimpleNamespace(has_opendart=True, has_kis=False),
+        date(2026, 4, 30),
+    )
+
+    assert failures == ["OpenDART dividend ingest failed: OpenDART down"]
 
 
 def test_daily_ingest_internal_calls_pass_concrete_defaults(tmp_path, monkeypatch) -> None:
