@@ -86,7 +86,14 @@ fi
 log "5/7 restart services"
 restart_unit() {
   local unit="$1"
-  if systemctl list-unit-files --no-legend "$unit" 2>/dev/null | grep -q "^$unit"; then
+  if systemctl --user list-unit-files --no-legend "$unit" 2>/dev/null | grep -q "^$unit"; then
+    if systemctl --user restart "$unit" 2>/dev/null; then
+      echo "  restarted $unit (user unit)"
+    else
+      echo "  WARNING: could not restart user unit $unit."
+      echo "           run manually: systemctl --user restart $unit"
+    fi
+  elif systemctl list-unit-files --no-legend "$unit" 2>/dev/null | grep -q "^$unit"; then
     if sudo -n systemctl restart "$unit" 2>/dev/null; then
       echo "  restarted $unit"
     else
