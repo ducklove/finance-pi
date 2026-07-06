@@ -43,6 +43,7 @@ def test_builtin_factors_are_registered() -> None:
         "reversal_1m",
         "momentum_52w_high",
         "nps_flow",
+        "event_buyback",
         "composite_value_quality",
     } <= set(factor_registry.names())
 
@@ -57,6 +58,11 @@ def test_registry_describe_exposes_direction() -> None:
     assert rows["momentum_12_1"]["rebalance"] == "monthly"
     assert rows["nps_flow"]["direction"] == 1
     assert rows["nps_flow"]["requires"] == ["gold.nps_holdings_delta", "gold.daily_prices_adj"]
+    assert rows["event_buyback"]["direction"] == 1
+    assert rows["event_buyback"]["requires"] == [
+        "gold.filing_events",
+        "gold.daily_prices_adj",
+    ]
 
 
 def test_momentum_factor_returns_lazy_scores() -> None:
@@ -344,6 +350,105 @@ def test_nps_flow_pit_broadcast_and_staleness() -> None:
     assert scores[("S001", date(2025, 4, 22))] is None
     assert scores[("S002", date(2024, 3, 16))] == pytest.approx(-3.0)
     assert scores[("S003", date(2024, 3, 16))] is None
+
+
+def _filing_event_row(
+    security_id: str,
+    available_date: date,
+    *,
+    event_type: str = "buyback",
+) -> dict:
+    return {
+        "event_date": available_date,
+        "available_date": available_date,
+        "security_id": security_id,
+        "ticker": security_id.removeprefix("S"),
+        "event_type": event_type,
+        "expected_sign": 1,
+        "rcept_no": f"R{security_id}{available_date.isoformat()}",
+        "report_nm": "주요사항보고서(자기주식취득결정)",
+        "is_correction": False,
+    }
+
+
+def test_event_buyback_pit_decay_and_staleness() -> None:
+    from math import exp
+
+    available = date(2024, 3, 15)  # effective (first scoring day) = 2024-03-16
+    ctx = InMemoryFactorContext(
+        {
+            "gold.filing_events": pl.DataFrame(
+                [
+                    _filing_event_row("S001", available),
+                    # A non-buyback event type must never score.
+                    _filing_event_row("S002", available, event_type="rights_issue"),
+                ]
+            ),
+            "gold.daily_prices_adj": pl.DataFrame(
+                [
+                    # Announcement day itself: not knowable yet (strict PIT).
+                    _flow_price_row(date(2024, 3, 15), "S001"),
+                    _flow_price_row(date(2024, 3, 16), "S001"),
+                    _flow_price_row(date(2024, 4, 5), "S001"),
+                    # 91 calendar days after the effective date: last scoring day.
+                    _flow_price_row(date(2024, 6, 15), "S001"),
+                    # 92 days after (> ~63 trading days): stale, no score.
+                    _flow_price_row(date(2024, 6, 16), "S001"),
+                    _flow_price_row(date(2024, 3, 16), "S002"),
+                    # No event at all for S003.
+                    _flow_price_row(date(2024, 3, 16), "S003"),
+                ]
+            ),
+        }
+    )
+    cls = factor_registry.get("event_buyback")
+    assert cls.direction == 1
+
+    result = cls().compute(ctx).collect()
+
+    scores = {
+        (row["security_id"], row["date"]): row["score"] for row in result.iter_rows(named=True)
+    }
+    assert scores[("S001", date(2024, 3, 15))] is None
+    assert scores[("S001", date(2024, 3, 16))] == pytest.approx(exp(-1 / 21))
+    assert scores[("S001", date(2024, 4, 5))] == pytest.approx(exp(-21 / 21))
+    assert scores[("S001", date(2024, 6, 15))] == pytest.approx(exp(-92 / 21))
+    assert scores[("S001", date(2024, 6, 16))] is None
+    assert scores[("S002", date(2024, 3, 16))] is None
+    assert scores[("S003", date(2024, 3, 16))] is None
+
+
+def test_event_buyback_most_recent_event_wins() -> None:
+    from math import exp
+
+    ctx = InMemoryFactorContext(
+        {
+            "gold.filing_events": pl.DataFrame(
+                [
+                    _filing_event_row("S001", date(2024, 3, 15)),
+                    _filing_event_row("S001", date(2024, 4, 1)),
+                ]
+            ),
+            "gold.daily_prices_adj": pl.DataFrame(
+                [
+                    _flow_price_row(date(2024, 3, 20), "S001"),
+                    # Second event not yet visible ON its available_date.
+                    _flow_price_row(date(2024, 4, 1), "S001"),
+                    _flow_price_row(date(2024, 4, 10), "S001"),
+                ]
+            ),
+        }
+    )
+    factor = factor_registry.get("event_buyback")()
+
+    result = factor.compute(ctx).collect()
+
+    scores = {
+        (row["security_id"], row["date"]): row["score"] for row in result.iter_rows(named=True)
+    }
+    assert scores[("S001", date(2024, 3, 20))] == pytest.approx(exp(-5 / 21))
+    assert scores[("S001", date(2024, 4, 1))] == pytest.approx(exp(-17 / 21))
+    assert scores[("S001", date(2024, 4, 10))] == pytest.approx(exp(-9 / 21))
 
 
 def test_quality_gpa_prefers_gross_profit_then_derives_it() -> None:

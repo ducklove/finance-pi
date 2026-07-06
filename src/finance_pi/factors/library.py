@@ -394,6 +394,68 @@ class NpsFlow(Factor):
         )
 
 
+@factor_registry.register("event_buyback")
+class EventBuyback(Factor):
+    """Buyback-announcement drift: fresher announcements score higher, decaying smoothly.
+
+    Firms announcing share repurchases keep drifting upward for weeks — the
+    market underreacts to the signal (Ikenberry, Lakonishok & Vermaelen 1995).
+    Score = ``exp(-days_since_announcement / decay_days)`` for the MOST RECENT
+    gold.filing_events ``buyback`` per security, where ``days_since`` counts
+    calendar days from ``available_date``. PIT mirrors nps_flow: an event is
+    usable strictly AFTER its ``available_date`` (effective from the next
+    day), so on the first tradeable day the score is ``exp(-1/21)``. The
+    exponential is deterministic, ranks fresher events higher, and decays
+    without a cliff at rebalance boundaries; ``decay_days = 21`` (~one trading
+    month) matches the horizon where announcement drift is strongest. An
+    event stops scoring once ``date`` is more than ``max_staleness`` past its
+    effective date — 91 calendar days, approximating the 63-trading-day
+    (one quarter) cutoff beyond which the drift literature finds little
+    signal; a stale announcement then yields null, not a tiny score.
+    """
+
+    requires = ["gold.filing_events", "gold.daily_prices_adj"]
+    rebalance = "monthly"
+    direction = 1
+    event_type = "buyback"
+    decay_days = 21.0
+    max_staleness = "91d"  # ~63 trading days in calendar time
+
+    def compute(self, ctx) -> pl.LazyFrame:
+        events = (
+            ctx.scan("gold.filing_events")
+            .filter(
+                (pl.col("event_type") == self.event_type)
+                & pl.col("security_id").is_not_null()
+                & pl.col("available_date").is_not_null()
+            )
+            .select("security_id", "available_date")
+            .unique()
+            .with_columns(pl.col("available_date").dt.offset_by("1d").alias("effective_date"))
+            .sort(["security_id", "effective_date"])
+        )
+        prices = (
+            ctx.scan("gold.daily_prices_adj")
+            .select(["date", "security_id"])
+            .sort(["security_id", "date"])
+        )
+        age_days = (pl.col("date") - pl.col("available_date")).dt.total_days().cast(pl.Float64)
+        return (
+            prices.join_asof(
+                events,
+                left_on="date",
+                right_on="effective_date",
+                by="security_id",
+                strategy="backward",
+                tolerance=self.max_staleness,
+                # Both sides are sorted just above; skip the per-group check warning.
+                check_sortedness=False,
+            )
+            .with_columns((-age_days / self.decay_days).exp().alias("score"))
+            .select(["date", "security_id", "score"])
+        )
+
+
 @factor_registry.register("preferred_discount_z")
 class PreferredDiscountZ(Factor):
     """Preferred-share discount z-score; higher = preferred unusually cheap vs common.

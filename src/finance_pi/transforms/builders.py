@@ -12,6 +12,7 @@ from pathlib import Path
 
 import polars as pl
 
+from finance_pi.events.classify import classify_filing_events
 from finance_pi.storage.layout import DataLakeLayout
 from finance_pi.storage.parquet import ParquetDatasetWriter
 
@@ -180,6 +181,24 @@ _FINANCIALS_COLUMNS = [
     "accounting_basis",
     "is_backfilled",
 ]
+_FILINGS_BRONZE_COLUMNS = [
+    "rcept_dt",
+    "corp_code",
+    "corp_name",
+    "stock_code",
+    "rcept_no",
+    "report_nm",
+    "rm",
+]
+_FILINGS_SILVER_COLUMNS = [
+    "rcept_no",
+    "rcept_dt",
+    "available_date",
+    "stock_code",
+    "security_id",
+    "report_nm",
+    "is_correction",
+]
 
 # Bronze price sources feeding silver.prices, in priority order (see
 # _price_source_priority_expr for how ties are broken at selection time).
@@ -221,6 +240,8 @@ def build_all_iter(data_root: Path) -> Iterable[BuildSummary]:
     yield from build_nps_universe(data_root)
     yield from build_nps_holdings_delta(data_root)
     yield from build_financials_silver(data_root)
+    yield from build_filings_silver(data_root)
+    yield from build_filing_events(data_root)
     yield from build_fundamentals_pit(data_root)
 
 
@@ -1477,6 +1498,99 @@ def _normalize_financial_account_ids(financials: pl.DataFrame) -> pl.DataFrame:
         .otherwise(pl.col("account_id"))
         .alias("account_id")
     )
+
+
+def build_filings_silver(data_root: Path) -> list[BuildSummary]:
+    """Normalize bronze DART filing-list rows into silver.filings.
+
+    ``rcept_no`` is the unique key: overlapping ingest chunks can rewrite a
+    receipt, so duplicates keep the newest ``rcept_dt`` row (last input row on
+    ties). ``available_date`` is exposed as ``rcept_dt`` unchanged — the same
+    convention as silver.financials, whose ``available_date`` also carries the
+    receipt date verbatim; consumers (gold.fundamentals_pit, the event
+    pipeline) apply the strict ``available_date < as_of`` visibility rule, so
+    an intraday filing can never inform a same-day decision. ``security_id``
+    uses the lake-wide ticker-derived ``"S" + stock_code`` convention and
+    stays null for unlisted filers. ``is_correction`` mirrors the bronze
+    ``rm`` remark flag (see ``DartFilingRow.is_correction``). Filing volume is
+    modest (hundreds of thousands of rows), so like silver.financials this is
+    a full single-pass rebuild over a pruned-column bronze scan.
+    """
+    filings = _read_optional(
+        data_root / "bronze/dart_filings/dt=*/part.parquet",
+        columns=_FILINGS_BRONZE_COLUMNS,
+    )
+    if filings is None or filings.is_empty():
+        return [BuildSummary("silver.filings", 0, 0)]
+    for column in ("corp_code", "corp_name", "stock_code", "report_nm", "rm"):
+        if column not in filings.columns:
+            filings = filings.with_columns(pl.lit(None, dtype=pl.String).alias(column))
+    stock_code = pl.col("stock_code").cast(pl.String).str.strip_chars().str.to_uppercase()
+    listed = stock_code.str.contains(r"^[0-9A-Z]{6}$")
+    filings = (
+        _cast_dates(filings, ["rcept_dt"])
+        .filter(pl.col("rcept_no").is_not_null() & pl.col("rcept_dt").is_not_null())
+        .with_columns(
+            pl.when(listed)
+            .then(stock_code)
+            .otherwise(pl.lit(None, dtype=pl.String))
+            .alias("stock_code"),
+            pl.col("rm")
+            .cast(pl.String)
+            .str.contains("정", literal=True)
+            .fill_null(False)
+            .alias("is_correction"),
+        )
+        .with_columns(
+            pl.when(pl.col("stock_code").is_not_null())
+            .then(pl.concat_str([pl.lit("S"), pl.col("stock_code")]))
+            .otherwise(pl.lit(None, dtype=pl.String))
+            .alias("security_id"),
+            pl.col("rcept_dt").alias("available_date"),
+        )
+        .sort(["rcept_no", "rcept_dt"], maintain_order=True)
+        .unique(subset=["rcept_no"], keep="last", maintain_order=True)
+        .select(
+            [
+                "rcept_no",
+                "rcept_dt",
+                "available_date",
+                "corp_code",
+                "corp_name",
+                "stock_code",
+                "security_id",
+                "report_nm",
+                "is_correction",
+            ]
+        )
+        .sort(["rcept_dt", "rcept_no"])
+    )
+    return _write_by_date(data_root, "silver.filings", filings, "rcept_dt")
+
+
+def build_filing_events(
+    data_root: Path,
+    dates: Iterable[date] | None = None,
+) -> list[BuildSummary]:
+    """Classify silver.filings into gold.filing_events.
+
+    Classification and correction-folding semantics live in
+    ``finance_pi.events.classify.classify_filing_events``. ``dates`` is
+    accepted for orchestrator symmetry only: folding a correction needs each
+    security's full same-type filing history and the dataset is small, so
+    every invocation performs a full rebuild.
+    """
+    del dates
+    filings = _read_optional(
+        data_root / "silver/filings/dt=*/part.parquet",
+        columns=_FILINGS_SILVER_COLUMNS,
+    )
+    if filings is None or filings.is_empty():
+        return [BuildSummary("gold.filing_events", 0, 0)]
+    events = classify_filing_events(_cast_dates(filings, ["rcept_dt", "available_date"]))
+    if events.is_empty():
+        return [BuildSummary("gold.filing_events", 0, 0)]
+    return _write_by_date(data_root, "gold.filing_events", events, "event_date")
 
 
 def build_fundamentals_pit(

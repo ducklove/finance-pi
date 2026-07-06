@@ -91,6 +91,8 @@ _DATASET_DESCRIPTIONS: dict[str, str] = {
     "gold.universe_history": "Daily investable universe membership with halt/designation flags.",
     "gold.nps_universe": "Point-in-time NPS holdings universe ranked by market value.",
     "gold.preferred_discount": "Preferred vs common share discount series with z-scores.",
+    "gold.nps_holdings_delta": "NPS position changes between disclosure snapshots (PIT).",
+    "gold.filing_events": "Classified DART filing events (buyback, rights issue, ...) with signs.",
     "gold.security_master": "Security master: ticker, name, market, listing/delisting dates.",
     "gold.identity_review": "Ticker reuse / identity gaps flagged for manual review.",
     "macro.cpi": "CPI series (KR/US) with YoY/MoM changes.",

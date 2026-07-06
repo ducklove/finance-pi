@@ -36,6 +36,7 @@ class DataLakeLayout:
             "gold/daily_prices_adj",
             "gold/daily_market_caps",
             "gold/fundamentals_pit",
+            "gold/filing_events",
             "gold/universe_history",
             "gold/nps_universe",
             "gold/nps_holdings_delta",
@@ -50,6 +51,7 @@ class DataLakeLayout:
             "_cache",
             "reports/data_quality",
             "reports/backtest_fraud",
+            "reports/event_study",
         ]:
             (self.root / relative).mkdir(parents=True, exist_ok=True)
 
@@ -127,6 +129,8 @@ class DataLakeLayout:
                 return self.root / "gold" / "daily_market_caps" / f"dt={dt}" / "part.parquet"
             case "gold.fundamentals_pit":
                 return self.root / "gold" / "fundamentals_pit" / f"dt={dt}" / "part.parquet"
+            case "gold.filing_events":
+                return self.root / "gold" / "filing_events" / f"dt={dt}" / "part.parquet"
             case "gold.universe_history":
                 return self.root / "gold" / "universe_history" / f"dt={dt}" / "part.parquet"
             case "gold.nps_universe":

@@ -36,6 +36,7 @@ from finance_pi.backtest import (
 from finance_pi.calendar import TradingCalendar
 from finance_pi.config import ProjectPaths, RuntimeSettings, diagnose_dotenv
 from finance_pi.docs_site import build_docs_site
+from finance_pi.events import describe_event_patterns, run_event_study
 from finance_pi.factors import ParquetFactorContext, factor_registry
 from finance_pi.http import HttpJsonClient, SourceApiError
 from finance_pi.ingest import IngestOrchestrator, request_hash
@@ -116,6 +117,8 @@ from finance_pi.transforms import (
     build_corporate_actions,
     build_daily_market_caps,
     build_daily_prices_adj,
+    build_filing_events,
+    build_filings_silver,
     build_financials_silver,
     build_fundamentals_pit,
     build_nps_holdings_delta,
@@ -141,6 +144,7 @@ reports_app = typer.Typer(help="Report generation commands")
 backtest_app = typer.Typer(help="Backtest commands")
 docs_app = typer.Typer(help="Documentation publishing commands")
 backfill_app = typer.Typer(help="Historical backfill commands")
+events_app = typer.Typer(help="DART filing event classification and event-study commands")
 app.add_typer(catalog_app, name="catalog")
 app.add_typer(factors_app, name="factors")
 app.add_typer(ingest_app, name="ingest")
@@ -149,6 +153,7 @@ app.add_typer(reports_app, name="reports")
 app.add_typer(backtest_app, name="backtest")
 app.add_typer(docs_app, name="docs")
 app.add_typer(backfill_app, name="backfill")
+app.add_typer(events_app, name="events")
 
 
 @app.command("doctor")
@@ -1100,6 +1105,16 @@ def build_cmd_financials(root: Path = typer.Option(Path("."), help="Workspace ro
     _print_summaries(build_financials_silver(ProjectPaths(root=root).data_root))
 
 
+@build_app.command("filings")
+def build_cmd_filings(root: Path = typer.Option(Path("."), help="Workspace root")) -> None:
+    _print_summaries(build_filings_silver(ProjectPaths(root=root).data_root))
+
+
+@build_app.command("filing-events")
+def build_cmd_filing_events(root: Path = typer.Option(Path("."), help="Workspace root")) -> None:
+    _print_summaries(build_filing_events(ProjectPaths(root=root).data_root))
+
+
 @build_app.command("fundamentals-pit")
 def build_cmd_fundamentals_pit(
     root: Path = typer.Option(Path("."), help="Workspace root"),
@@ -1143,6 +1158,61 @@ def build_cmd_nps(root: Path = typer.Option(Path("."), help="Workspace root")) -
     _print_summaries(build_nps_holdings_silver(data_root))
     _print_summaries(build_nps_universe(data_root))
     _print_summaries(build_nps_holdings_delta(data_root))
+
+
+@events_app.command("study")
+def run_events_study(
+    event_type: str = typer.Option(
+        ..., "--event-type", help="Event type from `events list-types` (e.g. buyback)"
+    ),
+    window_pre: int = typer.Option(5, help="Trading days before event day 0"),
+    window_post: int = typer.Option(20, help="Trading days after event day 0"),
+    start: str | None = typer.Option(None, help="Earliest event date as YYYY-MM-DD"),
+    end: str | None = typer.Option(None, help="Latest event date as YYYY-MM-DD"),
+    min_events: int = typer.Option(10, help="Minimum usable events required"),
+    root: Path = typer.Option(Path("."), help="Workspace root"),
+) -> None:
+    """Run a market-adjusted event study and write its HTML report."""
+
+    paths = ProjectPaths(root=root)
+    try:
+        result = run_event_study(
+            paths.data_root,
+            event_type,
+            window_pre=window_pre,
+            window_post=window_post,
+            start=date.fromisoformat(start) if start else None,
+            end=date.fromisoformat(end) if end else None,
+            min_events=min_events,
+        )
+    except ValueError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(code=1) from exc
+    summary = result.summary
+    typer.echo(
+        f"{event_type}: n_events={summary['n_events']} "
+        f"car_pre={summary['car_pre']:+.4f} ar_day0={summary['ar_day0']:+.4f} "
+        f"car_post={summary['car_post']:+.4f} car_full={summary['car_full']:+.4f} "
+        f"hit_rate={summary['hit_rate']:.2%}"
+    )
+    report_path = (
+        paths.data_root
+        / "reports"
+        / "event_study"
+        / f"{event_type}-{result.start.isoformat()}-{result.end.isoformat()}.html"
+    )
+    result.write(report_path)
+    typer.echo(str(report_path))
+
+
+@events_app.command("list-types")
+def list_event_types() -> None:
+    """Print the rule-based filing classification table."""
+
+    for row in describe_event_patterns():
+        typer.echo(
+            f"{row['event_type']}\tsign={row['expected_sign']:+d}\tpatterns={row['patterns']}"
+        )
 
 
 @app.command("nps-shadow")
@@ -2421,6 +2491,8 @@ def _run_daily_builds(data_root: Path, include_fundamentals_pit: bool, price_dat
     summaries.extend(build_security_relations(data_root))
     summaries.extend(build_preferred_discount(data_root, dates=price_dates))
     summaries.extend(build_financials_silver(data_root))
+    summaries.extend(build_filings_silver(data_root))
+    summaries.extend(build_filing_events(data_root))
     if include_fundamentals_pit:
         summaries.extend(build_fundamentals_pit(data_root))
     return summaries
@@ -2439,6 +2511,8 @@ def _run_full_builds(data_root: Path, include_fundamentals_pit: bool) -> list:
         build_nps_universe,
         build_nps_holdings_delta,
         build_financials_silver,
+        build_filings_silver,
+        build_filing_events,
     ]
     if include_fundamentals_pit:
         builders.append(build_fundamentals_pit)

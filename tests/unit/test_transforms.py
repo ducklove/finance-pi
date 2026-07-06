@@ -15,6 +15,7 @@ from finance_pi.transforms import (
     build_corporate_actions,
     build_daily_market_caps,
     build_daily_prices_adj,
+    build_filings_silver,
     build_financials_silver,
     build_fundamentals_pit,
     build_nps_holdings_delta,
@@ -720,6 +721,98 @@ def test_build_financials_normalizes_dart_web_korean_account_names(tmp_path) -> 
         == "ifrs-full_BasicEarningsLossPerShare"
     )
     assert by_name["자본총계"]["security_id"] == "S009770"
+
+
+def _bronze_filing_row(
+    rcept_dt: date,
+    rcept_no: str,
+    *,
+    stock_code: str | None,
+    corp_name: str = "테스트",
+    report_nm: str = "주요사항보고서(자기주식취득결정)",
+    rm: str | None = "",
+) -> dict:
+    return {
+        "rcept_dt": rcept_dt,
+        "corp_code": "00126380",
+        "corp_name": corp_name,
+        "stock_code": stock_code,
+        "rcept_no": rcept_no,
+        "report_nm": report_nm,
+        "rm": rm,
+    }
+
+
+def test_build_filings_silver_normalizes_dedups_and_flags(tmp_path) -> None:
+    layout = DataLakeLayout(tmp_path)
+    layout.ensure_base_dirs()
+    writer = ParquetDatasetWriter()
+    writer.write(
+        pl.DataFrame(
+            [
+                _bronze_filing_row(
+                    date(2024, 1, 5), "20240105000001", stock_code="005930"
+                ),
+                # Unlisted filer: no stock_code, so no security_id in silver.
+                _bronze_filing_row(
+                    date(2024, 1, 5),
+                    "20240105000002",
+                    stock_code=None,
+                    corp_name="비상장회사",
+                    report_nm="사업보고서 (2023.12)",
+                ),
+                # Correction remark from the DART list API rm field.
+                _bronze_filing_row(
+                    date(2024, 1, 5),
+                    "20240105000003",
+                    stock_code="000660",
+                    report_nm="[기재정정]주요사항보고서(유상증자결정)",
+                    rm="정",
+                ),
+            ]
+        ),
+        layout.partition_path("bronze.dart_filings_raw", date(2024, 1, 5)),
+    )
+    # Re-ingested duplicate of rcept_no ...001 under a newer rcept_dt: the
+    # newest row must win the rcept_no dedup.
+    writer.write(
+        pl.DataFrame(
+            [
+                _bronze_filing_row(
+                    date(2024, 1, 8),
+                    "20240105000001",
+                    stock_code="005930",
+                    corp_name="삼성전자수정",
+                ),
+            ]
+        ),
+        layout.partition_path("bronze.dart_filings_raw", date(2024, 1, 8)),
+    )
+
+    summary = build_filings_silver(tmp_path)[0]
+
+    assert summary.dataset == "silver.filings"
+    assert summary.rows == 3
+    first_day = pl.read_parquet(
+        tmp_path / "silver" / "filings" / "dt=2024-01-05" / "part.parquet"
+    ).sort("rcept_no")
+    assert first_day["rcept_no"].to_list() == ["20240105000002", "20240105000003"]
+    unlisted, correction = first_day.iter_rows(named=True)
+    assert unlisted["stock_code"] is None
+    assert unlisted["security_id"] is None
+    assert unlisted["is_correction"] is False
+    assert correction["security_id"] == "S000660"
+    assert correction["is_correction"] is True
+    assert correction["available_date"] == date(2024, 1, 5)
+    deduped = pl.read_parquet(
+        tmp_path / "silver" / "filings" / "dt=2024-01-08" / "part.parquet"
+    )
+    assert deduped.height == 1
+    row = deduped.row(0, named=True)
+    assert row["rcept_no"] == "20240105000001"
+    assert row["corp_name"] == "삼성전자수정"
+    assert row["security_id"] == "S005930"
+    assert row["available_date"] == date(2024, 1, 8)
 
 
 def test_fundamentals_pit_keeps_latest_account_per_day(tmp_path) -> None:

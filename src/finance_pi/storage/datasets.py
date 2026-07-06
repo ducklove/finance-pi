@@ -112,6 +112,38 @@ def _empty_filings() -> str:
     """
 
 
+def _empty_filings_silver() -> str:
+    return """
+    SELECT
+        CAST(NULL AS VARCHAR) AS rcept_no,
+        CAST(NULL AS DATE) AS rcept_dt,
+        CAST(NULL AS DATE) AS available_date,
+        CAST(NULL AS VARCHAR) AS corp_code,
+        CAST(NULL AS VARCHAR) AS corp_name,
+        CAST(NULL AS VARCHAR) AS stock_code,
+        CAST(NULL AS VARCHAR) AS security_id,
+        CAST(NULL AS VARCHAR) AS report_nm,
+        CAST(NULL AS BOOLEAN) AS is_correction
+    WHERE FALSE
+    """
+
+
+def _empty_filing_events() -> str:
+    return """
+    SELECT
+        CAST(NULL AS DATE) AS event_date,
+        CAST(NULL AS DATE) AS available_date,
+        CAST(NULL AS VARCHAR) AS security_id,
+        CAST(NULL AS VARCHAR) AS ticker,
+        CAST(NULL AS VARCHAR) AS event_type,
+        CAST(NULL AS INTEGER) AS expected_sign,
+        CAST(NULL AS VARCHAR) AS rcept_no,
+        CAST(NULL AS VARCHAR) AS report_nm,
+        CAST(NULL AS BOOLEAN) AS is_correction
+    WHERE FALSE
+    """
+
+
 def _empty_financials() -> str:
     return """
     SELECT
@@ -629,7 +661,7 @@ dataset_registry: dict[str, DatasetSpec] = {
         "silver.filings",
         "silver",
         "silver/filings/dt=*/part.parquet",
-        _empty_filings(),
+        _empty_filings_silver(),
     ),
     "silver.corporate_actions": DatasetSpec(
         "silver.corporate_actions",
@@ -699,6 +731,12 @@ dataset_registry: dict[str, DatasetSpec] = {
             "rcept_dt,",
             "rcept_dt,\n        CAST(NULL AS DATE) AS as_of_date,",
         ),
+    ),
+    "gold.filing_events": DatasetSpec(
+        "gold.filing_events",
+        "gold",
+        "gold/filing_events/dt=*/part.parquet",
+        _empty_filing_events(),
     ),
     "gold.universe_history": DatasetSpec(
         "gold.universe_history",
