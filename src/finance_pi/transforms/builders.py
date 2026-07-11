@@ -56,7 +56,9 @@ SHARES_JUMP_MIN_RATIO = 1.5
 # ... and by no more than this ratio, to reject unit/data glitches.
 SHARES_JUMP_MAX_RATIO = 100.0
 # Cross-check: close must move inversely to shares (|close_ratio * shares_ratio - 1|).
-SHARES_PRICE_CROSS_TOLERANCE = 0.10
+# The residual can include a legitimate same-day move up to the KRX price limit;
+# market-cap continuity provides the second guard against false positives.
+SHARES_PRICE_CROSS_TOLERANCE = 0.35
 # Market cap should stay roughly continuous across the event when both sides exist.
 MARKET_CAP_CONTINUITY_TOLERANCE = 0.25
 # Warn when detection over a non-trivial history yields no events at all.

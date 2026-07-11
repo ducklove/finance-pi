@@ -1127,6 +1127,36 @@ def test_build_corporate_actions_corroborates_with_dart_filings(tmp_path) -> Non
     assert by_security["S222222"]["source_rcept_no"] == "20231227000002"
 
 
+def test_build_corporate_actions_allows_market_move_on_reverse_split(tmp_path) -> None:
+    _write_silver_prices(
+        tmp_path,
+        [
+            _silver_price_row(
+                date(2024, 1, 2),
+                "002680",
+                close=374.0,
+                listed_shares=32_317_000,
+                market_cap=12_100_000_000,
+            ),
+            _silver_price_row(
+                date(2024, 1, 3),
+                "002680",
+                close=1605.0,
+                listed_shares=6_463_000,
+                market_cap=10_400_000_000,
+            ),
+        ],
+    )
+
+    build_corporate_actions(tmp_path)
+
+    event = pl.read_parquet(
+        tmp_path / "silver" / "corporate_actions" / "dt=2024-01-03" / "part.parquet"
+    ).row(0, named=True)
+    assert event["action_type"] == "merge"
+    assert event["adjustment_factor"] == pytest.approx(5.0, rel=0.001)
+
+
 def test_build_corporate_actions_ignores_non_action_changes(tmp_path) -> None:
     layout = DataLakeLayout(tmp_path)
     layout.ensure_base_dirs()

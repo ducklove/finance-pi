@@ -164,12 +164,18 @@ def build_data_quality_report(data_root: Path, report_date: date) -> DataQuality
         )
     )
 
-    jump_prices = _with_previous_prices(data_root, prices, report_date)
-    jumps = (
-        jump_prices.sort(["security_id", "date"])
-        .with_columns(pl.col("close").pct_change().over("security_id").alias("return_1d"))
-        .filter((pl.col("date") == report_date) & (pl.col("return_1d").abs() > 0.30))
+    adjusted = _read_optional(
+        data_root / "gold/daily_prices_adj" / f"dt={report_date.isoformat()}" / "part.parquet"
     )
+    if adjusted is not None and "return_1d" in adjusted.columns:
+        jumps = adjusted.filter(pl.col("return_1d").abs() > 0.30)
+    else:
+        jump_prices = _with_previous_prices(data_root, prices, report_date)
+        jumps = (
+            jump_prices.sort(["security_id", "date"])
+            .with_columns(pl.col("close").pct_change().over("security_id").alias("return_1d"))
+            .filter((pl.col("date") == report_date) & (pl.col("return_1d").abs() > 0.30))
+        )
     checks.append(
         ReportCheck(
             "large_price_jumps",
@@ -180,7 +186,9 @@ def build_data_quality_report(data_root: Path, report_date: date) -> DataQuality
 
     master = _read_optional(data_root / "gold/security_master.parquet")
     if master is not None and not master.is_empty():
-        unknown = master.filter(pl.col("corp_code").is_null())
+        unknown = master.filter(
+            (pl.col("security_type") == "equity") & pl.col("corp_code").is_null()
+        )
         checks.append(
             ReportCheck(
                 "unknown_identity",

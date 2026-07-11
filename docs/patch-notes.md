@@ -98,6 +98,7 @@
 ## 2026-07-11 - 4단계: 가격 invariant, 상품 분류, 응답 효율
 
 - Bronze 가격의 high/low가 open/close 범위를 포함하지 않는 경우 Silver 정규화에서 high=max(OHLC), low=min(OHLC)로 교정한다.
+- 주식수 급변과 시가총액 연속성이 확인된 분할·병합일에는 정상적인 당일 가격 움직임을 허용해 한탑 5:1 병합 같은 corporate action을 놓치지 않는다.
 - 종목명 규칙으로 SPAC뿐 아니라 ETF, ETN, REIT를 분류하고 screener는 `security_type=equity`만 조회한다.
 - 전체 종목 screener 결과를 as-of 날짜별 5분 cache로 재사용해 반복 요청의 DuckDB/Parquet scan을 제거한다.
 - 1 KiB 이상 JSON은 클라이언트가 지원할 때 gzip으로 응답해 대형 screener 전송량을 줄인다.
