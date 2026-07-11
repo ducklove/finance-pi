@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import date
 
 import polars as pl
+import pytest
 
 from finance_pi.cli.app import _dart_financial_requests
 from finance_pi.config import ProjectPaths
@@ -80,6 +81,46 @@ def test_dart_filings_adapter_chunks_and_marks_completed_ranges(tmp_path) -> Non
     assert len(units) == 3
     assert result.rows == 1
     assert len(list(adapter.list_pending(date(2026, 4, 1), date(2026, 4, 5)))) == 2
+
+
+def test_dart_filings_refresh_latest_merges_new_receipts(tmp_path) -> None:
+    class FakeOpenDartClient:
+        receipt = "20260429000001"
+
+        def fetch_filings(self, since: date, until: date):
+            return [
+                {
+                    "rcept_dt": since,
+                    "corp_code": "00126380",
+                    "corp_name": "Samsung",
+                    "stock_code": "005930",
+                    "rcept_no": self.receipt,
+                    "report_nm": "report",
+                    "rm": None,
+                }
+            ]
+
+    client = FakeOpenDartClient()
+    layout = DataLakeLayout(tmp_path)
+    layout.ensure_base_dirs()
+    adapter = DartFilingsAdapter(
+        layout,
+        ParquetDatasetWriter(),
+        client,
+        chunk_days=1,
+        refresh_latest=True,
+    )
+    target = date(2026, 4, 29)
+
+    first = next(iter(adapter.list_pending(target, target)))
+    adapter.write_bronze(adapter.fetch(first))
+    client.receipt = "20260429000002"
+    refreshed = next(iter(adapter.list_pending(target, target)))
+    result = adapter.write_bronze(adapter.fetch(refreshed))
+
+    frame = pl.read_parquet(layout.partition_path("bronze.dart_filings_raw", target))
+    assert result.rows == 1
+    assert frame["rcept_no"].sort().to_list() == ["20260429000001", "20260429000002"]
 
 
 def test_dart_financial_requests_accepts_mixed_filing_date_schemas(tmp_path) -> None:
@@ -616,3 +657,26 @@ def test_orchestrator_isolates_unit_failures(tmp_path) -> None:
     assert results[0].skipped is True
     assert "adapter exploded" in results[0].reason
     assert results[1].rows == 1
+
+
+def test_cli_ingest_wrapper_raises_after_isolating_failures() -> None:
+    class FailingAdapter:
+        name = "failing"
+
+        def list_pending(self, since: date, until: date):
+            yield IngestUnit(self.name, since, "/boom", {})
+
+        def fetch(self, unit: IngestUnit) -> RawBatch:
+            raise RuntimeError("adapter exploded")
+
+        def write_bronze(self, batch: RawBatch):
+            raise AssertionError("should not be reached")
+
+    from finance_pi.cli import app as cli_app
+
+    with pytest.raises(RuntimeError, match="adapter exploded"):
+        cli_app._run_and_print(
+            [FailingAdapter()],
+            date(2026, 4, 28),
+            date(2026, 4, 28),
+        )

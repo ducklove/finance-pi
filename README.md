@@ -171,8 +171,8 @@ python -m finance_pi.cli.app admin --root . --host 0.0.0.0 --port 8400
 `admin` prints a tokenized URL. `/api/health` is open for reachability checks.
 Clients from loopback or a private LAN address can read the dataset APIs, logs,
 and files without a token; public/forwarded clients still need the token for
-those. Job execution (`POST /api/jobs`) always requires the token unless the
-client is loopback, and cross-origin requests are rejected. To pin the token
+those. Job execution (`POST /api/jobs`) always requires the token, including
+loopback and reverse-proxy clients, and cross-origin requests are rejected. To pin the token
 across restarts, set `FINANCE_PI_ADMIN_TOKEN` in `.env`.
 For Raspberry Pi stability, the admin overview does not scan Parquet contents by
 default; it uses file and partition metadata. Set `FINANCE_PI_ADMIN_SCAN_PARQUET=1`

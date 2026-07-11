@@ -5,9 +5,13 @@ After=network-online.target
 
 [Service]
 Type=oneshot
+UMask=0077
 WorkingDirectory=/home/cantabile/Works/finance-pi
 EnvironmentFile=-/home/cantabile/Works/finance-pi/.env
-ExecStart=/home/cantabile/Works/finance-pi/.venv/bin/python -m finance_pi.cli.app catchup --root /home/cantabile/Works/finance-pi --no-strict
+ExecStart=/home/cantabile/Works/finance-pi/.venv/bin/python -m finance_pi.cli.app catchup --root /home/cantabile/Works/finance-pi
+TimeoutStartSec=90min
+MemoryHigh=5G
+MemoryMax=6G
 Nice=5
 IOSchedulingClass=best-effort
 IOSchedulingPriority=6

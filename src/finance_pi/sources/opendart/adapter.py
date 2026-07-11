@@ -84,6 +84,7 @@ class DartFilingsAdapter:
     writer: ParquetDatasetWriter
     client: OpenDartClient
     chunk_days: int = 7
+    refresh_latest: bool = False
     name: str = "opendart_filings"
 
     def list_pending(self, since: date, until: date) -> Iterable[IngestUnit]:
@@ -96,7 +97,8 @@ class DartFilingsAdapter:
                 "/api/list.json",
                 {"bgn_de": current.isoformat(), "end_de": chunk_until.isoformat()},
             )
-            if not self._marker_path(unit).exists():
+            refresh = self.refresh_latest and chunk_until == until
+            if refresh or not self._marker_path(unit).exists():
                 yield unit
             current = chunk_until + timedelta(days=1)
 
@@ -121,11 +123,10 @@ class DartFilingsAdapter:
             by_date.setdefault(date.fromisoformat(str(row["rcept_dt"])), []).append(row)
         last_path = self.layout.partition_path("bronze.dart_filings_raw", batch.unit.logical_date)
         total = 0
+        written_partitions = 0
         for rcept_dt, rows in by_date.items():
             path = self.layout.partition_path("bronze.dart_filings_raw", rcept_dt)
-            if path.exists():
-                continue
-            self.writer.write(
+            incoming = _with_ingest_metadata(
                 RawBatch(batch.unit, rows).to_frame(
                     {
                         "rcept_dt": pl.Date,
@@ -137,20 +138,31 @@ class DartFilingsAdapter:
                         "rm": pl.String,
                     }
                 ),
-                path,
-                source="opendart",
-                request_hash=batch.unit.request_hash,
-                include_ingest_metadata=True,
+                batch.unit.request_hash,
             )
+            before_rows = 0
+            merged = incoming
+            mode = "fail"
+            if path.exists():
+                existing = pl.read_parquet(path)
+                before_rows = existing.height
+                merged = pl.concat([existing, incoming], how="diagonal_relaxed").unique(
+                    subset=["rcept_no"],
+                    keep="last",
+                    maintain_order=True,
+                )
+                mode = "overwrite"
+            self.writer.write(merged, path, mode=mode)
             last_path = path
-            total += len(rows)
+            total += max(0, merged.height - before_rows)
+            written_partitions += 1
         marker.parent.mkdir(parents=True, exist_ok=True)
         marker.write_text("ok\n", encoding="utf-8")
         return WriteResult(
             path=last_path,
             rows=total,
-            skipped=total == 0,
-            reason="bronze partitions exist" if total == 0 else None,
+            skipped=written_partitions == 0,
+            reason="refreshed existing filing partitions" if total == 0 else None,
         )
 
     def _marker_path(self, unit: IngestUnit):

@@ -31,7 +31,7 @@ def build_api_docs_payload(
         "auth": {
             "local_network": "Read-only GET endpoints allow loopback and private-LAN clients without a token",
             "job_execution": (
-                "POST /api/jobs requires the token unless the client is loopback; "
+                "POST /api/jobs always requires the token, including loopback clients; "
                 "cross-origin POSTs are rejected (Origin/Sec-Fetch-Site checks)"
             ),
             "token": "Use X-Admin-Token or token query parameter outside local networks",
@@ -75,7 +75,7 @@ def build_api_docs_payload(
             "jobs_run": {
                 "method": "POST",
                 "path": f"{base_url}/jobs",
-                "description": "Queue a pipeline job as a subprocess. Requires the admin token unless the client is loopback; cross-origin requests are rejected.",
+                "description": "Queue a pipeline job as a subprocess. Always requires the admin token; cross-origin requests are rejected.",
                 "body": {
                     "action": "One of: build_all, catalog_build, daily, daily_no_ingest, reports, docs_build, backfill_yearly, backtest.",
                     "report_date": "Optional YYYY-MM-DD for reports.",

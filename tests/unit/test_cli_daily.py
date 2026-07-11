@@ -29,6 +29,7 @@ from finance_pi.cli.app import (
     _validated_backfill_paths,
     _write_backfill_marker,
     _write_daily_marker,
+    _write_dividend_rows,
     _yearly_backfill_status,
 )
 from finance_pi.config import ProjectPaths, RuntimeSettings
@@ -139,7 +140,7 @@ def test_daily_marker_records_complete_with_failures_and_catchup_retries(tmp_pat
     marker = tmp_path / "_state" / "daily" / "2026-05-21.json"
 
     assert _read_daily_marker_status(marker) == "complete_with_failures"
-    assert _daily_complete(tmp_path, date(2026, 5, 21))
+    assert not _daily_complete(tmp_path, date(2026, 5, 21))
     assert _catchup_dates(tmp_path, None, date(2026, 6, 5)) == (date(2026, 5, 21),)
 
 
@@ -257,6 +258,26 @@ def test_daily_ingest_keeps_other_dart_errors_as_failures(tmp_path, monkeypatch)
     assert failures == ["OpenDART dividend ingest failed: OpenDART down"]
 
 
+def test_daily_ingest_includes_macro_failures(tmp_path, monkeypatch) -> None:
+    def noop(*args: object) -> None:
+        return None
+
+    monkeypatch.setattr(cli_app, "ingest_naver_summary", noop)
+    monkeypatch.setattr(
+        cli_app,
+        "_ingest_macro",
+        lambda *args: ["Macro KR10Y ingest failed: upstream unavailable"],
+    )
+
+    failures = _run_daily_ingest(
+        ProjectPaths(tmp_path),
+        SimpleNamespace(has_opendart=False, has_kis=False),
+        date(2026, 4, 30),
+    )
+
+    assert failures == ["Macro KR10Y ingest failed: upstream unavailable"]
+
+
 def test_daily_ingest_internal_calls_pass_concrete_defaults(tmp_path, monkeypatch) -> None:
     calls: dict[str, tuple[object, ...]] = {}
 
@@ -301,7 +322,7 @@ def test_daily_ingest_internal_calls_pass_concrete_defaults(tmp_path, monkeypatc
         0.25,
         25,
     )
-    assert calls["dart_filings"] == ("2026-04-29", "2026-04-30", tmp_path, 7)
+    assert calls["dart_filings"] == ("2026-04-29", "2026-04-30", tmp_path, 7, True)
     assert calls["dart_dividends"] == ("2026-04-29", "2026-04-30", tmp_path, None, None, 0.05)
     assert calls["dart_share_counts"] == (
         "2026-04-29",
@@ -313,6 +334,38 @@ def test_daily_ingest_internal_calls_pass_concrete_defaults(tmp_path, monkeypatc
         0.05,
     )
     assert calls["macro"][:3] == (ProjectPaths(tmp_path), date(1990, 1, 1), date(2026, 4, 30))
+
+
+def test_write_dividend_rows_preserves_other_companies_in_same_year(tmp_path) -> None:
+    DataLakeLayout(tmp_path).ensure_base_dirs()
+
+    def row(corp_code: str, ticker: str, receipt: str) -> dict[str, object]:
+        return {
+            "fiscal_year": 2025,
+            "fiscal_period_end": date(2025, 12, 31),
+            "rcept_dt": date(2026, 3, 20),
+            "available_date": date(2026, 3, 20),
+            "corp_code": corp_code,
+            "corp_name": f"Company {corp_code}",
+            "security_id": ticker,
+            "ticker": ticker,
+            "share_class": "common",
+            "stock_kind": "common",
+            "cash_dividend_per_share": 100.0,
+            "stock_dividend_per_share": 0.0,
+            "cash_dividend_yield_pct": 1.0,
+            "currency": "KRW",
+            "source_rcept_no": receipt,
+            "report_type": "11011",
+            "source": "opendart.alotMatter",
+            "is_estimated": False,
+        }
+
+    _write_dividend_rows(tmp_path, [row("00000001", "000010", "202603200001")])
+    _write_dividend_rows(tmp_path, [row("00000002", "000020", "202603200002")])
+
+    frame = pl.read_parquet(tmp_path / "silver/dividends/fiscal_year=2025/part.parquet")
+    assert set(frame["corp_code"]) == {"00000001", "00000002"}
 
 
 def test_fred_rows_use_api_key_json_response(monkeypatch) -> None:
@@ -963,6 +1016,7 @@ def test_daily_builds_only_materialize_target_price_date(tmp_path) -> None:
         "gold.security_master",
         "gold.universe_history",
         "gold.daily_prices_adj",
+        "gold.daily_market_caps",
     }
     assert not (tmp_path / "silver" / "prices" / "dt=2024-01-04" / "part.parquet").exists()
     gold = pl.read_parquet(

@@ -851,9 +851,9 @@ def run_admin(
 ) -> None:
     # host defaults to 0.0.0.0 so the admin is reachable from other devices on the
     # LAN. Read-only GET endpoints trust any private/link-local peer (convenience
-    # for trusted home networks); state-changing POST endpoints require a token
-    # unless the peer is strictly loopback, and are also guarded against CSRF via
-    # Origin/Sec-Fetch-Site checks (see _authorized/_csrf_safe below).
+    # for trusted home networks); state-changing POST endpoints always require a
+    # token and are also guarded against CSRF via Origin/Sec-Fetch-Site checks
+    # (see _authorized/_csrf_safe below).
     load_dotenv(root / ".env")
     auth_token = token or os.environ.get("FINANCE_PI_ADMIN_TOKEN") or secrets.token_urlsafe(24)
     _ensure_docs_built(root)
@@ -1009,7 +1009,7 @@ def _handler_for(state: AdminState) -> type[BaseHTTPRequestHandler]:
             if not self._csrf_safe():
                 self._send_json({"error": "forbidden"}, status=HTTPStatus.FORBIDDEN)
                 return
-            if not self._authorized(require_loopback=True):
+            if not self._authorized(require_token=True):
                 return
             try:
                 length = int(self.headers.get("Content-Length", "0"))
@@ -1050,20 +1050,19 @@ def _handler_for(state: AdminState) -> type[BaseHTTPRequestHandler]:
                 return
             self._send_bytes(path.read_bytes(), _content_type(path))
 
-        def _authorized(self, require_loopback: bool = False) -> bool:
+        def _authorized(self, require_token: bool = False) -> bool:
             # Read-only GET endpoints trust any private-LAN peer (see
-            # _is_local_admin_client). State-changing requests (require_loopback=True,
-            # currently POST /api/jobs) only bypass the token for strictly loopback
-            # peers (127.0.0.0/8, ::1) so another device on the LAN cannot trigger
-            # jobs without a token.
+            # _is_local_admin_client). State-changing requests always require the
+            # token, including loopback peers: reverse proxies connect from
+            # loopback and must not accidentally inherit a token bypass.
             client_ip = self.client_address[0]
-            if require_loopback:
-                if _is_loopback_client(client_ip):
-                    return True
-            elif _is_local_admin_client(client_ip):
+            if not require_token and _is_local_admin_client(client_ip):
                 return True
             if state.token is None:
-                return True
+                if not require_token:
+                    return True
+                self._send_json({"error": "unauthorized"}, status=HTTPStatus.UNAUTHORIZED)
+                return False
             header = self.headers.get("X-Admin-Token", "")
             query = parse_qs(urlparse(self.path).query).get("token", [""])[0]
             if secrets.compare_digest(header or query, state.token):

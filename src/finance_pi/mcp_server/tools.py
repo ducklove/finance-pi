@@ -161,7 +161,7 @@ def describe_table(data_root: Path | str, view_name: str) -> dict[str, Any]:
             f"invalid view name {view_name!r}; expected a schema-qualified name "
             "such as gold.daily_prices_adj"
         )
-    conn = duckdb.connect(str(catalog_path), read_only=True)
+    conn = _connect_catalog(catalog_path)
     try:
         try:
             rows = conn.execute(f"DESCRIBE {view_name}").fetchall()
@@ -205,7 +205,7 @@ def query(
         cleaned = cleaned[:-1].rstrip()
     wrapped = f"SELECT * FROM (\n{cleaned}\n) AS finance_pi_query LIMIT {max_rows + 1}"
 
-    conn = duckdb.connect(str(catalog_path), read_only=True)
+    conn = _connect_catalog(catalog_path)
     timer = threading.Timer(timeout_seconds, conn.interrupt)
     try:
         timer.start()
@@ -227,10 +227,11 @@ def query(
     budget = max_result_bytes
     for raw in raw_rows:
         row = [_json_value(value) for value in raw]
-        budget -= len(str(row))
-        if budget < 0 and rows:
+        row_size = len(str(row))
+        if row_size > budget:
             truncated = True
             break
+        budget -= row_size
         rows.append(row)
     return {
         "columns": columns,
@@ -238,6 +239,17 @@ def query(
         "row_count_returned": len(rows),
         "truncated": truncated,
     }
+
+
+def _connect_catalog(catalog_path: Path) -> duckdb.DuckDBPyConnection:
+    """Open read-only and allow external reads only inside the catalog's data root."""
+
+    data_root = catalog_path.parent.parent.resolve()
+
+    conn = duckdb.connect(str(catalog_path), read_only=True)
+    conn.execute("SET allowed_directories = ?", [[str(data_root)]])
+    conn.execute("SET enable_external_access = false")
+    return conn
 
 
 def list_factors() -> list[dict[str, Any]]:

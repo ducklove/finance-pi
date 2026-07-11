@@ -1653,13 +1653,30 @@ def test_admin_post_jobs_from_private_lan_peer_requires_token(tmp_path) -> None:
     assert _handler_response_status(handler) == HTTPStatus.CREATED
 
 
-def test_admin_post_jobs_from_loopback_bypasses_token(tmp_path) -> None:
+def test_admin_post_jobs_from_loopback_requires_token(tmp_path) -> None:
     state = AdminState(tmp_path, token="secret-token")
 
     handler = _make_handler(state, client_ip="127.0.0.1", body=b'{"action": "docs_build"}')
     handler.do_POST()
+    assert _handler_response_status(handler) == HTTPStatus.UNAUTHORIZED
 
+    handler = _make_handler(
+        state,
+        client_ip="127.0.0.1",
+        body=b'{"action": "docs_build"}',
+        headers={"X-Admin-Token": "secret-token"},
+    )
+    handler.do_POST()
     assert _handler_response_status(handler) == HTTPStatus.CREATED
+
+
+def test_admin_post_jobs_without_configured_token_is_unavailable(tmp_path) -> None:
+    state = AdminState(tmp_path, token=None)
+
+    handler = _make_handler(state, client_ip="127.0.0.1", body=b'{"action": "docs_build"}')
+    handler.do_POST()
+
+    assert _handler_response_status(handler) == HTTPStatus.UNAUTHORIZED
 
 
 def test_admin_post_jobs_rejects_mismatched_origin(tmp_path) -> None:
@@ -1697,7 +1714,11 @@ def test_admin_post_jobs_allows_matching_origin(tmp_path) -> None:
         state,
         client_ip="127.0.0.1",
         body=b'{"action": "docs_build"}',
-        headers={"Host": "127.0.0.1:8400", "Origin": "http://127.0.0.1:8400"},
+        headers={
+            "Host": "127.0.0.1:8400",
+            "Origin": "http://127.0.0.1:8400",
+            "X-Admin-Token": "secret-token",
+        },
     )
     handler.do_POST()
 

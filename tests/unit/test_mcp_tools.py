@@ -194,6 +194,23 @@ def test_query_byte_cap_truncates(data_root: Path) -> None:
     assert 1 <= result["row_count_returned"] < 50
 
 
+def test_query_byte_cap_refuses_oversized_first_row(data_root: Path) -> None:
+    result = tools.query(
+        data_root,
+        "SELECT repeat('x', 10000) AS s",
+        max_result_bytes=1_000,
+    )
+
+    assert result["rows"] == []
+    assert result["row_count_returned"] == 0
+    assert result["truncated"] is True
+
+
+def test_query_disables_external_file_access(data_root: Path) -> None:
+    with pytest.raises(McpToolError, match="file system operations are disabled"):
+        tools.query(data_root, "SELECT * FROM read_text('README.md')")
+
+
 def test_query_timeout_interrupts(data_root: Path) -> None:
     heavy = "SELECT sum(a.range * b.range) FROM range(50000000) AS a, range(1000) AS b"
     with pytest.raises(McpToolError, match="timed out"):

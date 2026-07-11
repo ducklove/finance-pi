@@ -402,13 +402,24 @@ def ingest_dart_filings(
     until: str = typer.Option(..., help="End date as YYYY-MM-DD"),
     root: Path = typer.Option(Path("."), help="Workspace root"),
     chunk_days: int = typer.Option(7, help="Date range days per resumable DART filing chunk"),
+    refresh_latest: bool = typer.Option(
+        False,
+        "--refresh-latest",
+        help="Re-fetch and merge the final date chunk to capture late filings",
+    ),
 ) -> None:
     paths = ProjectPaths(root=root)
     settings = RuntimeSettings.load(paths.root)
     client = _opendart_client(settings)
     layout = DataLakeLayout(paths.data_root)
     layout.ensure_base_dirs()
-    adapter = DartFilingsAdapter(layout, ParquetDatasetWriter(), client, chunk_days)
+    adapter = DartFilingsAdapter(
+        layout,
+        ParquetDatasetWriter(),
+        client,
+        chunk_days,
+        refresh_latest=refresh_latest,
+    )
     _run_and_print([adapter], _parse_report_date(since), _parse_report_date(until))
 
 
@@ -1691,6 +1702,7 @@ def _run_daily_ingest(
                 report_date.isoformat(),
                 paths.root,
                 7,
+                True,
             )
         except Exception as exc:  # noqa: BLE001
             failures.append(f"OpenDART filings ingest failed: {exc}")
@@ -1738,7 +1750,9 @@ def _run_daily_ingest(
             else:
                 failures.append(f"OpenDART share-count ingest failed: {exc}")
     macro_since = _macro_ingest_start(paths.data_root, report_date)
-    for failure in _ingest_macro(paths, macro_since, report_date, settings):
+    macro_failures = _ingest_macro(paths, macro_since, report_date, settings)
+    failures.extend(macro_failures)
+    for failure in macro_failures:
         typer.echo(failure)
     return failures
 
@@ -2488,6 +2502,7 @@ def _run_daily_builds(data_root: Path, include_fundamentals_pit: bool, price_dat
         build_daily_prices_adj,
     ]:
         summaries.extend(builder(data_root, price_dates))
+    summaries.extend(build_daily_market_caps(data_root))
     summaries.extend(build_security_relations(data_root))
     summaries.extend(build_preferred_discount(data_root, dates=price_dates))
     summaries.extend(build_financials_silver(data_root))
@@ -2948,7 +2963,7 @@ def _gold_price_partition_exists(data_root: Path, logical_date: date) -> bool:
 def _daily_complete(data_root: Path, logical_date: date) -> bool:
     marker = _daily_marker_path(data_root, logical_date)
     if marker.exists():
-        return _read_daily_marker_status(marker) in {"complete", "complete_with_failures"}
+        return _read_daily_marker_status(marker) == "complete"
     return _gold_price_partition_exists(data_root, logical_date)
 
 
@@ -3339,8 +3354,6 @@ def _write_dividend_rows(data_root: Path, rows: list[dict[str, object]]) -> list
     )
     existing = _read_optional_parquet(data_root / "silver/dividends/fiscal_year=*/part.parquet")
     if existing is not None and not existing.is_empty():
-        incoming_years = frame["fiscal_year"].drop_nulls().unique().to_list()
-        existing = existing.filter(~pl.col("fiscal_year").is_in(incoming_years))
         frame = pl.concat([existing, frame], how="diagonal_relaxed")
     frame = frame.sort(["fiscal_year", "corp_code", "share_class", "stock_kind", "available_date"])
     frame = frame.unique(
@@ -3650,13 +3663,29 @@ def _previous_weekday(value: date) -> date:
 
 
 def _print_results(results) -> None:
-    for result in results:
+    completed = list(results)
+    for result in completed:
         _print_result(result)
+    _raise_ingest_errors(completed)
 
 
 def _run_and_print(adapters, since: date, until: date) -> None:
+    completed = []
     for result in IngestOrchestrator(adapters).run_iter(since, until):
         _print_result(result)
+        completed.append(result)
+    _raise_ingest_errors(completed)
+
+
+def _raise_ingest_errors(results) -> None:
+    errors = [
+        str(result.reason).removeprefix("error: ")
+        for result in results
+        if result.reason and str(result.reason).startswith("error:")
+    ]
+    if errors:
+        sample = "; ".join(errors[:3])
+        raise RuntimeError(f"ingest failed for {len(errors)} unit(s): {sample}")
 
 
 def _print_result(result) -> None:

@@ -356,6 +356,6 @@ C/F dataset grades POST a Slack/Discord-compatible alert.
 The `admin` command serves a local operations dashboard with dataset status,
 recent reports, backtest artifacts, and allowlisted job buttons for daily runs,
 builds, catalog refreshes, historical backfills, reports, and backtests. Job
-execution (`POST /api/jobs`) always requires the admin token unless the client
-is loopback; read-only GET endpoints remain open to the private LAN. The full
+execution (`POST /api/jobs`) always requires the admin token, including loopback
+and reverse-proxy clients; read-only GET endpoints remain open to the private LAN. The full
 API reference is served at `/api/docs`.

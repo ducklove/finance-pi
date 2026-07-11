@@ -5,6 +5,7 @@ After=network-online.target
 
 [Service]
 Type=simple
+UMask=0077
 WorkingDirectory=/home/cantabile/Works/finance-pi
 EnvironmentFile=-/home/cantabile/Works/finance-pi/.env
 ExecStart=/home/cantabile/Works/finance-pi/.venv/bin/python -m finance_pi.cli.app admin --root /home/cantabile/Works/finance-pi --host 0.0.0.0 --port 8400

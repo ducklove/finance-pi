@@ -47,6 +47,10 @@ fail() { printf '\n[deploy] ERROR: %s\n' "$*" >&2; exit 1; }
 [ -d "$FINANCE_PI_ROOT/.git" ] || fail "repo not found at $FINANCE_PI_ROOT (set FINANCE_PI_ROOT)"
 cd "$FINANCE_PI_ROOT"
 
+if [ -f .env ]; then
+  chmod 600 .env
+fi
+
 VENV="$FINANCE_PI_ROOT/.venv"
 PY="$VENV/bin/python"
 [ -x "$PY" ] || fail "venv not found at $VENV (see docs/raspberry-pi.md section 2)"
