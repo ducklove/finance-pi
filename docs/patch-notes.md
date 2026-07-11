@@ -64,15 +64,21 @@
 
 - `gold.fundamentals_pit`가 같은 계정의 연간과 중간보고를 서로 덮어쓰지 않고 최신 연간 1개와 최신 중간보고 1개를 보존한다. 원문 Q1/반기/Q3 grain 전체는 Silver에 유지해 PIT 크기 증가를 제한한다.
 - Polars PIT 빌더와 DuckDB PIT SQL을 동일한 키·우선순위로 변경했다.
-- PIT 상태 버전을 2로 올려 기존 row-count marker가 남아 있어도 의미 변경 시 전체 파티션을 자동 재생성한다.
+- PIT 상태 버전을 3으로 올려 기존 row-count marker가 남아 있어도 의미 변경 시 전체 파티션을 자동 재생성한다.
 - `/api/fundamentals/basic`, 전체 종목 screener, MCP `get_fundamentals`가 실제 최신 연간 보고서만 선택하도록 수정했다. 더 최신인 Q1이 연간 수치로 노출되지 않는다.
 - 재무제표 bulk ingest에 `--refresh`를 추가해 완료 marker가 있어도 원문 grain을 다시 받을 수 있게 했다.
 
 ### 검증 및 반영 상태
 
-- 로컬 테스트: **314/314 통과**, Ruff 통과
-- Raspberry Pi 배포, 최근 연간 재무제표 refresh, Silver/PIT/catalog 재빌드: 진행 중
-- 단계 종료 점수: 실데이터 재검증 후 기록 예정
+- 로컬 및 Raspberry Pi 테스트: **324/324 통과**, Ruff 통과
+- 2026년 공시 연간 재무제표 2,920건 refresh 완료. Silver 2,622,836행 중 새 source-grain 477,823행의 접수번호·재무제표 구분·통화가 채워졌고 source-grain 중복 및 구형/신형 coarse-grain 중첩은 각각 0건
+- 최신 PIT 연간 계정 종목 커버리지: 순이익 2,589, 자산 2,590, 자본 2,589, 매출 2,521, 매출총이익 2,318, 영업현금흐름 2,583
+- 전체 PIT 재빌드 완료: **6,731개 partition, 772,680,023행**, 상태 marker version 3 기록
+- 최신 2026-07-10 partition은 776,708행(연간 524,504, 중간보고 252,204), `(기준일, 종목, 기간범위, 계정)` 중복 0건이며 2,516개 종목에서 연간·중간보고가 함께 보존됨
+- 단계 종료 운영 신뢰도: **82/100**
+  - 데이터 정합성 30/35: 재무 원문 grain과 연간/PIT 의미를 복구했으나 전체 과거연도 source-grain refresh와 미매핑 종목이 남음
+  - 수집 완성도 16/20: 최신 공시 재수집과 계정 커버리지를 크게 개선했으나 선택 데이터셋과 과거 실패 backfill이 남음
+  - 서빙 안정성 16/20, 보안 8/10, 성능 8/10, 운영 복구성 4/5: 대용량 PIT의 정확성은 확보했으나 readiness·원자적 publish·복구 훈련·응답 최적화가 다음 단계 과제
 
 ## 2026-07-11 - 3단계: readiness, DQ, 원자적 catalog, 백업·복구
 
@@ -92,8 +98,10 @@
 
 ### 검증 및 반영 상태
 
-- 로컬 테스트·실서버 배포·최초 백업/복원 훈련·readiness/DQ 실검증: 진행 중
-- 단계 종료 점수: 실검증 후 기록 예정
+- 원자적 catalog 36개 view 재빌드 및 `/api/ready` 실검증 통과: 최신 가격 2026-07-10, 거래일 age 0, daily marker `complete`
+- DQ 실검증: 9 checks 중 PASS 8, WARN 1(상장주식 316개 DART corp mapping 미확정), FAIL 0. Dataset scorecard는 A 13개, C 2개(선택적 NPS), F 0개
+- 최초 백업: 929 MiB, SHA-256 통과, 56,207개 파일 임시 복원 훈련 통과. mode `0600`, 주간 timer enabled
+- 단계 종료 운영 신뢰도: **88/100**
 
 ## 2026-07-11 - 4단계: 가격 invariant, 상품 분류, 응답 효율
 
@@ -105,5 +113,20 @@
 
 ### 검증 및 반영 상태
 
-- 로컬 테스트·실서버 분류/성능/DQ 재검증: 진행 중
-- 최종 운영 신뢰도: 검증 후 기록 예정
+- 최신 가격 OHLC 위반 8→0, 조정가격 30% 초과 jump 1→0
+- security master 분류: equity 3,858, ETF 936, ETN 393, REIT 49, SPAC 238. ETF/ETN 이름의 equity 잔존 0건
+- screener gzip 응답 221 KiB(기존 약 1.41 MiB), cold 6.28초(PIT 재빌드 부하 중), warm cache 0.09초
+- Raspberry Pi 전체 테스트 **324/324 통과**, Ruff 통과
+- 최종 운영 신뢰도: **91/100**
+  - 데이터 정합성 **32/35**: 가격·배당·재무 원문 grain, PIT 기간 의미와 corporate action 정합성 확보
+  - 수집 완성도 **17/20**: 실패 전파·재시도·최신 공시 refresh·일별 시총을 확보했으며 선택 데이터와 과거 source-grain 보강이 잔여 과제
+  - 서빙 안정성 **19/20**: deep readiness, 원자적 catalog, strict resource limit과 배포 실패 게이트 확보
+  - 보안 **9/10**: 변경 API 인증, MCP 파일 경계, 비밀·산출물 권한 강화
+  - 성능 **9/10**: partition pruning, 캐시, gzip으로 반복 screener 응답을 0.09초까지 단축
+  - 운영 복구성 **5/5**: 주간 백업, checksum, 실제 restore drill과 파이프라인 잠금 확보
+
+### 남은 위험 및 다음 우선순위
+
+- 상장주식 316개의 DART `corp_code` 매핑을 확정하고, 재무 원문 grain refresh를 과거연도로 확대한다.
+- 실패 marker 이력을 운영 목록으로 승격해 오래된 누락 일자를 자동 재시도하고, admin 수동 작업에도 전역 pipeline lock을 적용한다.
+- 선택 상태인 국민연금 보유내역을 정식 갱신하고 OpenDART 지분·주요사항보고, KRX 상장·상품·기업행위 기준정보, ECOS 거시 시계열을 수집 후보로 검토한다.
