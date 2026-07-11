@@ -3186,15 +3186,14 @@ def _query_screener_rows_catalog(
     베이스로 LEFT JOIN 하므로, 재무/배당 데이터가 없는 종목도 시세·PER(naver)
     는 노출된다.
     """
-    params: list[Any] = [as_of, *account_ids, as_of, as_of]
+    price_date = _latest_price_partition_on_or_before(paths.data_root, as_of)
+    if price_date is None:
+        return []
+    params: list[Any] = [price_date, *account_ids, as_of, as_of]
     with duckdb.connect(str(paths.catalog_path), read_only=True) as conn:
         rows = conn.execute(
             f"""
-            WITH latest_day AS (
-                SELECT MAX(date) AS d FROM analytics.daily_prices
-                WHERE date <= ?
-            ),
-            prices AS (
+            WITH prices AS (
                 SELECT
                     dp.ticker,
                     dp.name,
@@ -3202,8 +3201,8 @@ def _query_screener_rows_catalog(
                     dp.security_type,
                     dp.close_adj AS close,
                     dp.market_cap
-                FROM analytics.daily_prices AS dp, latest_day
-                WHERE dp.date = latest_day.d
+                FROM analytics.daily_prices AS dp
+                WHERE dp.date = ?
                   AND dp.market IN ('KOSPI', 'KOSDAQ')
                   AND dp.security_type = 'equity'
                   AND dp.ticker IS NOT NULL
@@ -3274,6 +3273,16 @@ def _query_screener_rows_catalog(
         ).fetchall()
         columns = [d[0] for d in conn.description] if conn.description else []
     return [dict(zip(columns, r, strict=False)) for r in rows]
+
+
+def _latest_price_partition_on_or_before(data_root: Path, as_of: date) -> date | None:
+    dates: list[date] = []
+    for path in data_root.glob("gold/daily_prices_adj/dt=*/part.parquet"):
+        with suppress(ValueError):
+            value = date.fromisoformat(path.parent.name.removeprefix("dt="))
+            if value <= as_of:
+                dates.append(value)
+    return max(dates) if dates else None
 
 
 def _query_screener_rows_parquet(
