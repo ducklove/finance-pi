@@ -32,7 +32,7 @@
 - daily 서비스의 `--no-strict`를 제거하고 90분 실행 제한, 5 GiB soft limit, 6 GiB hard limit을 추가했다.
 - 배포 시 `.env` 권한을 `0600`으로 강제한다.
 - 배포 시 저장소의 systemd user unit과 Apache proxy 설정을 설치·재로드해 코드와 운영 설정이 함께 반영되도록 했다.
-- Windows 배포 래퍼가 stdin 끝에 CRLF를 덧붙여 정상 배포를 실패로 보고하던 문제를 직접 stdin 스트리밍 방식으로 수정했다.
+- Windows 배포 래퍼가 stdin 끝에 CRLF를 덧붙이거나 첫 줄에 UTF-8 BOM을 넣던 문제를 BOM 없는 직접 stdin 스트리밍 방식으로 수정했다.
 - 위 동작을 고정하는 배당 upsert, 최근 공시 refresh, 수집 실패 전파, macro 실패, marker 재시도, 시가총액 빌드, POST 인증, MCP 외부 접근/바이트 제한, 운영 설정 회귀 테스트를 추가했다.
 
 ### 검증 및 반영 상태
@@ -62,7 +62,7 @@
 
 ### PIT 및 API 의미
 
-- `gold.fundamentals_pit`가 같은 계정의 연간/Q1/반기/Q3를 서로 덮어쓰지 않고 보고서·재무제표별 최신 회계기간을 각각 보존한다.
+- `gold.fundamentals_pit`가 같은 계정의 연간과 중간보고를 서로 덮어쓰지 않고 최신 연간 1개와 최신 중간보고 1개를 보존한다. 원문 Q1/반기/Q3 grain 전체는 Silver에 유지해 PIT 크기 증가를 제한한다.
 - Polars PIT 빌더와 DuckDB PIT SQL을 동일한 키·우선순위로 변경했다.
 - PIT 상태 버전을 2로 올려 기존 row-count marker가 남아 있어도 의미 변경 시 전체 파티션을 자동 재생성한다.
 - `/api/fundamentals/basic`, 전체 종목 screener, MCP `get_fundamentals`가 실제 최신 연간 보고서만 선택하도록 수정했다. 더 최신인 Q1이 연간 수치로 노출되지 않는다.

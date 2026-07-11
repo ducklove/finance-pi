@@ -35,7 +35,7 @@ SILVER_PRICES_REBUILD_CHUNK_DAYS = 366
 
 # Increment when PIT grouping/selection semantics change so stale partitions
 # cannot survive merely because input row counts stayed constant.
-FUNDAMENTALS_PIT_STATE_VERSION = 2
+FUNDAMENTALS_PIT_STATE_VERSION = 3
 
 # Rows for this many extra trading days on each side of a chunk are loaded as
 # dedup context but never written: _deduplicate_price_candidates anchors
@@ -1698,8 +1698,8 @@ def build_fundamentals_pit(
     PIT availability policy: a filing is visible strictly AFTER its
     ``available_date`` (``available_date < as_of_date``), i.e. next-trading-day
     availability — an intraday filing can never inform a same-day decision.
-    Annual and interim report types remain independently addressable. Within
-    each report/statement/account grain, the newest fiscal period wins, then
+    The newest annual and newest interim report remain independently
+    addressable. Within each period-scope/account grain, the newest fiscal period wins, then
     available_date, rcept_dt, and consolidated statements break ties. Must stay
     row-for-row identical to
     ``finance_pi.pit.build_fundamentals_pit_sql``.
@@ -1810,6 +1810,11 @@ def _fundamentals_pit_partition(
     eligible = financials.filter(
         pl.col("security_id").is_in(security_ids)
         & (pl.col("available_date") < pl.lit(as_of_date))
+    ).with_columns(
+        pl.when(pl.col("report_type").is_in(["11011", "annual"]))
+        .then(pl.lit("annual"))
+        .otherwise(pl.lit("interim"))
+        .alias("period_scope")
     )
     if eligible.is_empty():
         return None
@@ -1820,6 +1825,7 @@ def _fundamentals_pit_partition(
                 "date",
                 "security_id",
                 "account_id",
+                "period_scope",
                 "fiscal_period_end",
                 "report_type",
                 "statement_division",
@@ -1832,8 +1838,7 @@ def _fundamentals_pit_partition(
             subset=[
                 "date",
                 "security_id",
-                "report_type",
-                "statement_division",
+                "period_scope",
                 "account_id",
             ],
             keep="last",

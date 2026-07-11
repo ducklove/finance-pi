@@ -11,15 +11,19 @@ def build_fundamentals_pit_sql(
     Mirrors ``transforms.builders.build_fundamentals_pit``: keeps only rows whose
     available date is strictly before the as-of date (next-trading-day
     availability, so intraday filings never inform same-day decisions), then
-    keeps annual and interim report types independently, selecting the newest
-    fiscal period within each report/statement/account grain and then breaking
+    keeps the newest annual and newest interim report independently, selecting
+    the newest fiscal period within each period-scope/account grain and breaking
     ties by availability, receipt date, and consolidation scope.
     """
 
     return f"""
     SELECT
         u.date AS as_of_date,
-        f.*
+        f.*,
+        CASE
+            WHEN f.report_type IN ('11011', 'annual') THEN 'annual'
+            ELSE 'interim'
+        END AS period_scope
     FROM {calendar_view} AS u
     JOIN {financials_view} AS f
       ON f.security_id = u.security_id
@@ -28,8 +32,10 @@ def build_fundamentals_pit_sql(
         PARTITION BY
             u.date,
             u.security_id,
-            f.report_type,
-            f.statement_division,
+            CASE
+                WHEN f.report_type IN ('11011', 'annual') THEN 'annual'
+                ELSE 'interim'
+            END,
             f.account_id
         ORDER BY
             f.fiscal_period_end DESC NULLS LAST,

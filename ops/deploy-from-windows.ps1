@@ -56,6 +56,7 @@ $startInfo.FileName = "ssh"
 $startInfo.Arguments = "$Target `"bash -s -- $argLine`""
 $startInfo.UseShellExecute = $false
 $startInfo.RedirectStandardInput = $true
+$startInfo.StandardInputEncoding = [System.Text.UTF8Encoding]::new($false)
 $process = [System.Diagnostics.Process]::new()
 $process.StartInfo = $startInfo
 if (-not $process.Start()) { throw "could not start ssh" }

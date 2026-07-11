@@ -1924,7 +1924,7 @@ def test_fundamentals_pit_rebuilds_when_state_version_changes(tmp_path) -> None:
     rebuilt = build_fundamentals_pit(tmp_path)[0]
 
     assert rebuilt.files == 2
-    assert json.loads(state_path.read_text(encoding="utf-8"))["version"] == 2
+    assert json.loads(state_path.read_text(encoding="utf-8"))["version"] == 3
 
 
 def test_fundamentals_pit_rebuilds_only_dates_after_new_available_date(tmp_path) -> None:
