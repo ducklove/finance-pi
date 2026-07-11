@@ -1,0 +1,17 @@
+[Unit]
+Description=finance-pi verified source-lake backup
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+UMask=0077
+WorkingDirectory=/home/cantabile/Works/finance-pi
+EnvironmentFile=-/home/cantabile/Works/finance-pi/.env
+ExecStart=/bin/bash /home/cantabile/Works/finance-pi/ops/backup.sh create
+TimeoutStartSec=2h
+MemoryHigh=2G
+MemoryMax=3G
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7

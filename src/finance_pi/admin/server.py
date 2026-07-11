@@ -25,6 +25,7 @@ import duckdb
 import polars as pl
 
 from finance_pi.admin.api_docs import build_api_docs_payload
+from finance_pi.calendar import TradingCalendar
 from finance_pi.config import ProjectPaths, load_dotenv
 from finance_pi.docs_site import build_docs_site
 from finance_pi.sources.cnbc import (
@@ -883,6 +884,14 @@ def _handler_for(state: AdminState) -> type[BaseHTTPRequestHandler]:
             try:
                 if parsed.path == "/api/health":
                     self._send_json(_health_payload(state))
+                elif parsed.path == "/api/ready":
+                    payload = _readiness_payload(state)
+                    status = (
+                        HTTPStatus.OK
+                        if payload["status"] == "ready"
+                        else HTTPStatus.SERVICE_UNAVAILABLE
+                    )
+                    self._send_json(payload, status=status)
                 elif parsed.path == "/api/docs":
                     self._send_json(_api_docs_payload(state))
                 elif parsed.path in {"/doc", "/doc/"}:
@@ -1175,6 +1184,86 @@ def _health_payload(state: AdminState) -> dict[str, Any]:
         "data_root_exists": state.paths.data_root.resolve().exists(),
         "auth": "local-or-token",
     }
+
+
+def _readiness_payload(state: AdminState) -> dict[str, Any]:
+    """Deep, path-redacted readiness check for the catalog and latest prices."""
+
+    checks: dict[str, Any] = {
+        "data_root": state.paths.data_root.exists(),
+        "catalog": state.paths.catalog_path.exists(),
+    }
+    latest_date: date | None = None
+    if checks["catalog"]:
+        try:
+            latest_date, latest_rows, dataset_count = _readiness_catalog_snapshot(
+                state.paths.catalog_path
+            )
+            checks["catalog_query"] = True
+            checks["catalog_datasets"] = dataset_count >= len(dataset_registry)
+            checks["latest_price_rows"] = latest_rows >= 1_000
+        except duckdb.Error:
+            checks["catalog_query"] = False
+            checks["catalog_datasets"] = False
+            checks["latest_price_rows"] = False
+    else:
+        checks["catalog_query"] = False
+        checks["catalog_datasets"] = False
+        checks["latest_price_rows"] = False
+
+    price_age_days = (
+        len(TradingCalendar.krx_trading_days(latest_date, _kst_today()).dates) - 1
+        if latest_date is not None
+        else None
+    )
+    checks["latest_price_date"] = latest_date.isoformat() if latest_date else None
+    checks["price_age_trading_days"] = price_age_days
+    checks["price_fresh"] = price_age_days is not None and 0 <= price_age_days <= 2
+
+    marker_status = None
+    if latest_date is not None:
+        marker = state.paths.data_root / "_state" / "daily" / f"{latest_date.isoformat()}.json"
+        if marker.exists():
+            try:
+                marker_status = json.loads(marker.read_text(encoding="utf-8")).get("status")
+            except (OSError, json.JSONDecodeError):
+                marker_status = "invalid"
+    checks["latest_daily_marker"] = marker_status
+    checks["daily_marker_ok"] = marker_status not in {"failed", "complete_with_failures", "invalid"}
+
+    ready = all(
+        checks[name]
+        for name in (
+            "data_root",
+            "catalog",
+            "catalog_query",
+            "catalog_datasets",
+            "latest_price_rows",
+            "price_fresh",
+            "daily_marker_ok",
+        )
+    )
+    return {
+        "status": "ready" if ready else "not_ready",
+        "generated_at": datetime.now(UTC).isoformat(),
+        "workspace": state.paths.root.resolve().name,
+        "checks": checks,
+    }
+
+
+def _readiness_catalog_snapshot(catalog_path: Path) -> tuple[date | None, int, int]:
+    with duckdb.connect(str(catalog_path), read_only=True) as conn:
+        latest_date, latest_rows = conn.execute(
+            """
+            WITH latest AS (SELECT max(date) AS date FROM gold.daily_prices_adj)
+            SELECT latest.date, count(p.date)
+            FROM latest
+            LEFT JOIN gold.daily_prices_adj AS p ON p.date = latest.date
+            GROUP BY latest.date
+            """
+        ).fetchone()
+        dataset_count = conn.execute("SELECT count(*) FROM metadata.datasets").fetchone()[0]
+    return latest_date, int(latest_rows), int(dataset_count)
 
 
 def _api_docs_payload(state: AdminState) -> dict[str, Any]:

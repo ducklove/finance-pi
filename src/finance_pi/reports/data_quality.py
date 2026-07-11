@@ -140,6 +140,29 @@ def build_data_quality_report(data_root: Path, report_date: date) -> DataQuality
             f"{day_prices.height} silver price rows for {report_date.isoformat()}",
         )
     )
+    duplicate_prices = day_prices.height - day_prices.unique(
+        subset=["date", "security_id"], keep="last"
+    ).height
+    checks.append(
+        ReportCheck(
+            "price_key_duplicates",
+            "PASS" if duplicate_prices == 0 else "FAIL",
+            f"{duplicate_prices} duplicate (date, security_id) price rows",
+        )
+    )
+    invalid_ohlc = day_prices.filter(
+        (pl.col("close") <= 0)
+        | (pl.col("low") > pl.min_horizontal("open", "close"))
+        | (pl.col("high") < pl.max_horizontal("open", "close"))
+        | (pl.col("high") < pl.col("low"))
+    ).height
+    checks.append(
+        ReportCheck(
+            "price_ohlc_invariants",
+            "PASS" if invalid_ohlc == 0 else "WARN",
+            f"{invalid_ohlc} rows violate positive-close or OHLC bounds",
+        )
+    )
 
     jump_prices = _with_previous_prices(data_root, prices, report_date)
     jumps = (
@@ -173,6 +196,61 @@ def build_data_quality_report(data_root: Path, report_date: date) -> DataQuality
                 "krx_kis_close_mismatch",
                 "PASS" if krx_kis == 0 else "WARN",
                 f"{krx_kis} KRX/KIS close mismatches above 0.1%",
+            )
+        )
+
+    financials = _latest_partition_frame(data_root / "silver/financials/fiscal_year=*/part.parquet")
+    if financials is not None and not financials.is_empty():
+        core_nulls = financials.filter(
+            pl.any_horizontal(
+                pl.col("corp_code").is_null(),
+                pl.col("fiscal_period_end").is_null(),
+                pl.col("report_type").is_null(),
+                pl.col("account_id").is_null(),
+                pl.col("amount").is_null(),
+            )
+        ).height
+        checks.append(
+            ReportCheck(
+                "financial_core_nulls",
+                "PASS" if core_nulls == 0 else "FAIL",
+                f"{core_nulls} newest-fiscal-partition rows have null core financial keys",
+            )
+        )
+        if "rcept_no" in financials.columns:
+            refreshed = financials.filter(pl.col("rcept_no").is_not_null())
+            grain = [
+                "corp_code",
+                "rcept_no",
+                "fiscal_period_end",
+                "report_type",
+                "statement_division",
+                "account_id",
+                "account_detail",
+                "sort_order",
+                "is_consolidated",
+            ]
+            grain = [column for column in grain if column in refreshed.columns]
+            duplicates = refreshed.height - refreshed.unique(subset=grain, keep="last").height
+            checks.append(
+                ReportCheck(
+                    "financial_source_grain_duplicates",
+                    "PASS" if duplicates == 0 else "FAIL",
+                    f"{duplicates} refreshed financial rows duplicate the source grain",
+                )
+            )
+
+    dividends = _read_optional(data_root / "silver/dividends/fiscal_year=*/part.parquet")
+    if dividends is not None and not dividends.is_empty():
+        dividend_key = ["fiscal_year", "corp_code", "stock_kind", "source_rcept_no"]
+        duplicate_dividends = dividends.height - dividends.unique(
+            subset=dividend_key, keep="last"
+        ).height
+        checks.append(
+            ReportCheck(
+                "dividend_key_duplicates",
+                "PASS" if duplicate_dividends == 0 else "FAIL",
+                f"{duplicate_dividends} duplicate dividend business-key rows",
             )
         )
 
@@ -234,6 +312,15 @@ def _read_optional(pattern: Path) -> pl.DataFrame | None:
     return pl.read_parquet([file.as_posix() for file in files], hive_partitioning=True)
 
 
+def _latest_partition_frame(pattern: Path) -> pl.DataFrame | None:
+    from glob import glob
+
+    files = sorted(Path(name) for name in glob(pattern.as_posix()))
+    if not files:
+        return None
+    return pl.read_parquet(files[-1], hive_partitioning=True)
+
+
 @dataclass(frozen=True)
 class _DatasetScorecardSpec:
     """Per-dataset expectations used by :func:`build_dataset_scorecard`."""
@@ -253,6 +340,13 @@ _SCORECARD_DATASETS: tuple[_DatasetScorecardSpec, ...] = (
     _DatasetScorecardSpec(
         name="silver.prices",
         relative_glob="silver/prices/dt=*/part.parquet",
+        partition_prefix="dt=",
+        date_column="date",
+        max_age_trading_days=2,
+    ),
+    _DatasetScorecardSpec(
+        name="silver.market_caps",
+        relative_glob="silver/market_caps/dt=*/part.parquet",
         partition_prefix="dt=",
         date_column="date",
         max_age_trading_days=2,
@@ -286,6 +380,34 @@ _SCORECARD_DATASETS: tuple[_DatasetScorecardSpec, ...] = (
         max_age_trading_days=45,
     ),
     _DatasetScorecardSpec(
+        name="silver.filings",
+        relative_glob="silver/filings/dt=*/part.parquet",
+        partition_prefix="dt=",
+        date_column="rcept_dt",
+        max_age_trading_days=10,
+    ),
+    _DatasetScorecardSpec(
+        name="silver.dividends",
+        relative_glob="silver/dividends/fiscal_year=*/part.parquet",
+        partition_prefix="fiscal_year=",
+        date_column="available_date",
+        max_age_trading_days=260,
+    ),
+    _DatasetScorecardSpec(
+        name="silver.share_counts",
+        relative_glob="silver/share_counts/fiscal_year=*/part.parquet",
+        partition_prefix="fiscal_year=",
+        date_column="available_date",
+        max_age_trading_days=260,
+    ),
+    _DatasetScorecardSpec(
+        name="silver.nps_holdings",
+        relative_glob="silver/nps_holdings/dt=*/part.parquet",
+        partition_prefix="dt=",
+        date_column="date",
+        max_age_trading_days=130,
+    ),
+    _DatasetScorecardSpec(
         name="silver.corporate_actions",
         relative_glob="silver/corporate_actions/dt=*/part.parquet",
         partition_prefix="dt=",
@@ -300,6 +422,27 @@ _SCORECARD_DATASETS: tuple[_DatasetScorecardSpec, ...] = (
     _DatasetScorecardSpec(
         name="gold.universe_history",
         relative_glob="gold/universe_history/dt=*/part.parquet",
+        partition_prefix="dt=",
+        date_column="date",
+        max_age_trading_days=2,
+    ),
+    _DatasetScorecardSpec(
+        name="gold.filing_events",
+        relative_glob="gold/filing_events/dt=*/part.parquet",
+        partition_prefix="dt=",
+        date_column="event_date",
+        max_age_trading_days=10,
+    ),
+    _DatasetScorecardSpec(
+        name="gold.nps_universe",
+        relative_glob="gold/nps_universe/dt=*/part.parquet",
+        partition_prefix="dt=",
+        date_column="date",
+        max_age_trading_days=130,
+    ),
+    _DatasetScorecardSpec(
+        name="gold.preferred_discount",
+        relative_glob="gold/preferred_discount/dt=*/part.parquet",
         partition_prefix="dt=",
         date_column="date",
         max_age_trading_days=2,

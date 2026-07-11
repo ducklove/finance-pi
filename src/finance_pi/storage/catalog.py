@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from glob import glob
 from pathlib import Path
+from uuid import uuid4
 
 import duckdb
 
@@ -20,17 +22,26 @@ class CatalogBuilder:
 
     def build(self) -> list[str]:
         self.catalog_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path = self.catalog_path.with_name(
+            f".{self.catalog_path.name}.{uuid4().hex}.tmp"
+        )
         specs = self.registry or dataset_registry
         created: list[str] = []
-        with duckdb.connect(str(self.catalog_path)) as conn:
-            schemas = {spec.schema for spec in specs.values()} | {"analytics", "metadata"}
-            for schema in sorted(schemas):
-                conn.execute(f"CREATE SCHEMA IF NOT EXISTS {schema}")
-            for spec in specs.values():
-                self._create_view(conn, spec)
-                created.append(spec.name)
-            self._create_metadata(conn, specs)
-            self._create_analytics_views(conn)
+        try:
+            with duckdb.connect(str(temporary_path)) as conn:
+                schemas = {spec.schema for spec in specs.values()} | {"analytics", "metadata"}
+                for schema in sorted(schemas):
+                    conn.execute(f"CREATE SCHEMA IF NOT EXISTS {schema}")
+                for spec in specs.values():
+                    self._create_view(conn, spec)
+                    created.append(spec.name)
+                self._create_metadata(conn, specs)
+                self._create_analytics_views(conn)
+                conn.execute("CHECKPOINT")
+            os.replace(temporary_path, self.catalog_path)
+        finally:
+            temporary_path.unlink(missing_ok=True)
+            temporary_path.with_suffix(temporary_path.suffix + ".wal").unlink(missing_ok=True)
         return created
 
     def _create_view(self, conn: duckdb.DuckDBPyConnection, spec: DatasetSpec) -> None:

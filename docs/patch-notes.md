@@ -73,3 +73,24 @@
 - 로컬 테스트: **314/314 통과**, Ruff 통과
 - Raspberry Pi 배포, 최근 연간 재무제표 refresh, Silver/PIT/catalog 재빌드: 진행 중
 - 단계 종료 점수: 실데이터 재검증 후 기록 예정
+
+## 2026-07-11 - 3단계: readiness, DQ, 원자적 catalog, 백업·복구
+
+### 서빙 및 품질 게이트
+
+- `/api/ready`를 추가해 DuckDB catalog 실제 질의, registry dataset 수, 최신 가격 행 수·거래일 freshness, 최신 daily marker 상태를 검사한다. 준비되지 않으면 HTTP 503을 반환한다.
+- 배포 검증이 얕은 liveness `/api/health`가 아니라 `/api/ready`를 통과해야 성공하도록 변경했다.
+- DQ scorecard 대상 dataset을 7개에서 15개로 확대했다. 시가총액, 공시, 배당, 주식수, NPS, filing event, 우선주 괴리까지 freshness·빈 데이터·최신 partition 완성도를 추적한다.
+- DQ에 가격 키 중복, OHLC invariant, 재무 핵심키 null, 새 재무 source grain 중복, 배당 business-key 중복 검사를 추가했다.
+
+### 원자성 및 복구
+
+- DuckDB catalog를 임시 파일에서 완전히 빌드·checkpoint한 뒤 `os.replace`로 교체한다. 빌드 실패 시 기존 catalog를 그대로 유지하고 임시 파일을 정리한다.
+- `ops/backup.sh`가 재구축의 원천인 Bronze, macro, ingest state/cache, 런타임 설정을 zstd archive로 만들고 SHA-256 검증과 임시 디렉터리 실제 복원 훈련을 수행한다.
+- 백업 archive와 checksum은 mode `0600`, 기본 보존기간은 14일이며 매주 일요일 03:30 KST timer를 배포 시 활성화한다.
+- daily, 배포 rebuild/PIT, backup이 같은 `pipeline.lock`을 사용해 중복 실행을 거부하거나 대기하도록 했다.
+
+### 검증 및 반영 상태
+
+- 로컬 테스트·실서버 배포·최초 백업/복원 훈련·readiness/DQ 실검증: 진행 중
+- 단계 종료 점수: 실검증 후 기록 예정

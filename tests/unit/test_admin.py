@@ -26,6 +26,7 @@ from finance_pi.admin.server import (
     _health_payload,
     _is_local_admin_client,
     _job_command,
+    _readiness_payload,
 )
 from finance_pi.storage import DataLakeLayout, ParquetDatasetWriter
 
@@ -1681,6 +1682,44 @@ def test_admin_health_is_minimal_and_token_state_is_kept(tmp_path) -> None:
     assert not any(
         isinstance(value, str) and str(tmp_path.resolve()) in value for value in health.values()
     )
+
+
+def test_admin_readiness_reports_missing_catalog_without_paths(tmp_path) -> None:
+    payload = _readiness_payload(AdminState(tmp_path))
+
+    assert payload["status"] == "not_ready"
+    assert payload["checks"]["catalog"] is False
+    assert str(tmp_path.resolve()) not in json.dumps(payload)
+
+
+def test_admin_readiness_accepts_fresh_complete_catalog(tmp_path, monkeypatch) -> None:
+    state = AdminState(tmp_path)
+    state.paths.data_root.mkdir(parents=True)
+    state.paths.catalog_path.parent.mkdir(parents=True)
+    state.paths.catalog_path.touch()
+    monkeypatch.setattr(admin_server, "_kst_today", lambda: date(2026, 7, 11))
+    monkeypatch.setattr(
+        admin_server,
+        "_readiness_catalog_snapshot",
+        lambda path: (date(2026, 7, 10), 3_900, len(admin_server.dataset_registry)),
+    )
+
+    payload = _readiness_payload(state)
+
+    assert payload["status"] == "ready"
+    assert payload["checks"]["price_age_trading_days"] == 0
+
+
+def test_admin_readiness_endpoint_returns_503_when_not_ready(tmp_path) -> None:
+    handler = _make_handler(
+        AdminState(tmp_path),
+        path="/api/ready",
+        method="GET",
+    )
+
+    handler.do_GET()
+
+    assert _handler_response_status(handler) == HTTPStatus.SERVICE_UNAVAILABLE
 
 
 def test_admin_local_network_clients_bypass_token() -> None:

@@ -52,6 +52,11 @@ def build_api_docs_payload(
                 "path": f"{base_url}/health",
                 "description": "Lightweight service health check.",
             },
+            "readiness": {
+                "method": "GET",
+                "path": f"{base_url}/ready",
+                "description": "Deep readiness check for catalog queryability, registry completeness, latest price coverage/freshness, and daily marker status. Returns HTTP 503 when not ready.",
+            },
             "docs": {
                 "method": "GET",
                 "path": f"{base_url}/docs",

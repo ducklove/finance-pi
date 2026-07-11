@@ -48,6 +48,24 @@ def test_catalog_builds_empty_views(tmp_path) -> None:
     assert macro_result == (0,)
 
 
+def test_catalog_build_failure_keeps_previous_catalog(tmp_path, monkeypatch) -> None:
+    data_root = tmp_path / "data"
+    catalog_path = data_root / "catalog" / "finance_pi.duckdb"
+    DataLakeLayout(data_root).ensure_base_dirs()
+    CatalogBuilder(data_root, catalog_path).build()
+
+    def fail_analytics(self, conn) -> None:
+        raise RuntimeError("simulated catalog failure")
+
+    monkeypatch.setattr(CatalogBuilder, "_create_analytics_views", fail_analytics)
+    with pytest.raises(RuntimeError, match="simulated catalog failure"):
+        CatalogBuilder(data_root, catalog_path).build()
+
+    with duckdb.connect(str(catalog_path), read_only=True) as conn:
+        assert conn.execute("SELECT count(*) FROM metadata.datasets").fetchone()[0] > 0
+    assert not list(catalog_path.parent.glob(".finance_pi.duckdb.*.tmp*"))
+
+
 def test_layout_partition_paths(tmp_path) -> None:
     layout = DataLakeLayout(tmp_path)
     path = layout.partition_path("bronze.krx_daily_raw", date(2024, 1, 2))
