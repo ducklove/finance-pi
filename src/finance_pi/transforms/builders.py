@@ -1486,33 +1486,13 @@ def build_financials_silver(data_root: Path) -> list[BuildSummary]:
     for column, dtype in optional_columns.items():
         if column not in financials.columns:
             financials = financials.with_columns(pl.lit(None, dtype=dtype).alias(column))
-    coarse_grain = [
-        "corp_code",
-        "fiscal_period_end",
-        "available_date",
-        "report_type",
-        "account_id",
-        "is_consolidated",
-    ]
-    refreshed_keys = (
-        financials.filter(pl.col("rcept_no").is_not_null()).select(coarse_grain).unique()
-    )
-    if not refreshed_keys.is_empty():
-        legacy = financials.filter(pl.col("rcept_no").is_null()).join(
-            refreshed_keys,
-            on=coarse_grain,
-            how="anti",
-        )
-        financials = pl.concat(
-            [legacy, financials.filter(pl.col("rcept_no").is_not_null())],
-            how="diagonal_relaxed",
-        )
     financials = (
         _cast_dates(
             financials,
             ["fiscal_period_end", "event_date", "rcept_dt", "available_date"],
         )
         .pipe(_normalize_financial_account_ids)
+        .pipe(_remove_legacy_refreshed_financial_rows)
         .with_columns(pl.col("is_backfilled").cast(pl.Boolean, strict=False).fill_null(False))
         .select(
             [
@@ -1591,6 +1571,29 @@ def _normalize_financial_account_ids(financials: pl.DataFrame) -> pl.DataFrame:
         .otherwise(pl.col("account_id"))
         .alias("account_id")
     )
+
+
+def _remove_legacy_refreshed_financial_rows(financials: pl.DataFrame) -> pl.DataFrame:
+    """Prefer refreshed source-grain rows over legacy normalized equivalents."""
+
+    coarse_grain = [
+        "corp_code",
+        "fiscal_period_end",
+        "available_date",
+        "report_type",
+        "account_id",
+        "is_consolidated",
+    ]
+    refreshed = financials.filter(pl.col("rcept_no").is_not_null())
+    if refreshed.is_empty():
+        return financials
+    refreshed_keys = refreshed.select(coarse_grain).unique()
+    legacy = financials.filter(pl.col("rcept_no").is_null()).join(
+        refreshed_keys,
+        on=coarse_grain,
+        how="anti",
+    )
+    return pl.concat([legacy, refreshed], how="diagonal_relaxed")
 
 
 def build_filings_silver(data_root: Path) -> list[BuildSummary]:
