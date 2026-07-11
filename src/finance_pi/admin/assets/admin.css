@@ -1,13 +1,21 @@
 
+/* 디자인 토큰 — 라이트가 기본값이고, 다크는 prefers-color-scheme 또는
+   data-theme 속성(수동 토글, localStorage 'theme')이 토큰만 재정의한다.
+   컴포넌트 규칙에 색을 직접 쓰지 말고 반드시 토큰을 경유할 것. */
 :root {
   color-scheme: light;
   --bg: #f4f6f8;
   --panel: #ffffff;
+  --panel-veil: rgba(255, 255, 255, 0.94);
   --panel-soft: #f9fafb;
   --ink: #111827;
   --muted: #667085;
+  --icon-ink: #344054;
+  --pill-ink: #475467;
   --line: #d9dee7;
   --line-soft: #edf0f5;
+  --line-strong: #c8d0dc;
+  --line-hover: #b6c0cf;
   --rail: #151a22;
   --rail-soft: #202733;
   --blue: #2563eb;
@@ -15,8 +23,79 @@
   --amber: #b45309;
   --red: #b42318;
   --violet: #6d28d9;
+  --link: #1d4ed8;
+  --body-veil-top: rgba(255, 255, 255, 0.88);
+  --body-veil-bottom: rgba(244, 246, 248, 0.94);
+  --btn-primary-bg: #111827;
+  --btn-primary-ink: #ffffff;
+  --btn-ghost-bg: #f8fafc;
+  --th-bg: #f8fafc;
+  --row-hover: #f9fbff;
+  --table-bg: #ffffff;
+  --input-bg: #ffffff;
+  --bar-bg: #edf0f5;
+  --status-ok-ink: #0f766e;
+  --status-ok-bg: #ecfdf3;
+  --status-ok-line: #b7e4d1;
+  --status-warn-ink: #b45309;
+  --status-warn-bg: #fff7ed;
+  --status-warn-line: #fed7aa;
+  --status-fail-ink: #b42318;
+  --status-fail-bg: #fef3f2;
+  --status-fail-line: #fecaca;
+  --toast-bg: #111827;
+  --toast-ink: #ffffff;
+  --backdrop: rgba(17, 24, 39, 0.34);
   --shadow: 0 16px 40px rgba(17, 24, 39, 0.08);
   --focus: 0 0 0 3px rgba(37, 99, 235, 0.18);
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0e1319;
+  --panel: #151b24;
+  --panel-veil: rgba(21, 27, 36, 0.94);
+  --panel-soft: #1a212c;
+  --ink: #e7ecf3;
+  --muted: #94a1b3;
+  --icon-ink: #c3ccd9;
+  --pill-ink: #a7b2c2;
+  --line: #2a3443;
+  --line-soft: #202938;
+  --line-strong: #37445a;
+  --line-hover: #4a5a75;
+  --rail: #10151d;
+  --rail-soft: #1d2634;
+  --blue: #4d82f0;
+  --green: #2fb39a;
+  --amber: #d9a441;
+  --red: #e06060;
+  --violet: #9a7bf0;
+  --link: #7ea6f7;
+  --body-veil-top: rgba(14, 19, 25, 0.55);
+  --body-veil-bottom: rgba(14, 19, 25, 0.92);
+  --btn-primary-bg: #e7ecf3;
+  --btn-primary-ink: #10151d;
+  --btn-ghost-bg: #1a212c;
+  --th-bg: #171e28;
+  --row-hover: #1a2330;
+  --table-bg: #131922;
+  --input-bg: #10161e;
+  --bar-bg: #222b38;
+  --status-ok-ink: #57c9a2;
+  --status-ok-bg: rgba(47, 179, 154, 0.12);
+  --status-ok-line: rgba(47, 179, 154, 0.35);
+  --status-warn-ink: #d9a441;
+  --status-warn-bg: rgba(217, 164, 65, 0.12);
+  --status-warn-line: rgba(217, 164, 65, 0.35);
+  --status-fail-ink: #e06060;
+  --status-fail-bg: rgba(224, 96, 96, 0.12);
+  --status-fail-line: rgba(224, 96, 96, 0.35);
+  --toast-bg: #e7ecf3;
+  --toast-ink: #10151d;
+  --backdrop: rgba(0, 0, 0, 0.55);
+  --shadow: 0 16px 40px rgba(0, 0, 0, 0.4);
+  --focus: 0 0 0 3px rgba(77, 130, 240, 0.3);
 }
 
 * { box-sizing: border-box; }
@@ -25,7 +104,7 @@ body {
   margin: 0;
   min-height: 100vh;
   background:
-    linear-gradient(180deg, rgba(255,255,255,.88), rgba(244,246,248,.94) 260px),
+    linear-gradient(180deg, var(--body-veil-top), var(--body-veil-bottom) 260px),
     var(--bg);
   color: var(--ink);
   font: 14px/1.45 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -112,19 +191,28 @@ h1, h2 { margin: 0; letter-spacing: 0; }
 h1 { font-size: clamp(25px, 3vw, 34px); line-height: 1.1; }
 h2 { font-size: 18px; line-height: 1.22; }
 .top-actions { display: flex; gap: 8px; align-items: center; }
+.offline-pill {
+  color: var(--status-fail-ink);
+  background: var(--status-fail-bg);
+  border-color: var(--status-fail-line);
+  font-weight: 800;
+}
 .icon-button {
   width: 40px;
   height: 40px;
   border-radius: 8px;
   border: 1px solid var(--line);
   background: var(--panel);
-  color: #344054;
+  color: var(--icon-ink);
   display: grid;
   place-items: center;
   cursor: pointer;
   transition: border-color .16s ease, transform .16s ease, background .16s ease;
 }
-.icon-button:hover { border-color: #b6c0cf; transform: translateY(-1px); }
+.icon-button:hover { border-color: var(--line-hover); transform: translateY(-1px); }
+.icon-button .icon-sun { display: none; }
+:root[data-theme="dark"] .icon-button .icon-sun { display: block; }
+:root[data-theme="dark"] .icon-button .icon-moon { display: none; }
 svg {
   width: 18px;
   height: 18px;
@@ -137,7 +225,7 @@ svg {
 }
 .status-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
 .metric, .panel {
-  background: rgba(255,255,255,.94);
+  background: var(--panel-veil);
   border: 1px solid var(--line);
   border-radius: 8px;
   box-shadow: var(--shadow);
@@ -170,9 +258,9 @@ svg {
 }
 .command-band button, .backtest-form button, .backfill-form button {
   min-height: 42px;
-  border: 1px solid #c8d0dc;
+  border: 1px solid var(--line-strong);
   background: var(--panel);
-  color: #1f2937;
+  color: var(--ink);
   border-radius: 8px;
   display: inline-flex;
   align-items: center;
@@ -184,13 +272,13 @@ svg {
 }
 .command-band button:hover, .backtest-form button:hover, .backfill-form button:hover {
   transform: translateY(-1px);
-  border-color: #9aa6b8;
-  background: #f8fafc;
+  border-color: var(--line-hover);
+  background: var(--btn-ghost-bg);
 }
 .command-band button:first-child {
-  background: #111827;
-  border-color: #111827;
-  color: white;
+  background: var(--btn-primary-bg);
+  border-color: var(--btn-primary-bg);
+  color: var(--btn-primary-ink);
 }
 .command-band button:nth-child(4) {
   background: var(--green);
@@ -235,17 +323,17 @@ svg {
   padding: 5px 9px;
   border: 1px solid var(--line);
   border-radius: 999px;
-  color: #475467;
+  color: var(--pill-ink);
   background: var(--panel-soft);
   font-size: 12px;
   text-decoration: none;
 }
-a.pill:hover { border-color: #b6c0cf; color: var(--blue); }
+a.pill:hover { border-color: var(--line-hover); color: var(--blue); }
 .table-wrap {
   overflow: auto;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: white;
+  background: var(--table-bg);
 }
 table { width: 100%; border-collapse: collapse; min-width: 800px; }
 th, td {
@@ -256,15 +344,15 @@ th, td {
 }
 th {
   font-size: 11px;
-  color: #667085;
-  background: #f8fafc;
+  color: var(--muted);
+  background: var(--th-bg);
   position: sticky;
   top: 0;
   z-index: 1;
   text-transform: uppercase;
   letter-spacing: .04em;
 }
-tbody tr:hover { background: #f9fbff; }
+tbody tr:hover { background: var(--row-hover); }
 tr:last-child td { border-bottom: 0; }
 .status {
   display: inline-flex;
@@ -277,23 +365,23 @@ tr:last-child td { border-bottom: 0; }
   border: 1px solid transparent;
 }
 .status.ready, .status.done {
-  color: #0f766e;
-  background: #ecfdf3;
-  border-color: #b7e4d1;
+  color: var(--status-ok-ink);
+  background: var(--status-ok-bg);
+  border-color: var(--status-ok-line);
 }
 .status.empty, .status.running {
-  color: #b45309;
-  background: #fff7ed;
-  border-color: #fed7aa;
+  color: var(--status-warn-ink);
+  background: var(--status-warn-bg);
+  border-color: var(--status-warn-line);
 }
 .status.failed {
-  color: var(--red);
-  background: #fef3f2;
-  border-color: #fecaca;
+  color: var(--status-fail-ink);
+  background: var(--status-fail-bg);
+  border-color: var(--status-fail-line);
 }
 .bar {
   height: 5px;
-  background: #edf0f5;
+  background: var(--bar-bg);
   border-radius: 999px;
   overflow: hidden;
   margin-top: 6px;
@@ -307,20 +395,20 @@ tr:last-child td { border-bottom: 0; }
   padding: 10px;
   display: grid;
   gap: 6px;
-  background: #ffffff;
+  background: var(--panel);
 }
-.job:hover, .artifact:hover { border-color: #b9c3d0; }
+.job:hover, .artifact:hover { border-color: var(--line-hover); }
 .job-row { display: flex; justify-content: space-between; gap: 10px; align-items: center; min-width: 0; }
 .job-row small { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .job button {
   border: 1px solid var(--line);
-  background: #f8fafc;
+  background: var(--btn-ghost-bg);
   border-radius: 7px;
   padding: 6px 9px;
   cursor: pointer;
-  color: #344054;
+  color: var(--icon-ink);
 }
-.job button:hover { border-color: #b6c0cf; color: var(--blue); }
+.job button:hover { border-color: var(--line-hover); color: var(--blue); }
 .backtest-form {
   display: grid;
   grid-template-columns: 1.2fr 1fr 1fr .7fr auto;
@@ -336,15 +424,15 @@ tr:last-child td { border-bottom: 0; }
   border: 1px solid var(--line);
   border-radius: 7px;
   padding: 0 9px;
-  background: white;
+  background: var(--input-bg);
   color: var(--ink);
 }
 .backtest-form button {
   background: var(--blue);
   border-color: var(--blue);
   color: white;
-  padding: 0 14px;
 }
+.backtest-form button:hover { background: var(--blue); }
 .backfill-form {
   display: grid;
   grid-template-columns: repeat(3, minmax(130px, 1fr)) repeat(2, minmax(160px, 1fr));
@@ -364,7 +452,7 @@ tr:last-child td { border-bottom: 0; }
   border: 1px solid var(--line);
   border-radius: 7px;
   padding: 0 9px;
-  background: white;
+  background: var(--input-bg);
   color: var(--ink);
 }
 .backfill-form .check {
@@ -374,8 +462,8 @@ tr:last-child td { border-bottom: 0; }
   border: 1px solid var(--line);
   border-radius: 7px;
   padding: 8px 10px;
-  background: #f8fafc;
-  color: #344054;
+  background: var(--btn-ghost-bg);
+  color: var(--icon-ink);
 }
 .backfill-form input[type="checkbox"] { width: 16px; height: 16px; margin: 0; }
 .backfill-form button {
@@ -385,14 +473,14 @@ tr:last-child td { border-bottom: 0; }
   padding: 0 14px;
 }
 .backfill-form button[type="button"] {
-  background: #ffffff;
-  border-color: #c8d0dc;
-  color: #1f2937;
+  background: var(--panel);
+  border-color: var(--line-strong);
+  color: var(--ink);
 }
 .backfill-status table { min-width: 720px; }
 .artifact-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
 .artifact a {
-  color: #1d4ed8;
+  color: var(--link);
   font-weight: 800;
   text-decoration: none;
   overflow: hidden;
@@ -410,8 +498,8 @@ tr:last-child td { border-bottom: 0; }
   padding: 12px 14px;
   border-radius: 8px;
   border: 1px solid var(--line);
-  background: #111827;
-  color: white;
+  background: var(--toast-bg);
+  color: var(--toast-ink);
   box-shadow: var(--shadow);
   opacity: 0;
   transform: translateY(8px);
@@ -424,9 +512,11 @@ dialog {
   border: 1px solid var(--line);
   border-radius: 8px;
   padding: 0;
+  background: var(--panel);
+  color: var(--ink);
   box-shadow: 0 28px 80px rgba(17,24,39,.22);
 }
-dialog::backdrop { background: rgba(17,24,39,.34); }
+dialog::backdrop { background: var(--backdrop); }
 .dialog-head { display: flex; justify-content: space-between; align-items: center; padding: 12px 14px; border-bottom: 1px solid var(--line); }
 pre { margin: 0; padding: 14px; max-height: 65vh; overflow: auto; background: #0f172a; color: #e5e7eb; font-size: 12px; }
 @media (prefers-reduced-motion: reduce) {

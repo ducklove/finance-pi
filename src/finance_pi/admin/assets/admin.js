@@ -1,5 +1,5 @@
 
-const state = { overview: null, selectedJob: null, datasetFilter: '' };
+const state = { overview: null, selectedJob: null, datasetFilter: '', offline: false };
 const fmt = new Intl.NumberFormat();
 
 function qs(id) { return document.getElementById(id); }
@@ -45,9 +45,24 @@ function adminToken() {
 }
 
 async function refresh() {
-  const overview = await api('/api/overview');
-  state.overview = overview;
-  renderOverview(overview);
+  // 서버 다운/네트워크 단절 시 '--'만 남고 아무 표시가 없던 문제:
+  // 실패하면 Offline 배지를 켜고(전이 시 토스트 1회), 복구되면 끈다.
+  try {
+    const overview = await api('/api/overview');
+    state.overview = overview;
+    renderOverview(overview);
+    if (state.offline) {
+      state.offline = false;
+      qs('offline-pill').hidden = true;
+      showToast('Reconnected to server');
+    }
+  } catch (error) {
+    if (!state.offline) {
+      state.offline = true;
+      showToast(`Overview refresh failed: ${error.message || 'server unreachable'}`);
+    }
+    qs('offline-pill').hidden = false;
+  }
 }
 
 function renderOverview(data) {
@@ -229,6 +244,13 @@ qs('dataset-filter').addEventListener('input', event => {
   if (state.overview) renderDatasets(state.overview.datasets);
 });
 qs('refresh-button').addEventListener('click', refresh);
+qs('theme-button').addEventListener('click', () => {
+  const dark = document.documentElement.getAttribute('data-theme') !== 'dark';
+  document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
+  qs('theme-button').setAttribute('aria-pressed', String(dark));
+  try { localStorage.setItem('theme', dark ? 'dark' : 'light'); } catch (error) { /* 지속 실패는 무시 */ }
+});
+qs('theme-button').setAttribute('aria-pressed', String(document.documentElement.getAttribute('data-theme') === 'dark'));
 qs('close-log').addEventListener('click', () => qs('log-dialog').close());
 qs('backtest-form').addEventListener('submit', event => {
   event.preventDefault();
