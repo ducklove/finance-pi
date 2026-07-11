@@ -31,10 +31,12 @@
 - admin 및 daily systemd 서비스에 `UMask=0077`을 적용했다.
 - daily 서비스의 `--no-strict`를 제거하고 90분 실행 제한, 5 GiB soft limit, 6 GiB hard limit을 추가했다.
 - 배포 시 `.env` 권한을 `0600`으로 강제한다.
+- 배포 시 저장소의 systemd user unit과 Apache proxy 설정을 설치·재로드해 코드와 운영 설정이 함께 반영되도록 했다.
+- Windows 배포 래퍼가 stdin 끝에 CRLF를 덧붙여 정상 배포를 실패로 보고하던 문제를 직접 stdin 스트리밍 방식으로 수정했다.
 - 위 동작을 고정하는 배당 upsert, 최근 공시 refresh, 수집 실패 전파, macro 실패, marker 재시도, 시가총액 빌드, POST 인증, MCP 외부 접근/바이트 제한, 운영 설정 회귀 테스트를 추가했다.
 
 ### 검증 및 반영 상태
 
-- 로컬 테스트: **311/311 통과**, Ruff 통과, statement/branch 종합 coverage 68%
+- 로컬 테스트: **312/312 통과**, Ruff 통과, statement/branch 종합 coverage 68%
 - Raspberry Pi 배포 및 데이터 복구: 진행 중
 - 단계 종료 점수: 배포 후 재평가 예정

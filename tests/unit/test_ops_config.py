@@ -28,3 +28,14 @@ def test_deploy_restricts_environment_file_permissions() -> None:
     deploy = (REPO_ROOT / "ops/deploy.sh").read_text(encoding="utf-8")
 
     assert "chmod 600 .env" in deploy
+    assert 'install -m 0644 "$unit_file"' in deploy
+    assert "systemctl --user daemon-reload" in deploy
+    assert "/etc/apache2/conf-available/finance-pi-admin.conf" in deploy
+
+
+def test_windows_deploy_streams_without_powershell_crlf_pipeline() -> None:
+    deploy = (REPO_ROOT / "ops/deploy-from-windows.ps1").read_text(encoding="utf-8")
+
+    assert "RedirectStandardInput = $true" in deploy
+    assert "$process.StandardInput.Write($script)" in deploy
+    assert "$script | ssh" not in deploy

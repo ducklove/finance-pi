@@ -47,8 +47,20 @@ if ($Stash)       { $deployArgs += "--stash" }
 $argLine = $deployArgs -join " "
 
 Write-Host "Deploying to $Target $argLine"
-# Strip CR so the script survives Windows CRLF checkouts.
+# Write directly to the child process stdin. PowerShell's pipeline appends a
+# CRLF record terminator even after CR stripping, which Bash treats as a final
+# `$'\r'` command and reports as a false deployment failure.
 $script = (Get-Content $scriptPath -Raw) -replace "`r", ""
-$script | ssh $Target "bash -s -- $argLine"
-if ($LASTEXITCODE -ne 0) { throw "deployment failed (exit $LASTEXITCODE)" }
+$startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+$startInfo.FileName = "ssh"
+$startInfo.Arguments = "$Target `"bash -s -- $argLine`""
+$startInfo.UseShellExecute = $false
+$startInfo.RedirectStandardInput = $true
+$process = [System.Diagnostics.Process]::new()
+$process.StartInfo = $startInfo
+if (-not $process.Start()) { throw "could not start ssh" }
+$process.StandardInput.Write($script)
+$process.StandardInput.Close()
+$process.WaitForExit()
+if ($process.ExitCode -ne 0) { throw "deployment failed (exit $($process.ExitCode))" }
 Write-Host "Deployment finished successfully."

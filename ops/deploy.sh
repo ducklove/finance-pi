@@ -88,6 +88,26 @@ else
 fi
 
 log "5/7 restart services"
+USER_UNIT_DIR="$HOME/.config/systemd/user"
+mkdir -p "$USER_UNIT_DIR"
+for unit_file in "$FINANCE_PI_ROOT"/ops/systemd/*.{service,timer}; do
+  [ -f "$unit_file" ] || continue
+  install -m 0644 "$unit_file" "$USER_UNIT_DIR/$(basename "$unit_file")"
+done
+systemctl --user daemon-reload
+
+if command -v apache2ctl >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+  sudo -n install -m 0644 \
+    "$FINANCE_PI_ROOT/ops/apache/finance-pi-admin.conf" \
+    /etc/apache2/conf-available/finance-pi-admin.conf
+  if sudo -n apache2ctl configtest >/dev/null 2>&1; then
+    sudo -n systemctl reload apache2
+    echo "  updated Apache finance-pi proxy configuration"
+  else
+    echo "  WARNING: Apache configuration test failed; proxy was not reloaded"
+  fi
+fi
+
 restart_unit() {
   local unit="$1"
   if systemctl --user list-unit-files --no-legend "$unit" 2>/dev/null | grep -q "^$unit"; then
