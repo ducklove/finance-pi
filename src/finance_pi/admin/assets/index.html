@@ -1,10 +1,10 @@
 <!doctype html>
-<html lang="en">
+<html lang="ko">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="finance-pi data lake operations console: dataset health, yearly backfill, jobs, backtests, and published docs.">
-  <title>finance-pi Admin</title>
+  <meta name="description" content="finance-pi 데이터 레이크 운영 콘솔: 데이터셋 상태, 연도별 백필, 작업, 백테스트, 발행 문서.">
+  <title>finance-pi 관리 콘솔</title>
   <link rel="icon" href="/assets/icon.svg" type="image/svg+xml">
   <script>
     // FOUC 방지: CSS 적용 전에 저장된 테마('theme', 없으면 OS 선호)를 심는다.
@@ -25,16 +25,16 @@
         <span class="brand-mark">fp</span>
         <div>
           <strong>finance-pi</strong>
-          <span>Admin</span>
+          <span>관리 콘솔</span>
         </div>
       </div>
       <nav>
-        <a href="#overview" class="active">Overview</a>
-        <a href="#datasets">Datasets</a>
-        <a href="#backfill">Backfill</a>
-        <a href="#jobs">Jobs</a>
-        <a href="#docs">Docs</a>
-        <a href="#research">Research</a>
+        <a href="#overview" class="active">개요</a>
+        <a href="#datasets">데이터셋</a>
+        <a href="#backfill">백필</a>
+        <a href="#jobs">작업</a>
+        <a href="#docs">문서</a>
+        <a href="#research">리서치</a>
       </nav>
       <div class="rail-foot">
         <span id="server-clock">--</span>
@@ -44,16 +44,16 @@
     <main>
       <header class="topbar">
         <div>
-          <p class="eyebrow">Local Operations</p>
-          <h1>finance-pi Admin</h1>
+          <p class="eyebrow">로컬 운영</p>
+          <h1>finance-pi 관리 콘솔</h1>
         </div>
         <div class="top-actions">
-          <span class="pill offline-pill" id="offline-pill" hidden role="status">Offline — retrying</span>
-          <button class="icon-button" id="theme-button" title="Toggle theme" aria-pressed="false">
+          <span class="pill offline-pill" id="offline-pill" hidden role="status">오프라인 — 재시도 중</span>
+          <button class="icon-button" id="theme-button" title="테마 전환" aria-pressed="false">
             <svg class="icon-moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
             <svg class="icon-sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M4.9 4.9l1.4 1.4m11.4 11.4 1.4 1.4M2 12h2m16 0h2M4.9 19.1l1.4-1.4m11.4-11.4 1.4-1.4"/></svg>
           </button>
-          <button class="icon-button" id="refresh-button" title="Refresh">
+          <button class="icon-button" id="refresh-button" title="새로고침">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 0 0-14.7-4.4L3 9m0 0V3m0 6h6M4 13a8 8 0 0 0 14.7 4.4L21 15m0 0v6m0-6h-6"/></svg>
           </button>
         </div>
@@ -61,85 +61,109 @@
 
       <section class="status-grid" id="overview">
         <article class="metric">
-          <span>Catalog</span>
+          <span>카탈로그</span>
           <strong id="catalog-status">--</strong>
           <small id="catalog-path">--</small>
         </article>
         <article class="metric">
-          <span>Datasets</span>
+          <span>데이터셋</span>
           <strong id="dataset-count">--</strong>
           <small id="dataset-files">--</small>
         </article>
         <article class="metric">
-          <span>Price Coverage</span>
+          <span>시세 커버리지</span>
           <strong id="coverage-start">--</strong>
           <small id="coverage-end">--</small>
         </article>
         <article class="metric">
-          <span>Active Jobs</span>
+          <span>실행 중 작업</span>
           <strong id="active-jobs">--</strong>
           <small id="last-refresh">--</small>
         </article>
       </section>
 
-      <section class="command-band" aria-label="Commands">
+      <section class="chart-grid" aria-label="개요 차트">
+        <article class="panel chart-panel">
+          <div>
+            <h3>데이터셋 용량</h3>
+            <p class="chart-sub">용량 상위 데이터셋 · 레이어별 색상</p>
+          </div>
+          <div class="chart-box" id="chart-datasets"></div>
+        </article>
+        <article class="panel chart-panel">
+          <div>
+            <h3>연도별 백필</h3>
+            <p class="chart-sub">연도별 시세 일수 · 상태별 색상</p>
+          </div>
+          <div class="chart-box" id="chart-backfill"></div>
+        </article>
+        <article class="panel chart-panel">
+          <div>
+            <h3>작업 소요 시간</h3>
+            <p class="chart-sub">최근 완료된 작업 · 완료/실패 색상</p>
+          </div>
+          <div class="chart-box" id="chart-jobs"></div>
+        </article>
+      </section>
+
+      <section class="command-band" aria-label="명령">
         <button data-action="build_all">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19h16M4 15h10M4 11h16M4 7h10"/></svg>
-          Build All
+          전체 빌드
         </button>
         <button data-action="catalog_build">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v14H4zM8 5v14M4 10h16"/></svg>
-          Catalog
+          카탈로그
         </button>
         <button data-action="daily_no_ingest">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h14v14H5zM8 9h8M8 13h5"/></svg>
-          Daily Dry
+          데일리 드라이런
         </button>
         <button data-action="daily">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
-          Daily Live
+          데일리 실행
         </button>
         <button data-action="reports">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 19V5h14v14zM8 15h8M8 11h8M8 7h4"/></svg>
-          Reports
+          리포트
         </button>
         <button data-action="docs_build">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h10l4 4v12H5zM14 4v5h5M8 13h8M8 17h6"/></svg>
-          Docs
+          문서 빌드
         </button>
       </section>
 
       <section class="panel" id="backfill">
         <div class="panel-head">
           <div>
-            <p class="eyebrow">Historical Data</p>
-            <h2>Yearly Backfill</h2>
+            <p class="eyebrow">과거 데이터</p>
+            <h2>연도별 백필</h2>
           </div>
           <span class="pill" id="backfill-summary">--</span>
         </div>
         <form id="backfill-form" class="backfill-form">
-          <label>Start Year<input name="start_year" type="number" min="1900" max="2100" value="2023"></label>
-          <label>End Year<input name="end_year" type="number" min="1900" max="2100" value="1990"></label>
-          <label>Chunks<input name="max_years" type="number" min="0" max="50" value="1"></label>
-          <label class="check"><input name="include_prices" type="checkbox" checked disabled> Naver prices</label>
-          <label class="check"><input name="include_financials" type="checkbox" checked> DART financials</label>
-          <label class="check"><input name="include_builds" type="checkbox" checked disabled> Silver/Gold builds</label>
+          <label>시작 연도<input name="start_year" type="number" min="1900" max="2100" value="2023"></label>
+          <label>종료 연도<input name="end_year" type="number" min="1900" max="2100" value="1990"></label>
+          <label>청크 수<input name="max_years" type="number" min="0" max="50" value="1"></label>
+          <label class="check"><input name="include_prices" type="checkbox" checked disabled> Naver 시세</label>
+          <label class="check"><input name="include_financials" type="checkbox" checked> DART 재무</label>
+          <label class="check"><input name="include_builds" type="checkbox" checked disabled> Silver/Gold 빌드</label>
           <label class="check"><input name="include_fundamentals_pit" type="checkbox"> Fundamentals PIT</label>
-          <label class="check"><input name="no_strict" type="checkbox" checked> Continue on source errors</label>
-          <label class="check"><input name="force" type="checkbox"> Force completed years</label>
-          <button type="submit">Run Next</button>
-          <button type="button" id="backfill-dry-run">Dry Run</button>
+          <label class="check"><input name="no_strict" type="checkbox" checked> 소스 오류 시 계속</label>
+          <label class="check"><input name="force" type="checkbox"> 완료 연도 강제 재실행</label>
+          <button type="submit">다음 실행</button>
+          <button type="button" id="backfill-dry-run">드라이런</button>
         </form>
         <div class="table-wrap backfill-status">
           <table>
             <thead>
               <tr>
-                <th>Year</th>
-                <th>Status</th>
-                <th>Price Days</th>
-                <th>Rows</th>
-                <th>Coverage</th>
-                <th>Marker</th>
+                <th>연도</th>
+                <th>상태</th>
+                <th>시세 일수</th>
+                <th>행 수</th>
+                <th>커버리지</th>
+                <th>마커</th>
               </tr>
             </thead>
             <tbody id="backfill-body"></tbody>
@@ -151,11 +175,11 @@
         <div class="panel" id="datasets">
           <div class="panel-head">
           <div>
-            <p class="eyebrow">Lakehouse</p>
-            <h2>Dataset Health</h2>
+            <p class="eyebrow">레이크하우스</p>
+            <h2>데이터셋 상태</h2>
           </div>
           <div class="panel-tools">
-            <input class="filter-input" id="dataset-filter" type="search" placeholder="Filter datasets" aria-label="Filter datasets">
+            <input class="filter-input" id="dataset-filter" type="search" placeholder="데이터셋 필터" aria-label="데이터셋 필터">
             <span class="pill" id="data-root">--</span>
           </div>
         </div>
@@ -163,13 +187,13 @@
             <table>
               <thead>
                 <tr>
-                  <th>Dataset</th>
-                  <th>Layer</th>
-                  <th>Rows</th>
-                  <th>Files</th>
-                  <th>Coverage</th>
-                  <th>Size</th>
-                  <th>Status</th>
+                  <th>데이터셋</th>
+                  <th>레이어</th>
+                  <th>행 수</th>
+                  <th>파일</th>
+                  <th>커버리지</th>
+                  <th>용량</th>
+                  <th>상태</th>
                 </tr>
               </thead>
               <tbody id="dataset-body"></tbody>
@@ -181,8 +205,8 @@
           <section class="panel" id="jobs">
             <div class="panel-head">
               <div>
-                <p class="eyebrow">Queue</p>
-                <h2>Jobs</h2>
+                <p class="eyebrow">대기열</p>
+                <h2>작업</h2>
               </div>
               <span class="pill" id="job-count">--</span>
             </div>
@@ -192,20 +216,20 @@
           <section class="panel" id="research">
             <div class="panel-head">
               <div>
-                <p class="eyebrow">Research</p>
-                <h2>Backtest</h2>
+                <p class="eyebrow">리서치</p>
+                <h2>백테스트</h2>
               </div>
             </div>
             <form id="backtest-form" class="backtest-form">
-              <label>Factor<select name="factor">
+              <label>팩터<select name="factor">
                 <option value="momentum_12_1">momentum_12_1</option>
                 <option value="value_earnings_yield">value_earnings_yield</option>
                 <option value="quality_roa">quality_roa</option>
               </select></label>
-              <label>Start<input name="start" type="date" value="2024-01-01"></label>
-              <label>End<input name="end" type="date"></label>
-              <label>Top<input name="top_fraction" type="number" step="0.01" min="0.01" max="1" value="0.10"></label>
-              <button type="submit">Run</button>
+              <label>시작일<input name="start" type="date" value="2024-01-01"></label>
+              <label>종료일<input name="end" type="date"></label>
+              <label>상위 비율<input name="top_fraction" type="number" step="0.01" min="0.01" max="1" value="0.10"></label>
+              <button type="submit">실행</button>
             </form>
             <div id="backtests-list" class="run-list"></div>
           </section>
@@ -215,8 +239,8 @@
       <section class="panel">
         <div class="panel-head">
           <div>
-            <p class="eyebrow">Reports</p>
-            <h2>Latest Artifacts</h2>
+            <p class="eyebrow">리포트</p>
+            <h2>최신 산출물</h2>
           </div>
         </div>
         <div id="reports-list" class="artifact-grid"></div>
@@ -225,10 +249,10 @@
       <section class="panel" id="docs">
         <div class="panel-head">
           <div>
-            <p class="eyebrow">Published</p>
-            <h2>Documentation</h2>
+            <p class="eyebrow">발행됨</p>
+            <h2>문서</h2>
           </div>
-          <a class="pill" id="docs-open" href="/docs/" target="_blank" rel="noreferrer">Open docs</a>
+          <a class="pill" id="docs-open" href="/docs/" target="_blank" rel="noreferrer">문서 열기</a>
         </div>
         <div id="docs-list" class="artifact-grid"></div>
       </section>
@@ -237,8 +261,8 @@
 
   <dialog id="log-dialog">
     <div class="dialog-head">
-      <strong id="log-title">Job Log</strong>
-      <button class="icon-button" id="close-log" title="Close">
+      <strong id="log-title">작업 로그</strong>
+      <button class="icon-button" id="close-log" title="닫기">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
       </button>
     </div>
@@ -246,6 +270,7 @@
   </dialog>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
+  <script src="/assets/charts.js"></script>
   <script src="/assets/admin.js"></script>
 </body>
 </html>

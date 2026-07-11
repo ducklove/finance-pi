@@ -247,6 +247,7 @@ ASSETS_DIR = Path(__file__).parent / "assets"
 INDEX_HTML = (ASSETS_DIR / "index.html").read_text(encoding="utf-8")
 ADMIN_CSS = (ASSETS_DIR / "admin.css").read_text(encoding="utf-8")
 ADMIN_JS = (ASSETS_DIR / "admin.js").read_text(encoding="utf-8")
+ADMIN_CHARTS_JS = (ASSETS_DIR / "charts.js").read_text(encoding="utf-8")
 ADMIN_ICON = (ASSETS_DIR / "icon.svg").read_text(encoding="utf-8")
 
 
@@ -925,6 +926,8 @@ def _handler_for(state: AdminState) -> type[BaseHTTPRequestHandler]:
                     self._send_text(ADMIN_CSS, "text/css; charset=utf-8")
                 elif parsed.path == "/assets/admin.js":
                     self._send_text(ADMIN_JS, "application/javascript; charset=utf-8")
+                elif parsed.path == "/assets/charts.js":
+                    self._send_text(ADMIN_CHARTS_JS, "application/javascript; charset=utf-8")
                 elif parsed.path == "/assets/icon.svg":
                     self._send_text(ADMIN_ICON, "image/svg+xml; charset=utf-8")
                 elif parsed.path == "/api/overview":

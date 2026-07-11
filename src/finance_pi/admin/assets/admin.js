@@ -13,6 +13,25 @@ function html(value) {
   })[char]);
 }
 function shortDate(value) { return value ? String(value).replace('T', ' ').slice(0, 19) : '--'; }
+
+// 상태 코드(ready/done/…)는 CSS 클래스·API 값이라 원문을 유지하고,
+// 화면에 보이는 배지 텍스트만 한국어로 매핑한다.
+const STATUS_LABELS = {
+  ready: '준비됨',
+  empty: '비어 있음',
+  queued: '대기 중',
+  running: '실행 중',
+  done: '완료',
+  failed: '실패',
+  complete: '완료',
+  complete_with_failures: '완료(실패 포함)',
+  partial: '부분',
+  missing: '미수집',
+};
+function statusLabel(status) {
+  const key = String(status || '');
+  return STATUS_LABELS[key] || key || '--';
+}
 function bytes(value) {
   if (!value) return '0 B';
   const units = ['B', 'KB', 'MB', 'GB', 'TB'];
@@ -54,12 +73,12 @@ async function refresh() {
     if (state.offline) {
       state.offline = false;
       qs('offline-pill').hidden = true;
-      showToast('Reconnected to server');
+      showToast('서버에 다시 연결되었습니다');
     }
   } catch (error) {
     if (!state.offline) {
       state.offline = true;
-      showToast(`Overview refresh failed: ${error.message || 'server unreachable'}`);
+      showToast(`개요 갱신 실패: ${error.message || '서버에 연결할 수 없습니다'}`);
     }
     qs('offline-pill').hidden = false;
   }
@@ -67,14 +86,14 @@ async function refresh() {
 
 function renderOverview(data) {
   qs('server-clock').textContent = shortDate(data.generated_at);
-  qs('catalog-status').textContent = data.catalog.exists ? 'Ready' : 'Missing';
+  qs('catalog-status').textContent = data.catalog.exists ? '준비됨' : '없음';
   qs('catalog-path').textContent = data.catalog.path;
   qs('dataset-count').textContent = `${data.datasets.filter(d => d.files > 0).length}/${data.datasets.length}`;
-  qs('dataset-files').textContent = `${fmt.format(data.datasets.reduce((n, d) => n + d.files, 0))} files`;
+  qs('dataset-files').textContent = `파일 ${fmt.format(data.datasets.reduce((n, d) => n + d.files, 0))}개`;
   qs('coverage-start').textContent = data.price_coverage.start || '--';
   qs('coverage-end').textContent = data.price_coverage.end
-    ? `to ${data.price_coverage.end}`
-    : 'no price data yet';
+    ? `~ ${data.price_coverage.end}`
+    : '시세 데이터 없음';
   qs('active-jobs').textContent = data.jobs.filter(j => j.status === 'running').length;
   qs('last-refresh').textContent = shortDate(data.generated_at);
   qs('data-root').textContent = data.data_root;
@@ -84,6 +103,7 @@ function renderOverview(data) {
   renderDocs(data.docs);
   renderBacktests(data.backtests);
   renderBackfill(data.backfill);
+  if (typeof renderOverviewCharts === 'function') renderOverviewCharts(data);
   const maxDate = data.max_price_date || new Date().toISOString().slice(0, 10);
   document.querySelector('#backtest-form [name=end]').value = maxDate;
 }
@@ -95,7 +115,7 @@ function renderDatasets(datasets) {
     ? datasets.filter(d => `${d.name} ${d.layer} ${d.latest_partition || ''}`.toLowerCase().includes(needle))
     : datasets;
   if (!visible.length) {
-    qs('dataset-body').innerHTML = '<tr><td colspan="7">No matching datasets</td></tr>';
+    qs('dataset-body').innerHTML = '<tr><td colspan="7">일치하는 데이터셋이 없습니다</td></tr>';
     return;
   }
   qs('dataset-body').innerHTML = visible.map(d => `
@@ -106,7 +126,7 @@ function renderDatasets(datasets) {
       <td>${fmt.format(d.files)}</td>
       <td>${html(coverageLabel(d))}</td>
       <td>${bytes(d.bytes)}</td>
-      <td><span class="status ${html(d.status)}">${html(d.status)}</span></td>
+      <td><span class="status ${html(d.status)}">${html(statusLabel(d.status))}</span></td>
     </tr>`).join('');
 }
 
@@ -127,14 +147,14 @@ function renderJobs(jobs) {
     <div class="job">
       <div class="job-row">
         <strong>${html(job.label)}</strong>
-        <span class="status ${html(job.status)}">${html(job.status)}</span>
+        <span class="status ${html(job.status)}">${html(statusLabel(job.status))}</span>
       </div>
       <small>${shortDate(job.started_at)}${job.ended_at ? ' - ' + shortDate(job.ended_at) : ''}</small>
       <div class="job-row">
         <small>${html(job.command)}</small>
-        <button data-log="${html(job.id)}">Log</button>
+        <button data-log="${html(job.id)}">로그</button>
       </div>
-    </div>`).join('') : '<div class="artifact"><span>No jobs yet</span></div>';
+    </div>`).join('') : '<div class="artifact"><span>작업 이력이 없습니다</span></div>';
   document.querySelectorAll('[data-log]').forEach(button => button.addEventListener('click', () => openLog(button.dataset.log)));
 }
 
@@ -144,7 +164,7 @@ function renderReports(reports) {
       <a href="${html(withTokenUrl(report.url))}" target="_blank" rel="noreferrer">${html(report.name)}</a>
       <span>${html(report.kind)}</span>
       <span>${shortDate(report.modified_at)}</span>
-    </div>`).join('') : '<div class="artifact"><span>No reports yet</span></div>';
+    </div>`).join('') : '<div class="artifact"><span>리포트가 없습니다</span></div>';
 }
 
 function renderDocs(docs) {
@@ -153,30 +173,30 @@ function renderDocs(docs) {
       <a href="${html(doc.url)}" target="_blank" rel="noreferrer">${html(doc.title)}</a>
       <span>${html(doc.source)}</span>
       <span>${shortDate(doc.modified_at)}</span>
-    </div>`).join('') : '<div class="artifact"><span>No published docs yet</span></div>';
+    </div>`).join('') : '<div class="artifact"><span>발행된 문서가 없습니다</span></div>';
 }
 
 function renderBacktests(runs) {
   qs('backtests-list').innerHTML = runs.length ? runs.map(run => `
     <div class="artifact">
       <a href="${html(withTokenUrl(run.url))}" target="_blank" rel="noreferrer">${html(run.name)}</a>
-      <span>${run.nav_rows} nav rows${run.final_nav ? ' / NAV ' + run.final_nav.toFixed(4) : ''}</span>
-    </div>`).join('') : '<div class="artifact"><span>No backtests yet</span></div>';
+      <span>NAV ${run.nav_rows}행${run.final_nav ? ' / 최종 NAV ' + run.final_nav.toFixed(4) : ''}</span>
+    </div>`).join('') : '<div class="artifact"><span>백테스트 결과가 없습니다</span></div>';
 }
 
 function renderBackfill(backfill) {
   const items = (backfill && backfill.years) || [];
   const complete = items.filter(item => String(item.status || '').startsWith('complete')).length;
-  qs('backfill-summary').textContent = items.length ? `${complete}/${items.length} years complete` : 'no status';
+  qs('backfill-summary').textContent = items.length ? `${items.length}개 연도 중 ${complete}개 완료` : '상태 없음';
   qs('backfill-body').innerHTML = items.length ? items.map(item => `
     <tr>
       <td><strong>${html(item.year)}</strong></td>
-      <td><span class="status ${statusClass(item.status)}">${html(item.status)}</span></td>
+      <td><span class="status ${statusClass(item.status)}">${html(statusLabel(item.status))}</span></td>
       <td>${fmt.format(item.price_days || 0)}</td>
       <td>${item.rows == null ? '--' : fmt.format(item.rows)}</td>
       <td>${html(item.coverage || '--')}</td>
       <td>${html(item.marker || '-')}</td>
-    </tr>`).join('') : '<tr><td colspan="6">No backfill status yet</td></tr>';
+    </tr>`).join('') : '<tr><td colspan="6">백필 상태 정보가 없습니다</td></tr>';
 }
 
 function statusClass(status) {
@@ -211,10 +231,10 @@ async function startAction(action, payload = {}, sourceButton = null) {
   }
   try {
     const job = await api('/api/jobs', { method: 'POST', body: JSON.stringify({ action, ...payload }) });
-    showToast(`${job.label} queued`);
+    showToast(`${job.label} 대기열에 추가됨`);
     await refresh();
   } catch (error) {
-    showToast(error.message || 'Action failed');
+    showToast(error.message || '작업 요청에 실패했습니다');
   } finally {
     if (sourceButton) {
       sourceButton.disabled = false;
@@ -226,7 +246,7 @@ async function startAction(action, payload = {}, sourceButton = null) {
 async function openLog(id) {
   const data = await api(`/api/jobs/${id}/log`);
   qs('log-title').textContent = data.label;
-  qs('job-log').textContent = data.log || '(empty)';
+  qs('job-log').textContent = data.log || '(비어 있음)';
   qs('log-dialog').showModal();
 }
 
@@ -249,6 +269,8 @@ qs('theme-button').addEventListener('click', () => {
   document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
   qs('theme-button').setAttribute('aria-pressed', String(dark));
   try { localStorage.setItem('theme', dark ? 'dark' : 'light'); } catch (error) { /* 지속 실패는 무시 */ }
+  // 차트 색은 CSS 토큰을 읽어 그리므로 테마가 바뀌면 다시 그린다.
+  if (typeof rerenderOverviewCharts === 'function') rerenderOverviewCharts();
 });
 qs('theme-button').setAttribute('aria-pressed', String(document.documentElement.getAttribute('data-theme') === 'dark'));
 qs('close-log').addEventListener('click', () => qs('log-dialog').close());

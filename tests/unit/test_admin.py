@@ -1763,6 +1763,25 @@ def test_admin_large_json_supports_gzip(tmp_path) -> None:
     assert json.loads(gzip.decompress(body))["workspace"] == tmp_path.resolve().name
 
 
+def test_admin_serves_overview_charts_asset(tmp_path) -> None:
+    handler = _make_handler(
+        AdminState(tmp_path),
+        path="/assets/charts.js",
+        method="GET",
+    )
+
+    handler.do_GET()
+
+    assert _handler_response_status(handler) == HTTPStatus.OK
+    handler.wfile.seek(0)
+    body = handler.wfile.read().split(b"\r\n\r\n", 1)[1]
+    assert b"renderOverviewCharts" in body
+    # index.html은 charts.js를 admin.js보다 먼저 로드해야 한다(전역 함수 계약).
+    index_html = admin_server.INDEX_HTML
+    assert index_html.index("/assets/charts.js") < index_html.index("/assets/admin.js")
+    assert '<html lang="ko">' in index_html
+
+
 def test_admin_local_network_clients_bypass_token() -> None:
     assert _is_local_admin_client("127.0.0.1")
     assert _is_local_admin_client("192.168.0.10")

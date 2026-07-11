@@ -519,11 +519,29 @@ dialog {
 dialog::backdrop { background: var(--backdrop); }
 .dialog-head { display: flex; justify-content: space-between; align-items: center; padding: 12px 14px; border-bottom: 1px solid var(--line); }
 pre { margin: 0; padding: 14px; max-height: 65vh; overflow: auto; background: #0f172a; color: #e5e7eb; font-size: 12px; }
+/* Overview SVG 차트(charts.js) — 색은 위 디자인 토큰을 charts.js가 읽어 쓴다. */
+.chart-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+.chart-panel { padding: 14px; display: grid; gap: 10px; align-content: start; }
+.chart-panel h3 { margin: 0; font-size: 14px; }
+.chart-sub { margin: 2px 0 0; color: var(--muted); font-size: 12px; }
+.chart-box { min-height: 150px; display: grid; align-items: center; }
+.chart-box svg { width: 100%; height: auto; display: block; }
+.chart-empty {
+  min-height: 150px;
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  font-size: 12px;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  background: var(--panel-soft);
+}
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; }
 }
 @media (max-width: 1120px) {
   .status-grid, .artifact-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .chart-grid { grid-template-columns: 1fr; }
   .command-band { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .backfill-form { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .split { grid-template-columns: 1fr; }
