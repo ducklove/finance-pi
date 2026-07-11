@@ -148,7 +148,7 @@ if curl -fsS --max-time 15 "$ADMIN_URL/api/ready" >/dev/null 2>&1; then
   echo "  admin readiness: OK"
   "$PY" -m finance_pi.cli.app check-admin "$ADMIN_URL"
 else
-  echo "  WARNING: admin is live but not ready at $ADMIN_URL/api/ready"
+  fail "admin is live but not ready at $ADMIN_URL/api/ready"
 fi
 FACTOR_COUNT=$("$PY" -m finance_pi.cli.app factors list | wc -l | tr -d ' ')
 echo "  registered factors: $FACTOR_COUNT (expected 13 or more)"
