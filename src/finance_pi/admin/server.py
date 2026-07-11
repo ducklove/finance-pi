@@ -1227,7 +1227,8 @@ def _readiness_payload(state: AdminState) -> dict[str, Any]:
     if checks["catalog"]:
         try:
             latest_date, latest_rows, dataset_count = _readiness_catalog_snapshot(
-                state.paths.catalog_path
+                state.paths.catalog_path,
+                state.paths.data_root,
             )
             checks["catalog_query"] = True
             checks["catalog_datasets"] = dataset_count >= len(dataset_registry)
@@ -1281,17 +1282,20 @@ def _readiness_payload(state: AdminState) -> dict[str, Any]:
     }
 
 
-def _readiness_catalog_snapshot(catalog_path: Path) -> tuple[date | None, int, int]:
+def _readiness_catalog_snapshot(
+    catalog_path: Path,
+    data_root: Path,
+) -> tuple[date | None, int, int]:
+    files = sorted(data_root.glob("gold/daily_prices_adj/dt=*/part.parquet"))
+    latest_path = files[-1] if files else None
+    latest_date = (
+        date.fromisoformat(latest_path.parent.name.removeprefix("dt="))
+        if latest_path is not None
+        else None
+    )
+    latest_rows = pl.read_parquet(latest_path).height if latest_path is not None else 0
     with duckdb.connect(str(catalog_path), read_only=True) as conn:
-        latest_date, latest_rows = conn.execute(
-            """
-            WITH latest AS (SELECT max(date) AS date FROM gold.daily_prices_adj)
-            SELECT latest.date, count(p.date)
-            FROM latest
-            LEFT JOIN gold.daily_prices_adj AS p ON p.date = latest.date
-            GROUP BY latest.date
-            """
-        ).fetchone()
+        conn.execute("SELECT 1 FROM gold.daily_prices_adj LIMIT 1").fetchone()
         dataset_count = conn.execute("SELECT count(*) FROM metadata.datasets").fetchone()[0]
     return latest_date, int(latest_rows), int(dataset_count)
 

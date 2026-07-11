@@ -144,7 +144,16 @@ fi
 
 log "6/7 runtime verification"
 sleep 2
-if curl -fsS --max-time 15 "$ADMIN_URL/api/ready" >/dev/null 2>&1; then
+READY=0
+for attempt in 1 2 3; do
+  if curl -fsS --max-time 15 "$ADMIN_URL/api/ready" >/dev/null 2>&1; then
+    READY=1
+    break
+  fi
+  echo "  readiness attempt $attempt/3 did not pass; retrying"
+  sleep 2
+done
+if [ "$READY" -eq 1 ]; then
   echo "  admin readiness: OK"
   "$PY" -m finance_pi.cli.app check-admin "$ADMIN_URL"
 else

@@ -1702,7 +1702,11 @@ def test_admin_readiness_accepts_fresh_complete_catalog(tmp_path, monkeypatch) -
     monkeypatch.setattr(
         admin_server,
         "_readiness_catalog_snapshot",
-        lambda path: (date(2026, 7, 10), 3_900, len(admin_server.dataset_registry)),
+        lambda catalog_path, data_root: (
+            date(2026, 7, 10),
+            3_900,
+            len(admin_server.dataset_registry),
+        ),
     )
 
     payload = _readiness_payload(state)
