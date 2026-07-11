@@ -96,11 +96,15 @@ for unit_file in "$FINANCE_PI_ROOT"/ops/systemd/*.{service,timer}; do
 done
 systemctl --user daemon-reload
 
-if command -v apache2ctl >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+APACHECTL=$(command -v apache2ctl 2>/dev/null || true)
+if [ -z "$APACHECTL" ] && [ -x /usr/sbin/apache2ctl ]; then
+  APACHECTL=/usr/sbin/apache2ctl
+fi
+if [ -n "$APACHECTL" ] && sudo -n true 2>/dev/null; then
   sudo -n install -m 0644 \
     "$FINANCE_PI_ROOT/ops/apache/finance-pi-admin.conf" \
     /etc/apache2/conf-available/finance-pi-admin.conf
-  if sudo -n apache2ctl configtest >/dev/null 2>&1; then
+  if sudo -n "$APACHECTL" configtest >/dev/null 2>&1; then
     sudo -n systemctl reload apache2
     echo "  updated Apache finance-pi proxy configuration"
   else

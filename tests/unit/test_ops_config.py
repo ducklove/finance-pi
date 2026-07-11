@@ -31,6 +31,7 @@ def test_deploy_restricts_environment_file_permissions() -> None:
     assert 'install -m 0644 "$unit_file"' in deploy
     assert "systemctl --user daemon-reload" in deploy
     assert "/etc/apache2/conf-available/finance-pi-admin.conf" in deploy
+    assert "/usr/sbin/apache2ctl" in deploy
 
 
 def test_windows_deploy_streams_without_powershell_crlf_pipeline() -> None:

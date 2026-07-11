@@ -38,5 +38,15 @@
 ### 검증 및 반영 상태
 
 - 로컬 테스트: **312/312 통과**, Ruff 통과, statement/branch 종합 coverage 68%
-- Raspberry Pi 배포 및 데이터 복구: 진행 중
-- 단계 종료 점수: 배포 후 재평가 예정
+- Raspberry Pi 코드 배포: `035fa39`, 서버 전체 테스트 312개 및 admin health 통과
+- 운영 설정: daily strict 실행, 90분 timeout, MemoryHigh 5 GiB, MemoryMax 6 GiB, admin/daily `UMask=0077`, Apache `/files` proxy, `.env` mode `0600` 실적용 확인
+- 보안 실검증: Apache 경유 무토큰 `POST /api/jobs`는 401, MCP 정상 카탈로그 질의는 성공하고 데이터 루트 밖 `read_text('README.md')`는 차단
+- 시가총액 복구: `silver.market_caps` 15,214,118행, `gold.daily_market_caps` 최신 2026-07-10까지 재생성
+- 배당 복구: OpenDART 8,915건을 연도별 처리해 전체 11,538행으로 복원. 2023/2024/2025 회계연도는 각각 3,720/2,539/1,325행, 1,165/1,146/1,156개 기업이며 업무 키 중복 0건
+- 단계 종료 운영 신뢰도: **68/100**
+  - 데이터 정합성 21/35: 배당·시가총액 손상은 복구했으나 재무제표 원본 grain과 PIT 충돌이 남음
+  - 수집 완성도 14/20: 실패 전파·재시도·최신 공시 refresh를 확보했으나 과거 실패 backfill과 빈 데이터셋이 남음
+  - 서빙 안정성 15/20: strict/timeout/memory limit과 경로 정합성을 확보했으나 readiness와 원자적 catalog publish가 남음
+  - 보안 8/10: POST와 MCP 경계를 닫았으나 세분화된 권한과 감사 로그 강화가 남음
+  - 성능 7/10: 현재 부하는 안정적이나 대형 screener 응답 최적화가 남음
+  - 운영 복구성 3/5: 배포 재현성은 개선했으나 검증된 백업·복구 훈련이 남음
