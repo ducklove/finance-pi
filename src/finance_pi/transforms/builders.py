@@ -1984,6 +1984,9 @@ def _normalize_price_frame(frame: pl.DataFrame, source: str) -> pl.DataFrame:
         pl.lit(False).alias("is_halted"),
         pl.lit(False).alias("is_designated"),
         pl.lit(False).alias("is_liquidation_window"),
+    ).with_columns(
+        pl.max_horizontal("open", "high", "low", "close").alias("high"),
+        pl.min_horizontal("open", "high", "low", "close").alias("low"),
     ).select(
         [
             "date",
@@ -2565,6 +2568,17 @@ def _security_master_from_prices(
         .alias("share_class"),
         pl.when(pl.col("name").str.contains("스팩|SPAC", literal=False))
         .then(pl.lit("spac_pre"))
+        .when(pl.col("name").str.contains("ETN", literal=False))
+        .then(pl.lit("etn"))
+        .when(pl.col("name").str.contains("리츠|REIT", literal=False))
+        .then(pl.lit("reit"))
+        .when(
+            pl.col("name").str.contains(
+                r"^(KODEX|TIGER|ACE|RISE|HANARO|SOL|PLUS|KOSEF|ARIRANG|WON|TIMEFOLIO|KBSTAR|KINDEX)\s",
+                literal=False,
+            )
+        )
+        .then(pl.lit("etf"))
         .otherwise(pl.lit("equity"))
         .alias("security_type"),
         delisted_expr.alias("delisted_date"),

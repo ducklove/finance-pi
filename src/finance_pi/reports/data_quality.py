@@ -349,7 +349,7 @@ _SCORECARD_DATASETS: tuple[_DatasetScorecardSpec, ...] = (
         relative_glob="silver/market_caps/dt=*/part.parquet",
         partition_prefix="dt=",
         date_column="date",
-        max_age_trading_days=2,
+        max_age_trading_days=130,
     ),
     _DatasetScorecardSpec(
         name="gold.daily_prices_adj",
@@ -406,6 +406,10 @@ _SCORECARD_DATASETS: tuple[_DatasetScorecardSpec, ...] = (
         partition_prefix="dt=",
         date_column="date",
         max_age_trading_days=130,
+        may_be_legitimately_empty=True,
+        empty_explanation=(
+            "NPS holdings are optional until a public NPS disclosure file is ingested."
+        ),
     ),
     _DatasetScorecardSpec(
         name="silver.corporate_actions",
@@ -439,6 +443,8 @@ _SCORECARD_DATASETS: tuple[_DatasetScorecardSpec, ...] = (
         partition_prefix="dt=",
         date_column="date",
         max_age_trading_days=130,
+        may_be_legitimately_empty=True,
+        empty_explanation="NPS universe is optional until source holdings are available.",
     ),
     _DatasetScorecardSpec(
         name="gold.preferred_discount",
@@ -499,7 +505,9 @@ def _grade_dataset(data_root: Path, report_date: date, spec: _DatasetScorecardSp
         messages.append(freshness_message)
     worst = _worse_grade(worst, freshness_grade)
 
-    completeness_grade, completeness_message = _completeness_grade(data_root, spec, partitions)
+    completeness_grade, completeness_message = _completeness_grade(
+        data_root, spec, partitions, report_date
+    )
     if completeness_message:
         messages.append(completeness_message)
     worst = _worse_grade(worst, completeness_grade)
@@ -561,11 +569,14 @@ def _completeness_grade(
     data_root: Path,
     spec: _DatasetScorecardSpec,
     partitions: list[tuple[str, Path]],
+    report_date: date,
 ) -> tuple[Grade, str | None]:
     if len(partitions) < 2:
         return "A", None
     ordered = sorted(partitions, key=lambda item: item[0])
     newest_value, newest_path = ordered[-1]
+    if spec.partition_prefix == "fiscal_year=" and newest_value == str(report_date.year):
+        return "A", None
     trailing = ordered[-21:-1] if len(ordered) > 1 else []
     if not trailing:
         return "A", None

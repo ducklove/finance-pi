@@ -1,6 +1,7 @@
 # ruff: noqa: E501
 from __future__ import annotations
 
+import gzip
 import json
 import os
 import re
@@ -278,6 +279,7 @@ class AdminState:
     price_cache_seconds = 60.0
     realtime_cache_seconds = 15.0
     quotes_cache_seconds = 15.0
+    screener_cache_seconds = 300.0
     price_cache_max_entries = 512
 
     def __init__(self, root: Path, token: str | None = None) -> None:
@@ -296,6 +298,7 @@ class AdminState:
             tuple[tuple[str, ...], int],
             tuple[float, dict[str, list[dict[str, Any]]]],
         ] = {}
+        self._screener_cache: dict[date, tuple[float, dict[str, Any]]] = {}
         self._job_slots = threading.BoundedSemaphore(_admin_max_jobs())
         self._price_query_slots = threading.BoundedSemaphore(_admin_max_price_queries())
 
@@ -658,11 +661,26 @@ class AdminState:
             self._price_query_slots.release()
 
     def _run_screener_query(self, as_of: date) -> dict[str, Any]:
+        now = time.monotonic()
+        with self.lock:
+            cached_item = self._screener_cache.get(as_of)
+            if cached_item is not None:
+                cached_at, cached = cached_item
+                if now - cached_at < self.screener_cache_seconds:
+                    return deepcopy(cached)
         self._acquire_data_query_slot("screener", [], as_of, None)
         try:
-            return _query_screener_batch(self.paths, as_of)
+            result = _query_screener_batch(self.paths, as_of)
         finally:
             self._price_query_slots.release()
+        with self.lock:
+            self._screener_cache[as_of] = (time.monotonic(), deepcopy(result))
+            if len(self._screener_cache) > 8:
+                oldest_key = min(
+                    self._screener_cache, key=lambda key: self._screener_cache[key][0]
+                )
+                self._screener_cache.pop(oldest_key, None)
+        return result
 
     def _run_macro_query(
         self,
@@ -1089,7 +1107,16 @@ def _handler_for(state: AdminState) -> type[BaseHTTPRequestHandler]:
 
         def _send_json(self, payload: Any, status: HTTPStatus = HTTPStatus.OK) -> None:
             body = json.dumps(payload, default=str).encode("utf-8")
-            self._send_bytes(body, "application/json; charset=utf-8", status)
+            headers: dict[str, str] | None = None
+            if len(body) >= 1_024 and "gzip" in self.headers.get("Accept-Encoding", "").lower():
+                body = gzip.compress(body, compresslevel=5)
+                headers = {"Content-Encoding": "gzip", "Vary": "Accept-Encoding"}
+            self._send_bytes(
+                body,
+                "application/json; charset=utf-8",
+                status,
+                headers=headers,
+            )
 
         def _send_text(
             self,
@@ -1110,11 +1137,14 @@ def _handler_for(state: AdminState) -> type[BaseHTTPRequestHandler]:
             payload: bytes,
             content_type: str,
             status: HTTPStatus = HTTPStatus.OK,
+            headers: dict[str, str] | None = None,
         ) -> None:
             self.send_response(status)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(payload)))
             self.send_header("Cache-Control", "no-store")
+            for name, value in (headers or {}).items():
+                self.send_header(name, value)
             self.end_headers()
             self.wfile.write(payload)
             self._log_access(status, len(payload))
@@ -3171,7 +3201,7 @@ def _query_screener_rows_catalog(
                 FROM analytics.daily_prices AS dp, latest_day
                 WHERE dp.date = latest_day.d
                   AND dp.market IN ('KOSPI', 'KOSDAQ')
-                  AND dp.security_type IS DISTINCT FROM 'spac_pre'
+                  AND dp.security_type = 'equity'
                   AND dp.ticker IS NOT NULL
                   AND dp.name NOT LIKE '%리츠%'
                   AND dp.name NOT ILIKE '%reit%'
@@ -3373,7 +3403,7 @@ def _query_screener_rows_parquet(
                     ON p.security_id = sm.security_id
                 WHERE p.date <= ?
                   AND sm.market IN ('KOSPI', 'KOSDAQ')
-                  AND sm.security_type IS DISTINCT FROM 'spac_pre'
+                  AND sm.security_type = 'equity'
                   AND sm.ticker IS NOT NULL
                   AND sm.name NOT LIKE '%리츠%'
                   AND sm.name NOT ILIKE '%reit%'

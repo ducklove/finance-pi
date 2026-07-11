@@ -1407,6 +1407,41 @@ def test_build_silver_prices_labels_price_basis(tmp_path) -> None:
     assert naver_day.select("price_basis").item() == "adjusted"
 
 
+def test_build_silver_prices_repairs_source_ohlc_bounds(tmp_path) -> None:
+    layout = DataLakeLayout(tmp_path)
+    layout.ensure_base_dirs()
+    ParquetDatasetWriter().write(
+        pl.DataFrame(
+            [
+                {
+                    "date": date(2024, 1, 2),
+                    "ticker": "005930",
+                    "isin": None,
+                    "name": "Samsung",
+                    "market": "KOSPI",
+                    "open": 100.0,
+                    "high": 100.0,
+                    "low": 100.0,
+                    "close": 110.0,
+                    "volume": 10,
+                    "trading_value": 1100,
+                    "market_cap": 10000,
+                    "listed_shares": 100,
+                }
+            ]
+        ),
+        layout.partition_path("bronze.kis_daily_raw", date(2024, 1, 2)),
+    )
+
+    build_silver_prices(tmp_path, dates=[date(2024, 1, 2)])
+
+    row = pl.read_parquet(
+        tmp_path / "silver" / "prices" / "dt=2024-01-02" / "part.parquet"
+    ).row(0, named=True)
+    assert row["high"] == 110.0
+    assert row["low"] == 100.0
+
+
 def test_return_1d_nulled_on_price_source_boundary(tmp_path) -> None:
     layout = DataLakeLayout(tmp_path)
     layout.ensure_base_dirs()
@@ -1471,6 +1506,29 @@ def test_security_master_sets_delisted_date_for_stale_securities(tmp_path) -> No
     }
     assert active["S111111"] is True
     assert active["S222222"] is False
+
+
+def test_security_master_classifies_fund_products_from_names(tmp_path) -> None:
+    rows = [
+        {**_silver_price_row(date(2024, 1, 2), "111111", close=100.0), "name": "KODEX 200"},
+        {**_silver_price_row(date(2024, 1, 2), "222222", close=100.0), "name": "TRUE 인버스 ETN"},
+        {**_silver_price_row(date(2024, 1, 2), "333333", close=100.0), "name": "신한알파리츠"},
+        {**_silver_price_row(date(2024, 1, 2), "444444", close=100.0), "name": "테스트스팩1호"},
+        {**_silver_price_row(date(2024, 1, 2), "555555", close=100.0), "name": "일반기업"},
+    ]
+    _write_silver_prices(tmp_path, rows)
+
+    build_security_master(tmp_path)
+
+    master = pl.read_parquet(tmp_path / "gold" / "security_master.parquet")
+    types = {row["ticker"]: row["security_type"] for row in master.iter_rows(named=True)}
+    assert types == {
+        "111111": "etf",
+        "222222": "etn",
+        "333333": "reit",
+        "444444": "spac_pre",
+        "555555": "equity",
+    }
 
 
 def test_identity_review_detects_ticker_reuse_gap(tmp_path, caplog, monkeypatch) -> None:

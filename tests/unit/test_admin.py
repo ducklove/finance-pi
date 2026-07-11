@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gzip
 import json
 from datetime import UTC, date, datetime, timedelta
 from http import HTTPStatus
@@ -1720,6 +1721,42 @@ def test_admin_readiness_endpoint_returns_503_when_not_ready(tmp_path) -> None:
     handler.do_GET()
 
     assert _handler_response_status(handler) == HTTPStatus.SERVICE_UNAVAILABLE
+
+
+def test_admin_screener_reuses_short_lived_cache(tmp_path, monkeypatch) -> None:
+    calls = 0
+
+    def fake_query(paths, as_of):
+        nonlocal calls
+        calls += 1
+        return {"as_of": as_of.isoformat(), "rows": [{"ticker": "005930"}]}
+
+    monkeypatch.setattr(admin_server, "_query_screener_batch", fake_query)
+    state = AdminState(tmp_path)
+
+    first = state.screener({"as_of": ["2026-07-10"]})
+    first["rows"].clear()
+    second = state.screener({"as_of": ["2026-07-10"]})
+
+    assert calls == 1
+    assert second["rows"] == [{"ticker": "005930"}]
+
+
+def test_admin_large_json_supports_gzip(tmp_path) -> None:
+    handler = _make_handler(
+        AdminState(tmp_path),
+        path="/api/docs",
+        method="GET",
+        headers={"Accept-Encoding": "gzip"},
+    )
+
+    handler.do_GET()
+
+    handler.wfile.seek(0)
+    raw = handler.wfile.read()
+    headers, body = raw.split(b"\r\n\r\n", 1)
+    assert b"Content-Encoding: gzip" in headers
+    assert json.loads(gzip.decompress(body))["workspace"] == tmp_path.resolve().name
 
 
 def test_admin_local_network_clients_bypass_token() -> None:

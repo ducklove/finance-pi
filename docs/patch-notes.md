@@ -94,3 +94,15 @@
 
 - 로컬 테스트·실서버 배포·최초 백업/복원 훈련·readiness/DQ 실검증: 진행 중
 - 단계 종료 점수: 실검증 후 기록 예정
+
+## 2026-07-11 - 4단계: 가격 invariant, 상품 분류, 응답 효율
+
+- Bronze 가격의 high/low가 open/close 범위를 포함하지 않는 경우 Silver 정규화에서 high=max(OHLC), low=min(OHLC)로 교정한다.
+- 종목명 규칙으로 SPAC뿐 아니라 ETF, ETN, REIT를 분류하고 screener는 `security_type=equity`만 조회한다.
+- 전체 종목 screener 결과를 as-of 날짜별 5분 cache로 재사용해 반복 요청의 DuckDB/Parquet scan을 제거한다.
+- 1 KiB 이상 JSON은 클라이언트가 지원할 때 gzip으로 응답해 대형 screener 전송량을 줄인다.
+
+### 검증 및 반영 상태
+
+- 로컬 테스트·실서버 분류/성능/DQ 재검증: 진행 중
+- 최종 운영 신뢰도: 검증 후 기록 예정
