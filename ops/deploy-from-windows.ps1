@@ -56,12 +56,12 @@ $startInfo.FileName = "ssh"
 $startInfo.Arguments = "$Target `"bash -s -- $argLine`""
 $startInfo.UseShellExecute = $false
 $startInfo.RedirectStandardInput = $true
-$startInfo.StandardInputEncoding = [System.Text.UTF8Encoding]::new($false)
 $process = [System.Diagnostics.Process]::new()
 $process.StartInfo = $startInfo
 if (-not $process.Start()) { throw "could not start ssh" }
-$process.StandardInput.Write($script)
-$process.StandardInput.Close()
+$scriptBytes = [System.Text.UTF8Encoding]::new($false).GetBytes($script)
+$process.StandardInput.BaseStream.Write($scriptBytes, 0, $scriptBytes.Length)
+$process.StandardInput.BaseStream.Close()
 $process.WaitForExit()
 if ($process.ExitCode -ne 0) { throw "deployment failed (exit $($process.ExitCode))" }
 Write-Host "Deployment finished successfully."

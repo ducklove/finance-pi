@@ -38,6 +38,6 @@ def test_windows_deploy_streams_without_powershell_crlf_pipeline() -> None:
     deploy = (REPO_ROOT / "ops/deploy-from-windows.ps1").read_text(encoding="utf-8")
 
     assert "RedirectStandardInput = $true" in deploy
-    assert "StandardInputEncoding = [System.Text.UTF8Encoding]::new($false)" in deploy
-    assert "$process.StandardInput.Write($script)" in deploy
+    assert "[System.Text.UTF8Encoding]::new($false).GetBytes($script)" in deploy
+    assert "$process.StandardInput.BaseStream.Write" in deploy
     assert "$script | ssh" not in deploy
