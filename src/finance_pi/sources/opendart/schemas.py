@@ -50,10 +50,26 @@ class DartFinancialRow(BaseModel):
     event_date: date
     rcept_dt: date
     available_date: date
+    rcept_no: str | None = None
     report_type: str
+    statement_division: str | None = None
+    statement_name: str | None = None
     account_id: str
     account_name: str
+    account_detail: str | None = None
     amount: float
+    amount_basis: str = "current"
+    current_period_name: str | None = None
+    current_amount: float | None = None
+    cumulative_amount: float | None = None
+    prior_period_name: str | None = None
+    prior_amount: float | None = None
+    prior_cumulative_amount: float | None = None
+    two_year_prior_period_name: str | None = None
+    two_year_prior_amount: float | None = None
+    sort_order: int | None = None
+    currency: str | None = None
+    unit: str | None = None
     is_consolidated: bool = True
     accounting_basis: str | None = None
     # True for rows fetched by a historical bulk backfill: OpenDART returns the

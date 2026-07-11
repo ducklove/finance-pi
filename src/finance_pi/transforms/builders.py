@@ -32,6 +32,11 @@ TICKER_REUSE_GAP_TRADING_DAYS = 250
 # so peak memory stays proportional to a chunk instead of the multi-decade
 # union (which OOM-killed a 16GB host at ~15M rows).
 SILVER_PRICES_REBUILD_CHUNK_DAYS = 366
+
+# Increment when PIT grouping/selection semantics change so stale partitions
+# cannot survive merely because input row counts stayed constant.
+FUNDAMENTALS_PIT_STATE_VERSION = 2
+
 # Rows for this many extra trading days on each side of a chunk are loaded as
 # dedup context but never written: _deduplicate_price_candidates anchors
 # duplicate (date, ticker) candidates against the nearest singleton row per
@@ -173,10 +178,26 @@ _FINANCIALS_COLUMNS = [
     "event_date",
     "rcept_dt",
     "available_date",
+    "rcept_no",
     "report_type",
+    "statement_division",
+    "statement_name",
     "account_id",
     "account_name",
+    "account_detail",
     "amount",
+    "amount_basis",
+    "current_period_name",
+    "current_amount",
+    "cumulative_amount",
+    "prior_period_name",
+    "prior_amount",
+    "prior_cumulative_amount",
+    "two_year_prior_period_name",
+    "two_year_prior_amount",
+    "sort_order",
+    "currency",
+    "unit",
     "is_consolidated",
     "accounting_basis",
     "is_backfilled",
@@ -1444,6 +1465,48 @@ def build_financials_silver(data_root: Path) -> list[BuildSummary]:
         )
     if "is_backfilled" not in financials.columns:
         financials = financials.with_columns(pl.lit(False).alias("is_backfilled"))
+    optional_columns = {
+        "rcept_no": pl.String,
+        "statement_division": pl.String,
+        "statement_name": pl.String,
+        "account_detail": pl.String,
+        "amount_basis": pl.String,
+        "current_period_name": pl.String,
+        "current_amount": pl.Float64,
+        "cumulative_amount": pl.Float64,
+        "prior_period_name": pl.String,
+        "prior_amount": pl.Float64,
+        "prior_cumulative_amount": pl.Float64,
+        "two_year_prior_period_name": pl.String,
+        "two_year_prior_amount": pl.Float64,
+        "sort_order": pl.Int64,
+        "currency": pl.String,
+        "unit": pl.String,
+    }
+    for column, dtype in optional_columns.items():
+        if column not in financials.columns:
+            financials = financials.with_columns(pl.lit(None, dtype=dtype).alias(column))
+    coarse_grain = [
+        "corp_code",
+        "fiscal_period_end",
+        "available_date",
+        "report_type",
+        "account_id",
+        "is_consolidated",
+    ]
+    refreshed_keys = (
+        financials.filter(pl.col("rcept_no").is_not_null()).select(coarse_grain).unique()
+    )
+    if not refreshed_keys.is_empty():
+        legacy = financials.filter(pl.col("rcept_no").is_null()).join(
+            refreshed_keys,
+            on=coarse_grain,
+            how="anti",
+        )
+        financials = pl.concat(
+            [legacy, financials.filter(pl.col("rcept_no").is_not_null())],
+            how="diagonal_relaxed",
+        )
     financials = (
         _cast_dates(
             financials,
@@ -1459,16 +1522,46 @@ def build_financials_silver(data_root: Path) -> list[BuildSummary]:
                 "event_date",
                 "rcept_dt",
                 "available_date",
+                "rcept_no",
                 "report_type",
+                "statement_division",
+                "statement_name",
                 "account_id",
                 "account_name",
+                "account_detail",
                 "amount",
+                "amount_basis",
+                "current_period_name",
+                "current_amount",
+                "cumulative_amount",
+                "prior_period_name",
+                "prior_amount",
+                "prior_cumulative_amount",
+                "two_year_prior_period_name",
+                "two_year_prior_amount",
+                "sort_order",
+                "currency",
+                "unit",
                 "is_consolidated",
                 "accounting_basis",
                 "is_backfilled",
             ]
         )
         .with_columns(pl.col("fiscal_period_end").dt.year().alias("fiscal_year"))
+        .unique(
+            subset=[
+                "corp_code",
+                "rcept_no",
+                "fiscal_period_end",
+                "report_type",
+                "statement_division",
+                "account_id",
+                "account_detail",
+                "sort_order",
+                "is_consolidated",
+            ],
+            keep="last",
+        )
     )
     return _write_by_partition(
         data_root,
@@ -1602,9 +1695,10 @@ def build_fundamentals_pit(
     PIT availability policy: a filing is visible strictly AFTER its
     ``available_date`` (``available_date < as_of_date``), i.e. next-trading-day
     availability — an intraday filing can never inform a same-day decision.
-    Ties within (as_of_date, security_id, account_id) are broken by the newest
-    fiscal_period_end, then available_date, then rcept_dt, then consolidated
-    statements over separate ones. Must stay row-for-row identical to
+    Annual and interim report types remain independently addressable. Within
+    each report/statement/account grain, the newest fiscal period wins, then
+    available_date, rcept_dt, and consolidated statements break ties. Must stay
+    row-for-row identical to
     ``finance_pi.pit.build_fundamentals_pit_sql``.
 
     Incremental behavior: with ``dates=None`` an as-of date is only rebuilt
@@ -1622,13 +1716,27 @@ def build_fundamentals_pit(
     universe_files = sorted(glob(universe_pattern.as_posix()))
     if financials is None or financials.is_empty() or not universe_files:
         return [BuildSummary("gold.fundamentals_pit", 0, 0)]
+    if "statement_division" not in financials.columns:
+        financials = financials.with_columns(
+            pl.lit(None, dtype=pl.String).alias("statement_division")
+        )
     financials = (
         _cast_dates(
             financials,
             ["fiscal_period_end", "event_date", "rcept_dt", "available_date"],
         )
         .filter(pl.col("security_id").is_not_null())
-        .sort(["security_id", "account_id", "fiscal_period_end", "available_date", "rcept_dt"])
+        .sort(
+            [
+                "security_id",
+                "account_id",
+                "fiscal_period_end",
+                "report_type",
+                "statement_division",
+                "available_date",
+                "rcept_dt",
+            ]
+        )
     )
 
     available_date_rows = _financials_available_date_rows(financials)
@@ -1710,12 +1818,23 @@ def _fundamentals_pit_partition(
                 "security_id",
                 "account_id",
                 "fiscal_period_end",
+                "report_type",
+                "statement_division",
                 "available_date",
                 "rcept_dt",
                 "is_consolidated",
             ]
         )
-        .unique(subset=["date", "security_id", "account_id"], keep="last")
+        .unique(
+            subset=[
+                "date",
+                "security_id",
+                "report_type",
+                "statement_division",
+                "account_id",
+            ],
+            keep="last",
+        )
         .rename({"date": "as_of_date"})
     )
     return None if pit.is_empty() else pit
@@ -1773,6 +1892,8 @@ def _load_fundamentals_pit_state(data_root: Path) -> tuple[dict[str, int], set[d
     if not path.exists():
         return None
     payload = json.loads(path.read_text(encoding="utf-8"))
+    if payload.get("version") != FUNDAMENTALS_PIT_STATE_VERSION:
+        return None
     available_date_rows = {
         str(key): int(value) for key, value in payload.get("available_date_rows", {}).items()
     }
@@ -1788,6 +1909,7 @@ def _write_fundamentals_pit_state(
     path = _fundamentals_pit_state_path(data_root)
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
+        "version": FUNDAMENTALS_PIT_STATE_VERSION,
         "financials_row_count": sum(available_date_rows.values()),
         "financials_max_available_date": max(available_date_rows, default=None),
         "available_date_rows": dict(sorted(available_date_rows.items())),

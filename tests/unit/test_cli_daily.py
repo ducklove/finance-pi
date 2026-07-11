@@ -323,6 +323,7 @@ def test_daily_ingest_internal_calls_pass_concrete_defaults(tmp_path, monkeypatc
         25,
     )
     assert calls["dart_filings"] == ("2026-04-29", "2026-04-30", tmp_path, 7, True)
+    assert calls["dart_financials_bulk"][-2:] == (False, False)
     assert calls["dart_dividends"] == ("2026-04-29", "2026-04-30", tmp_path, None, None, 0.05)
     assert calls["dart_share_counts"] == (
         "2026-04-29",

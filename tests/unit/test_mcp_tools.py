@@ -114,6 +114,23 @@ def data_root(tmp_path_factory: pytest.TempPathFactory) -> Path:
             )
         ]
     )
+    fundamentals = fundamentals.vstack(
+        pl.DataFrame(
+            [
+                {
+                    "security_id": "S001",
+                    "as_of_date": date(2024, 1, 31),
+                    "fiscal_period_end": date(2024, 3, 31),
+                    "rcept_dt": date(2024, 5, 15),
+                    "report_type": "11013",
+                    "account_id": "ifrs-full_Assets",
+                    "account_name": "Assets Q1",
+                    "amount": 5500.0,
+                    "is_consolidated": True,
+                }
+            ]
+        )
+    )
     _write(root, "gold/fundamentals_pit/dt=2024-01-31/part.parquet", fundamentals)
     CatalogBuilder(root, root / "catalog" / "finance_pi.duckdb").build()
     return root

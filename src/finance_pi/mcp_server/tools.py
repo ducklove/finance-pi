@@ -383,6 +383,13 @@ def get_fundamentals(
         JOIN sec ON f.security_id = sec.security_id
         WHERE f.as_of_date <= DATE '{as_of_date.isoformat()}'
           AND f.report_type = '11011'
+    ),
+    latest_period AS (
+        SELECT max(f.fiscal_period_end) AS fiscal_period_end
+        FROM gold.fundamentals_pit AS f
+        JOIN sec ON f.security_id = sec.security_id
+        JOIN latest ON f.as_of_date = latest.as_of_date
+        WHERE f.report_type = '11011'
     )
     SELECT
         sec.ticker,
@@ -399,6 +406,7 @@ def get_fundamentals(
     JOIN sec ON f.security_id = sec.security_id
     JOIN latest ON f.as_of_date = latest.as_of_date
     WHERE f.report_type = '11011'
+      AND f.fiscal_period_end = (SELECT fiscal_period_end FROM latest_period)
     ORDER BY f.account_id
     """
     result = query(data_root, sql, max_rows=max_rows)

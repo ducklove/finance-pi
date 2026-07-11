@@ -1959,6 +1959,8 @@ def _query_basic_fundamentals_batch(
         ticker: {metric: [] for metric in BASIC_FUNDAMENTAL_METRICS} for ticker in tickers
     }
     for row in rows:
+        if row["report_type"] != "11011":
+            continue
         ticker = row["ticker"]
         metric = _basic_fundamental_metric(row["account_id"])
         if ticker in candidates and metric is not None:
@@ -3095,6 +3097,7 @@ def _query_screener_rows_catalog(
                     ON f.security_id = sm.security_id
                 WHERE f.account_id IN ({_sql_placeholders(account_ids)})
                   AND f.available_date <= ?
+                  AND f.report_type IN ('11011', 'annual')
                 QUALIFY ROW_NUMBER() OVER (
                     PARTITION BY sm.ticker, f.account_id
                     ORDER BY f.available_date DESC, f.fiscal_period_end DESC
@@ -3210,6 +3213,7 @@ def _query_screener_rows_parquet(
                     ON f.security_id = sm.security_id
                 WHERE f.account_id IN ({_sql_placeholders(account_ids)})
                   AND f.available_date <= ?
+                  AND f.report_type IN ('11011', 'annual')
                 QUALIFY ROW_NUMBER() OVER (
                     PARTITION BY sm.ticker, f.account_id
                     ORDER BY f.available_date DESC, f.fiscal_period_end DESC

@@ -828,6 +828,65 @@ def test_admin_basic_fundamentals_derives_equity_when_total_equity_is_suspicious
     )
 
 
+def test_admin_basic_fundamentals_excludes_newer_interim_report(tmp_path) -> None:
+    data_root = tmp_path / "data"
+    layout = DataLakeLayout(data_root)
+    layout.ensure_base_dirs()
+    (data_root / "gold").mkdir(parents=True, exist_ok=True)
+    pl.DataFrame(
+        [
+            {
+                "security_id": "S005930",
+                "ticker": "005930",
+                "name": "Samsung",
+                "market": "KOSPI",
+                "share_class": "common",
+                "security_type": "equity",
+                "corp_code": "00126380",
+            }
+        ]
+    ).write_parquet(data_root / "gold" / "security_master.parquet")
+    common = {
+        "security_id": "S005930",
+        "corp_code": "00126380",
+        "event_date": date(2025, 12, 31),
+        "account_id": "ifrs-full_Revenue",
+        "account_name": "Revenue",
+        "is_consolidated": True,
+        "accounting_basis": "K-IFRS",
+    }
+    path = data_root / "silver" / "financials" / "fiscal_year=2025" / "part.parquet"
+    path.parent.mkdir(parents=True)
+    pl.DataFrame(
+        [
+            {
+                **common,
+                "fiscal_period_end": date(2025, 12, 31),
+                "rcept_dt": date(2026, 3, 10),
+                "available_date": date(2026, 3, 10),
+                "report_type": "11011",
+                "amount": 333_000.0,
+            },
+            {
+                **common,
+                "fiscal_period_end": date(2026, 3, 31),
+                "rcept_dt": date(2026, 5, 15),
+                "available_date": date(2026, 5, 15),
+                "report_type": "11013",
+                "amount": 90_000.0,
+            },
+        ]
+    ).write_parquet(path)
+
+    payload = AdminState(tmp_path).basic_fundamentals(
+        {"ticker": ["005930"], "as_of": ["2026-06-01"]}
+    )
+
+    revenue = payload["fundamentals"]["005930"]["metrics"]["revenue"]
+    assert revenue["amount"] == 333_000.0
+    assert revenue["report_type"] == "11011"
+
+
 def test_admin_basic_fundamentals_does_not_use_future_share_count_for_bps(
     tmp_path,
 ) -> None:

@@ -11,9 +11,9 @@ def build_fundamentals_pit_sql(
     Mirrors ``transforms.builders.build_fundamentals_pit``: keeps only rows whose
     available date is strictly before the as-of date (next-trading-day
     availability, so intraday filings never inform same-day decisions), then
-    keeps a single row per (date, security_id, account_id) — the latest fiscal
-    period, tie-broken by available_date, rcept_dt, then consolidated statements
-    over separate ones.
+    keeps annual and interim report types independently, selecting the newest
+    fiscal period within each report/statement/account grain and then breaking
+    ties by availability, receipt date, and consolidation scope.
     """
 
     return f"""
@@ -25,7 +25,12 @@ def build_fundamentals_pit_sql(
       ON f.security_id = u.security_id
      AND f.available_date < u.date
     QUALIFY ROW_NUMBER() OVER (
-        PARTITION BY u.date, u.security_id, f.account_id
+        PARTITION BY
+            u.date,
+            u.security_id,
+            f.report_type,
+            f.statement_division,
+            f.account_id
         ORDER BY
             f.fiscal_period_end DESC NULLS LAST,
             f.available_date DESC NULLS LAST,

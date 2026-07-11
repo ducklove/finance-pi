@@ -618,10 +618,21 @@ def test_build_financials_accepts_mixed_bronze_date_schemas(tmp_path) -> None:
                 "event_date": date(2025, 12, 31),
                 "rcept_dt": date(2026, 3, 15),
                 "available_date": date(2026, 3, 15),
+                "rcept_no": "20260315000001",
                 "report_type": "11011",
+                "statement_division": "BS",
+                "statement_name": "Balance sheet",
                 "account_id": "ifrs-full_Assets",
                 "account_name": "Assets",
+                "account_detail": "-",
                 "amount": 1000.0,
+                "amount_basis": "current",
+                "current_period_name": "2025",
+                "current_amount": 1000.0,
+                "cumulative_amount": None,
+                "sort_order": 1,
+                "currency": "KRW",
+                "unit": "KRW",
                 "is_consolidated": True,
                 "accounting_basis": "K-IFRS",
             }
@@ -654,6 +665,13 @@ def test_build_financials_accepts_mixed_bronze_date_schemas(tmp_path) -> None:
     )
     assert summary.rows == 2
     assert silver["rcept_dt"].dtype == pl.Date
+    first_row = silver.filter(pl.col("corp_code") == "00126380").row(0, named=True)
+    assert first_row["rcept_no"] == "20260315000001"
+    assert first_row["statement_division"] == "BS"
+    assert first_row["account_detail"] == "-"
+    assert first_row["current_amount"] == 1000.0
+    assert first_row["sort_order"] == 1
+    assert first_row["currency"] == "KRW"
     # Legacy bronze partitions without the column read as False.
     backfilled = {
         row["corp_code"]: row["is_backfilled"] for row in silver.iter_rows(named=True)
@@ -871,14 +889,30 @@ def test_fundamentals_pit_keeps_latest_account_per_day(tmp_path) -> None:
                 "is_consolidated": True,
                 "accounting_basis": "K-IFRS",
             },
+            {
+                "security_id": "S005930",
+                "corp_code": "00126380",
+                "fiscal_period_end": date(2023, 3, 31),
+                "event_date": date(2023, 3, 31),
+                "rcept_dt": date(2023, 5, 15),
+                "available_date": date(2023, 5, 15),
+                "report_type": "11013",
+                "account_id": "ifrs-full_Assets",
+                "account_name": "Assets",
+                "amount": 500.0,
+                "is_consolidated": True,
+                "accounting_basis": "K-IFRS",
+            },
         ]
     ).write_parquet(silver_path)
 
     summary = build_fundamentals_pit(tmp_path)[0]
 
     pit = pl.read_parquet(tmp_path / "gold" / "fundamentals_pit" / "dt=2024-01-03" / "part.parquet")
-    assert summary.rows == 1
-    assert pit.select("amount").item() == 2000.0
+    assert summary.rows == 2
+    assert {
+        row["report_type"]: row["amount"] for row in pit.iter_rows(named=True)
+    } == {"11011": 2000.0, "11013": 500.0}
 
 
 def test_fundamentals_pit_prefers_consolidated_and_next_day_availability(tmp_path) -> None:
@@ -1867,6 +1901,30 @@ def test_fundamentals_pit_second_run_skips_unchanged_dates(tmp_path) -> None:
     assert second.files == 0
     assert second.rows == 0
     assert _pit_partition_mtimes(tmp_path) == mtimes
+
+
+def test_fundamentals_pit_rebuilds_when_state_version_changes(tmp_path) -> None:
+    _write_pit_fixture(
+        tmp_path,
+        [date(2024, 1, 2), date(2024, 1, 3)],
+        [
+            _pit_financials_row(
+                account_id="ifrs-full_Assets",
+                amount=1000.0,
+                available_date=date(2024, 1, 1),
+            )
+        ],
+    )
+    build_fundamentals_pit(tmp_path)
+    state_path = tmp_path / "_state" / "fundamentals_pit.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["version"] = 1
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    rebuilt = build_fundamentals_pit(tmp_path)[0]
+
+    assert rebuilt.files == 2
+    assert json.loads(state_path.read_text(encoding="utf-8"))["version"] == 2
 
 
 def test_fundamentals_pit_rebuilds_only_dates_after_new_available_date(tmp_path) -> None:

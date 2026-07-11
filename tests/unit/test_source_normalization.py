@@ -85,9 +85,21 @@ def test_fetch_financials_derives_rcept_dt_from_rcept_no() -> None:
                 "list": [
                     {
                         "rcept_no": "20240315000123",
+                        "sj_div": "IS",
+                        "sj_nm": "Income statement",
                         "account_id": "ifrs-full_Assets",
                         "account_nm": "Assets",
+                        "account_detail": "-",
+                        "thstrm_nm": "Current quarter",
                         "thstrm_amount": "1000",
+                        "thstrm_add_amount": "2500",
+                        "frmtrm_nm": "Prior quarter",
+                        "frmtrm_amount": "900",
+                        "frmtrm_add_amount": "2200",
+                        "bfefrmtrm_nm": "Two years prior",
+                        "bfefrmtrm_amount": "800",
+                        "ord": "7",
+                        "currency": "KRW",
                     },
                     {
                         "rcept_no": "bogus",
@@ -113,6 +125,20 @@ def test_fetch_financials_derives_rcept_dt_from_rcept_no() -> None:
     assert rows[0]["rcept_dt"] == "2024-03-15"
     assert rows[0]["available_date"] == "2024-05-01"
     assert rows[0]["is_backfilled"] is True
+    assert rows[0]["rcept_no"] == "20240315000123"
+    assert rows[0]["statement_division"] == "IS"
+    assert rows[0]["statement_name"] == "Income statement"
+    assert rows[0]["account_detail"] == "-"
+    assert rows[0]["amount"] == 2500.0
+    assert rows[0]["amount_basis"] == "cumulative"
+    assert rows[0]["current_amount"] == 1000.0
+    assert rows[0]["cumulative_amount"] == 2500.0
+    assert rows[0]["prior_amount"] == 900.0
+    assert rows[0]["prior_cumulative_amount"] == 2200.0
+    assert rows[0]["two_year_prior_amount"] == 800.0
+    assert rows[0]["sort_order"] == 7
+    assert rows[0]["currency"] == "KRW"
+    assert rows[0]["unit"] == "KRW"
     # Malformed rcept_no falls back to the caller-provided date.
     assert rows[1]["rcept_dt"] == "2024-05-01"
 

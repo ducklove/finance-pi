@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date
 
 import polars as pl
@@ -532,6 +533,9 @@ def test_dart_financials_bulk_merges_same_rcept_date_partitions(tmp_path) -> Non
     assert sorted(frame["corp_code"].to_list()) == ["00126380", "00258801"]
     assert frame["is_backfilled"].to_list() == [True, True]
     assert list(adapter.list_pending(date(2026, 3, 1), date(2026, 3, 31))) == []
+    assert len(
+        list(replace(adapter, refresh=True).list_pending(date(2026, 3, 1), date(2026, 3, 31)))
+    ) == 2
 
 
 def test_dart_financials_bulk_writes_partial_marker_and_retries(tmp_path) -> None:

@@ -21,10 +21,26 @@ FINANCIAL_SCHEMA = {
     "event_date": pl.Date,
     "rcept_dt": pl.Date,
     "available_date": pl.Date,
+    "rcept_no": pl.String,
     "report_type": pl.String,
+    "statement_division": pl.String,
+    "statement_name": pl.String,
     "account_id": pl.String,
     "account_name": pl.String,
+    "account_detail": pl.String,
     "amount": pl.Float64,
+    "amount_basis": pl.String,
+    "current_period_name": pl.String,
+    "current_amount": pl.Float64,
+    "cumulative_amount": pl.Float64,
+    "prior_period_name": pl.String,
+    "prior_amount": pl.Float64,
+    "prior_cumulative_amount": pl.Float64,
+    "two_year_prior_period_name": pl.String,
+    "two_year_prior_amount": pl.Float64,
+    "sort_order": pl.Int64,
+    "currency": pl.String,
+    "unit": pl.String,
     "is_consolidated": pl.Boolean,
     "accounting_basis": pl.String,
     "is_backfilled": pl.Boolean,
@@ -32,10 +48,13 @@ FINANCIAL_SCHEMA = {
 
 FINANCIAL_DEDUP_COLUMNS = [
     "corp_code",
+    "rcept_no",
     "fiscal_period_end",
-    "rcept_dt",
     "report_type",
+    "statement_division",
     "account_id",
+    "account_detail",
+    "sort_order",
     "is_consolidated",
 ]
 
@@ -230,6 +249,7 @@ class DartFinancialsBulkAdapter:
     batch_size: int = 25
     sleep_seconds: float = 0.05
     is_backfilled: bool = False
+    refresh: bool = False
     name: str = "opendart_financials_bulk"
 
     def list_pending(self, since: date, until: date) -> Iterable[IngestUnit]:
@@ -250,6 +270,9 @@ class DartFinancialsBulkAdapter:
                 },
             )
             marker = self._marker_path(unit)
+            if self.refresh:
+                yield unit
+                continue
             if not marker.exists():
                 yield unit
                 continue
@@ -326,7 +349,7 @@ class DartFinancialsBulkAdapter:
             if is_retry
             else self._marker_path(batch.unit)
         )
-        if not is_retry and marker.exists():
+        if not is_retry and marker.exists() and not self.refresh:
             return WriteResult(path=marker, rows=0, skipped=True, reason="bronze chunk exists")
 
         failures = [row for row in batch.rows if "_failures" in row]

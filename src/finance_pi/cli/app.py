@@ -469,6 +469,11 @@ def ingest_dart_financials_bulk(
         "--backfilled/--daily",
         help="Mark rows is_backfilled=True (historical bulk); the daily scheduler passes --daily",
     ),
+    refresh: bool = typer.Option(
+        False,
+        "--refresh",
+        help="Re-fetch chunks even when resumable completion markers already exist",
+    ),
 ) -> None:
     paths = ProjectPaths(root=root)
     settings = RuntimeSettings.load(paths.root)
@@ -495,6 +500,7 @@ def ingest_dart_financials_bulk(
         batch_size=batch_size,
         sleep_seconds=sleep_seconds,
         is_backfilled=backfilled,
+        refresh=refresh,
     )
     _run_and_print([adapter], start, end)
 
@@ -899,7 +905,7 @@ def bootstrap(
     if not skip_dart_filings:
         if settings.has_opendart:
             try:
-                ingest_dart_filings(start.isoformat(), end.isoformat(), paths.root, 7)
+                ingest_dart_filings(start.isoformat(), end.isoformat(), paths.root, 7, False)
             except Exception as exc:  # noqa: BLE001
                 failures.append(f"OpenDART filings ingest failed: {exc}")
         else:
@@ -960,6 +966,7 @@ def bootstrap(
                     financial_sleep_seconds,
                     "CFS",
                     True,
+                    False,
                 )
             except Exception as exc:  # noqa: BLE001
                 failures.append(f"OpenDART financial ingest failed: {exc}")
@@ -1716,6 +1723,7 @@ def _run_daily_ingest(
                 25,
                 0.05,
                 "CFS",
+                False,
                 False,
             )
         except Exception as exc:  # noqa: BLE001
@@ -2611,7 +2619,7 @@ def _run_yearly_backfill(
     if include_financials:
         if settings.has_opendart:
             try:
-                ingest_dart_filings(since.isoformat(), until.isoformat(), paths.root, 7)
+                ingest_dart_filings(since.isoformat(), until.isoformat(), paths.root, 7, False)
             except Exception as exc:  # noqa: BLE001
                 failures.append(f"OpenDART filings ingest failed: {exc}")
             try:
@@ -2625,6 +2633,7 @@ def _run_yearly_backfill(
                     financial_sleep_seconds,
                     "CFS",
                     True,
+                    False,
                 )
             except Exception as exc:  # noqa: BLE001
                 failures.append(f"OpenDART financial ingest failed: {exc}")

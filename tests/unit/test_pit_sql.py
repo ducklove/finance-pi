@@ -30,6 +30,7 @@ def _financials_row(
         "rcept_dt": rcept,
         "available_date": available_date,
         "report_type": "11011",
+        "statement_division": "BS",
         "account_id": account_id,
         "account_name": account_id,
         "amount": amount,

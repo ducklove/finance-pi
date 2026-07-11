@@ -110,12 +110,14 @@ class OpenDartClient:
         fiscal_period_end = _period_end(bsns_year, reprt_code)
         rows: list[dict[str, Any]] = []
         for item in payload.get("list", []):
-            amount = parse_float(
-                value_for(item, "thstrm_amount", "amount", "thstrm_add_amount"),
-                default=None,
+            current_amount = parse_float(
+                value_for(item, "thstrm_amount", "amount"), default=None
             )
+            cumulative_amount = parse_float(item.get("thstrm_add_amount"), default=None)
+            amount = cumulative_amount if cumulative_amount is not None else current_amount
             if amount is None:
                 continue
+            currency = value_for(item, "currency", default=None)
             row = {
                 "corp_code": corp_code,
                 "security_id": None,
@@ -125,12 +127,36 @@ class OpenDartClient:
                 # fall back to the scheduling date only when they are missing.
                 "rcept_dt": _receipt_date(item.get("rcept_no")) or available_date,
                 "available_date": available_date,
+                "rcept_no": value_for(item, "rcept_no", default=None),
                 "report_type": reprt_code,
+                "statement_division": value_for(item, "sj_div", default=None),
+                "statement_name": value_for(item, "sj_nm", default=None),
                 "account_id": value_for(item, "account_id", "account_nm"),
                 "account_name": value_for(item, "account_nm", "account_id"),
+                "account_detail": value_for(item, "account_detail", default=None),
                 "amount": amount,
+                "amount_basis": (
+                    "cumulative" if cumulative_amount is not None else "current"
+                ),
+                "current_period_name": value_for(item, "thstrm_nm", default=None),
+                "current_amount": current_amount,
+                "cumulative_amount": cumulative_amount,
+                "prior_period_name": value_for(item, "frmtrm_nm", default=None),
+                "prior_amount": parse_float(item.get("frmtrm_amount"), default=None),
+                "prior_cumulative_amount": parse_float(
+                    item.get("frmtrm_add_amount"), default=None
+                ),
+                "two_year_prior_period_name": value_for(
+                    item, "bfefrmtrm_nm", default=None
+                ),
+                "two_year_prior_amount": parse_float(
+                    item.get("bfefrmtrm_amount"), default=None
+                ),
+                "sort_order": parse_int(item.get("ord"), default=None),
+                "currency": currency,
+                "unit": currency,
                 "is_consolidated": fs_div.upper() == "CFS",
-                "accounting_basis": value_for(item, "frmtrm_nm", default=None),
+                "accounting_basis": value_for(item, "fs_nm", default=None),
                 "is_backfilled": is_backfilled,
             }
             rows.append(DartFinancialRow.model_validate(row).model_dump(mode="json"))
