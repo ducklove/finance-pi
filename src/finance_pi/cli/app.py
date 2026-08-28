@@ -1395,13 +1395,14 @@ def run_daily(
     DataLakeLayout(paths.data_root).ensure_base_dirs()
     price_date = _previous_weekday(parsed_date)
     failures: list[str] = []
+    warnings: list[str] = []
     build_failures: list[str] = []
     if ingest:
-        failures = _run_daily_ingest(paths, settings, parsed_date)
-        for failure in failures:
-            typer.echo(failure)
+        failures, warnings = _run_daily_ingest(paths, settings, parsed_date)
+        for message in (*failures, *warnings):
+            typer.echo(message)
         if strict and failures:
-            _record_daily_marker(paths.data_root, parsed_date, price_date, failures)
+            _record_daily_marker(paths.data_root, parsed_date, price_date, failures, warnings)
             _notify_daily_webhook(settings, parsed_date, failures, build_failures, None)
             raise typer.Exit(code=1)
     try:
@@ -1443,6 +1444,7 @@ def run_daily(
         parsed_date,
         price_date,
         [*failures, *build_failures],
+        warnings,
     )
 
     scorecard = _safe_build_scorecard(paths.data_root, parsed_date)
@@ -1496,7 +1498,11 @@ def _record_daily_marker(
     report_date: date,
     price_date: date,
     failures: list[str],
+    warnings: list[str] | None = None,
 ) -> Path:
+    # Warnings are recorded but deliberately kept out of "failures": they are
+    # degradations that must stay visible without blocking the day, and
+    # _write_daily_marker derives the marker status from "failures" alone.
     return _write_daily_marker(
         data_root,
         report_date,
@@ -1504,6 +1510,7 @@ def _record_daily_marker(
             "report_date": report_date.isoformat(),
             "price_date": price_date.isoformat(),
             "failures": failures,
+            "warnings": list(warnings or []),
             "gold_price_partition": _gold_price_partition_exists(data_root, price_date),
         },
     )
@@ -1669,15 +1676,21 @@ def _run_daily_ingest(
     paths: ProjectPaths,
     settings: RuntimeSettings,
     report_date: date,
-) -> list[str]:
+) -> tuple[list[str], list[str]]:
+    """Run every daily source ingest and split the outcome into (failures, warnings)."""
+
     price_date = _previous_weekday(report_date)
     filing_start = _previous_weekday(report_date - timedelta(days=1))
     failures: list[str] = []
+    warnings: list[str] = []
     if settings.has_opendart:
         try:
             ingest_dart_company(report_date.isoformat(), paths.root)
         except Exception as exc:  # noqa: BLE001
-            failures.append(f"OpenDART company ingest failed: {exc}")
+            # The corp-code snapshot is slow-moving reference data, so a stale one
+            # must never gate the day. Treating it as fatal stalled catchup on
+            # 2026-07-17 for six weeks while OpenDART had corpCode.xml switched off.
+            warnings.append(f"OpenDART company ingest degraded: {exc}")
     else:
         typer.echo("OpenDART company/filings ingest skipped: OPENDART_API_KEY missing")
 
@@ -1762,7 +1775,7 @@ def _run_daily_ingest(
     failures.extend(macro_failures)
     for failure in macro_failures:
         typer.echo(failure)
-    return failures
+    return failures, warnings
 
 
 def _ingest_macro(

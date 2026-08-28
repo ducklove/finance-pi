@@ -1274,15 +1274,22 @@ def _readiness_payload(state: AdminState) -> dict[str, Any]:
     checks["price_fresh"] = price_age_days is not None and 0 <= price_age_days <= 2
 
     marker_status = None
+    marker_warnings: list[str] = []
     if latest_date is not None:
         marker = state.paths.data_root / "_state" / "daily" / f"{latest_date.isoformat()}.json"
         if marker.exists():
             try:
-                marker_status = json.loads(marker.read_text(encoding="utf-8")).get("status")
+                marker_payload = json.loads(marker.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
                 marker_status = "invalid"
+            else:
+                marker_status = marker_payload.get("status")
+                marker_warnings = [str(item) for item in marker_payload.get("warnings") or []]
     checks["latest_daily_marker"] = marker_status
     checks["daily_marker_ok"] = marker_status not in {"failed", "complete_with_failures", "invalid"}
+    # Degradations do not block readiness, but they must not stay invisible either:
+    # a silently degraded source is what let the pipeline rot for six weeks.
+    checks["daily_warnings"] = marker_warnings
 
     ready = all(
         checks[name]

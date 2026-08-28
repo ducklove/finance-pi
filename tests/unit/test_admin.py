@@ -2061,3 +2061,42 @@ def _raw_get(host: str, port: int, path: str) -> bytes:
                 break
             chunks.append(chunk)
     return b"".join(chunks)
+
+
+def test_admin_readiness_surfaces_daily_warnings_without_blocking(tmp_path, monkeypatch) -> None:
+    # A degraded source must stay visible: the corp-code snapshot silently rotted
+    # for six weeks because nothing but the raw marker file recorded it.
+    state = AdminState(tmp_path)
+    state.paths.data_root.mkdir(parents=True)
+    state.paths.catalog_path.parent.mkdir(parents=True)
+    state.paths.catalog_path.touch()
+    marker_dir = state.paths.data_root / "_state" / "daily"
+    marker_dir.mkdir(parents=True)
+    (marker_dir / "2026-07-10.json").write_text(
+        json.dumps(
+            {
+                "status": "complete",
+                "failures": [],
+                "warnings": ["OpenDART company ingest degraded: status 800"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(admin_server, "_kst_today", lambda: date(2026, 7, 11))
+    monkeypatch.setattr(
+        admin_server,
+        "_readiness_catalog_snapshot",
+        lambda catalog_path, data_root: (
+            date(2026, 7, 10),
+            3_900,
+            len(admin_server.dataset_registry),
+        ),
+    )
+
+    payload = _readiness_payload(state)
+
+    assert payload["status"] == "ready"
+    assert payload["checks"]["daily_marker_ok"] is True
+    assert payload["checks"]["daily_warnings"] == [
+        "OpenDART company ingest degraded: status 800"
+    ]

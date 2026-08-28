@@ -24,6 +24,7 @@ from finance_pi.cli.app import (
     _previous_weekday,
     _read_daily_marker_status,
     _receipt_date,
+    _record_daily_marker,
     _run_daily_builds,
     _run_daily_ingest,
     _validated_backfill_paths,
@@ -197,7 +198,7 @@ def test_daily_strict_ingest_failure_writes_failed_marker(tmp_path, monkeypatch)
     monkeypatch.setattr(
         cli_app,
         "_run_daily_ingest",
-        lambda *args: ["KIS universe price ingest failed: boom"],
+        lambda *args: (["KIS universe price ingest failed: boom"], []),
     )
     DataLakeLayout(tmp_path / "data").ensure_base_dirs()
 
@@ -225,7 +226,7 @@ def test_daily_ingest_treats_no_matching_dart_reports_as_skip(tmp_path, monkeypa
     monkeypatch.setattr(cli_app, "ingest_dart_share_counts", raise_no_match)
     monkeypatch.setattr(cli_app, "_ingest_macro", lambda *args: [])
 
-    failures = _run_daily_ingest(
+    failures, warnings = _run_daily_ingest(
         ProjectPaths(tmp_path),
         SimpleNamespace(has_opendart=True, has_kis=False),
         date(2026, 4, 30),
@@ -249,7 +250,7 @@ def test_daily_ingest_keeps_other_dart_errors_as_failures(tmp_path, monkeypatch)
     monkeypatch.setattr(cli_app, "ingest_dart_share_counts", noop)
     monkeypatch.setattr(cli_app, "_ingest_macro", lambda *args: [])
 
-    failures = _run_daily_ingest(
+    failures, warnings = _run_daily_ingest(
         ProjectPaths(tmp_path),
         SimpleNamespace(has_opendart=True, has_kis=False),
         date(2026, 4, 30),
@@ -269,7 +270,7 @@ def test_daily_ingest_includes_macro_failures(tmp_path, monkeypatch) -> None:
         lambda *args: ["Macro KR10Y ingest failed: upstream unavailable"],
     )
 
-    failures = _run_daily_ingest(
+    failures, warnings = _run_daily_ingest(
         ProjectPaths(tmp_path),
         SimpleNamespace(has_opendart=False, has_kis=False),
         date(2026, 4, 30),
@@ -301,7 +302,7 @@ def test_daily_ingest_internal_calls_pass_concrete_defaults(tmp_path, monkeypatc
 
     monkeypatch.setattr(cli_app, "_ingest_macro", record_macro)
 
-    failures = _run_daily_ingest(
+    failures, warnings = _run_daily_ingest(
         ProjectPaths(tmp_path),
         SimpleNamespace(
             has_opendart=True,
@@ -1362,3 +1363,56 @@ def test_backfill_root_must_be_workspace_root(tmp_path) -> None:
 
     assert "workspace root" in str(exc_info.value)
     assert str(workspace) in str(exc_info.value)
+
+
+def test_daily_ingest_degrades_instead_of_failing_when_corp_codes_are_unavailable(
+    tmp_path, monkeypatch
+) -> None:
+    # Regression: OpenDART switched corpCode.xml off on 2026-07-17. Treating that
+    # as a fatal ingest failure marked every day "failed", catchup stopped on the
+    # first one, and 30 trading days of prices never made it into gold.
+    def noop(*args: object) -> None:
+        return None
+
+    def raise_suspended(*args: object) -> None:
+        raise RuntimeError("opendart: corpCode.xml unavailable (status 800): 시스템 점검")
+
+    monkeypatch.setattr(cli_app, "ingest_dart_company", raise_suspended)
+    monkeypatch.setattr(cli_app, "ingest_naver_summary", noop)
+    monkeypatch.setattr(cli_app, "ingest_dart_filings", noop)
+    monkeypatch.setattr(cli_app, "ingest_dart_financials_bulk", noop)
+    monkeypatch.setattr(cli_app, "ingest_dart_dividends", noop)
+    monkeypatch.setattr(cli_app, "ingest_dart_share_counts", noop)
+    monkeypatch.setattr(cli_app, "_ingest_macro", lambda *args: [])
+
+    failures, warnings = _run_daily_ingest(
+        ProjectPaths(tmp_path),
+        SimpleNamespace(has_opendart=True, has_kis=False),
+        date(2026, 4, 30),
+    )
+
+    assert failures == []
+    assert len(warnings) == 1
+    assert "OpenDART company ingest degraded" in warnings[0]
+    assert "status 800" in warnings[0]
+
+
+def test_daily_marker_stays_complete_when_only_warnings_are_recorded(tmp_path) -> None:
+    data_root = tmp_path / "data"
+    DataLakeLayout(data_root).ensure_base_dirs()
+
+    marker = _record_daily_marker(
+        data_root,
+        date(2026, 7, 17),
+        date(2026, 7, 17),
+        [],
+        ["OpenDART company ingest degraded: corpCode.xml unavailable (status 800)"],
+    )
+
+    payload = json.loads(marker.read_text(encoding="utf-8"))
+
+    assert payload["status"] == "complete"
+    assert payload["failures"] == []
+    assert "status 800" in payload["warnings"][0]
+    # catchup only advances past days that report "complete".
+    assert _daily_complete(data_root, date(2026, 7, 17))
