@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import gzip
 import json
+import socket
+import threading
+import time
+from contextlib import suppress
 from datetime import UTC, date, datetime, timedelta
 from http import HTTPStatus
 from http.client import HTTPMessage
@@ -11,16 +15,19 @@ import polars as pl
 
 from finance_pi.admin import server as admin_server
 from finance_pi.admin.server import (
+    DEFAULT_LISTEN_BACKLOG,
     MAX_JOBS_RETAINED,
     AdminJob,
     AdminServiceBusy,
     AdminState,
+    BoundedThreadingHTTPServer,
     _admin_max_jobs,
     _admin_max_price_days,
     _admin_max_price_queries,
     _admin_max_price_tickers,
     _admin_max_request_threads,
     _admin_price_query_wait_seconds,
+    _admin_request_timeout_seconds,
     _api_docs_payload,
     _ensure_docs_built,
     _handler_for,
@@ -1980,3 +1987,77 @@ def test_admin_ensure_docs_built_creates_site(tmp_path) -> None:
 
     assert (tmp_path / "data" / "docs_site" / "index.html").exists()
     assert (tmp_path / "data" / "docs_site" / "manifest.json").exists()
+
+
+def test_admin_request_timeout_defaults_and_env_override(monkeypatch) -> None:
+    monkeypatch.delenv("FINANCE_PI_ADMIN_REQUEST_TIMEOUT_SECONDS", raising=False)
+    assert _admin_request_timeout_seconds() == 30.0
+
+    monkeypatch.setenv("FINANCE_PI_ADMIN_REQUEST_TIMEOUT_SECONDS", "2.5")
+    assert _admin_request_timeout_seconds() == 2.5
+
+    monkeypatch.setenv("FINANCE_PI_ADMIN_REQUEST_TIMEOUT_SECONDS", "not-a-number")
+    assert _admin_request_timeout_seconds() == 30.0
+
+
+def test_admin_handler_sets_socket_timeout(tmp_path, monkeypatch) -> None:
+    # Without a socket timeout an idle peer parks a worker thread in
+    # rfile.readline() forever and permanently leaks a bounded request slot.
+    monkeypatch.setenv("FINANCE_PI_ADMIN_REQUEST_TIMEOUT_SECONDS", "1.5")
+    handler_cls = _handler_for(AdminState(tmp_path))
+    assert handler_cls.timeout == 1.5
+
+
+def test_admin_listen_backlog_is_larger_than_socketserver_default() -> None:
+    assert BoundedThreadingHTTPServer.request_queue_size == DEFAULT_LISTEN_BACKLOG
+    assert DEFAULT_LISTEN_BACKLOG > 5
+
+
+def test_admin_idle_connection_does_not_permanently_hold_a_request_slot(
+    tmp_path, monkeypatch
+) -> None:
+    # Regression: 16 idle scanner connections pinned every request slot and the
+    # admin answered every later caller with 503 "server overloaded".
+    monkeypatch.setenv("FINANCE_PI_ADMIN_REQUEST_TIMEOUT_SECONDS", "0.5")
+    handler_cls = _handler_for(AdminState(tmp_path))
+    server = BoundedThreadingHTTPServer(("127.0.0.1", 0), handler_cls, 1)
+    host, port = server.server_address[:2]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        idle = socket.create_connection((host, port), timeout=5)
+        try:
+            # The lone slot goes to the idle peer, so the next caller is shed.
+            # A shed peer may see the 503 body or just an abortive close.
+            assert _poll_until(host, port, lambda body: b"200 OK" not in body, 5)
+            # Once the idle peer hits the socket timeout the slot comes back.
+            assert _poll_until(host, port, lambda body: b"200 OK" in body, 15)
+        finally:
+            idle.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def _poll_until(host: str, port: int, predicate, timeout_seconds: float) -> bool:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if predicate(_raw_get(host, port, "/api/health")):
+            return True
+        time.sleep(0.1)
+    return False
+
+
+def _raw_get(host: str, port: int, path: str) -> bytes:
+    chunks: list[bytes] = []
+    # A shed request is closed abruptly, which Windows reports as an aborted
+    # connection rather than a clean EOF; return whatever arrived either way.
+    with socket.create_connection((host, port), timeout=5) as client, suppress(OSError):
+        client.sendall(f"GET {path} HTTP/1.0\r\nHost: {host}\r\n\r\n".encode("ascii"))
+        while True:
+            chunk = client.recv(4096)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    return b"".join(chunks)

@@ -85,6 +85,8 @@ from finance_pi.util import (
 )
 
 DEFAULT_MAX_REQUEST_THREADS = 16
+DEFAULT_REQUEST_TIMEOUT_SECONDS = 30.0
+DEFAULT_LISTEN_BACKLOG = 64
 DEFAULT_MAX_ADMIN_JOBS = 1
 DEFAULT_MAX_PRICE_QUERIES = 4
 DEFAULT_MAX_PRICE_TICKERS = 500
@@ -819,6 +821,9 @@ class AdminState:
 
 class BoundedThreadingHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
+    # socketserver defaults to 5, which is far too small once a scanner opens a
+    # burst of connections at once.
+    request_queue_size = DEFAULT_LISTEN_BACKLOG
 
     def __init__(
         self,
@@ -848,14 +853,17 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
     def _reject_overloaded_request(self, request: Any) -> None:
         try:
             body = b'{"error":"server overloaded"}'
-            request.sendall(
-                b"HTTP/1.1 503 Service Unavailable\r\n"
-                b"Content-Type: application/json; charset=utf-8\r\n"
-                b"Cache-Control: no-store\r\n"
-                b"Connection: close\r\n"
-                + f"Content-Length: {len(body)}\r\n\r\n".encode("ascii")
-                + body
-            )
+            # A rejected peer has often already hung up; never let that surface
+            # as an unhandled handler traceback.
+            with suppress(OSError):
+                request.sendall(
+                    b"HTTP/1.1 503 Service Unavailable\r\n"
+                    b"Content-Type: application/json; charset=utf-8\r\n"
+                    b"Cache-Control: no-store\r\n"
+                    b"Connection: close\r\n"
+                    + f"Content-Length: {len(body)}\r\n\r\n".encode("ascii")
+                    + body
+                )
         finally:
             self.shutdown_request(request)
 
@@ -897,7 +905,15 @@ def run_admin(
 
 
 def _handler_for(state: AdminState) -> type[BaseHTTPRequestHandler]:
+    request_timeout = _admin_request_timeout_seconds()
+
     class AdminHandler(BaseHTTPRequestHandler):
+        # StreamRequestHandler applies this to the connection socket. Without it a
+        # peer that opens a socket and never sends a request line blocks its worker
+        # thread forever and permanently burns one of the bounded request slots,
+        # which is how the server ends up answering every caller with 503.
+        timeout = request_timeout
+
         def do_GET(self) -> None:  # noqa: N802
             self._request_started_at = time.monotonic()
             parsed = urlparse(self.path)
@@ -1328,6 +1344,13 @@ def _api_docs_payload(state: AdminState) -> dict[str, Any]:
 
 def _admin_max_request_threads() -> int:
     return _positive_int_env("FINANCE_PI_ADMIN_MAX_THREADS", DEFAULT_MAX_REQUEST_THREADS)
+
+
+def _admin_request_timeout_seconds() -> float:
+    return _nonnegative_float_env(
+        "FINANCE_PI_ADMIN_REQUEST_TIMEOUT_SECONDS",
+        DEFAULT_REQUEST_TIMEOUT_SECONDS,
+    )
 
 
 def _admin_max_jobs() -> int:

@@ -2,8 +2,12 @@
 Description=Run finance-pi admin HTTP watchdog
 
 [Timer]
+# OnUnitActiveSec anchors on the watchdog service's own last activation, so a
+# single missed run leaves the timer with no next elapse point (systemd reports
+# NextElapseUSecMonotonic=infinity) and the watchdog silently stops forever.
+# A wall-clock schedule always re-arms regardless of unit state.
 OnBootSec=1min
-OnUnitActiveSec=1min
+OnCalendar=*:0/1
 AccuracySec=15s
 Persistent=true
 
