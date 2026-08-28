@@ -58,3 +58,16 @@ def test_backup_creates_checksum_and_runs_restore_drill() -> None:
     assert "UMask=0077" in service
     assert "ops/backup.sh create" in service
     assert "OnCalendar=Sun *-*-* 03:30:00 Asia/Seoul" in timer
+
+
+def test_admin_watchdog_timer_rearms_on_a_wall_clock_schedule() -> None:
+    # Regression: with only OnBootSec + OnUnitActiveSec the timer lost its next
+    # elapse point after one missed run (NextElapseUSecMonotonic=infinity) and
+    # the admin health check silently stopped running for six weeks.
+    timer = (REPO_ROOT / "ops/systemd/finance-pi-admin-watchdog.timer").read_text(
+        encoding="utf-8"
+    )
+
+    assert "OnCalendar=*:0/1" in timer
+    assert "OnUnitActiveSec=" not in timer
+    assert "WantedBy=timers.target" in timer

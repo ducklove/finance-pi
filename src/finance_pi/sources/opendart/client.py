@@ -27,6 +27,10 @@ class OpenDartClient:
 
     def fetch_corp_codes(self, snapshot_dt: date) -> list[dict[str, Any]]:
         content = self.http.get_bytes("/api/corpCode.xml", params={"crtfc_key": self.api_key})
+        # OpenDART answers HTTP 200 with an XML <result> error body instead of the
+        # zip whenever the bulk download is unavailable (status 800 = 시스템 점검).
+        # Unwrapped, that surfaces as an opaque "File is not a zip file".
+        _raise_for_corp_code_error(content)
         with zipfile.ZipFile(BytesIO(content)) as archive:
             xml_name = archive.namelist()[0]
             root = ET.fromstring(archive.read(xml_name))
@@ -237,6 +241,29 @@ class OpenDartClient:
             }
             for item in payload.get("list", [])
         ]
+
+
+def _raise_for_corp_code_error(content: bytes) -> None:
+    if content[:2] == b"PK":
+        return
+    text = content.decode("utf-8", "replace").strip()
+    status = ""
+    message = ""
+    try:
+        root = ET.fromstring(text)
+    except ET.ParseError:
+        pass
+    else:
+        status = (root.findtext("status") or "").strip()
+        message = (root.findtext("message") or "").strip()
+    if not status and not message:
+        preview = " ".join(text.split())[:200] or f"{len(content)} empty bytes"
+        raise SourceApiError("opendart", f"corpCode.xml returned no zip: {preview}")
+    raise SourceApiError(
+        "opendart",
+        f"corpCode.xml unavailable (status {status or 'unknown'}): {message or 'no message'}",
+        payload={"status": status, "message": message},
+    )
 
 
 def _xml_text(item: ET.Element, tag: str) -> str | None:

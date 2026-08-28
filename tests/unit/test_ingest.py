@@ -1,18 +1,22 @@
 from __future__ import annotations
 
+import zipfile
 from dataclasses import replace
 from datetime import date
+from io import BytesIO
 
 import polars as pl
 import pytest
 
 from finance_pi.cli.app import _dart_financial_requests
 from finance_pi.config import ProjectPaths
+from finance_pi.http import SourceApiError
 from finance_pi.ingest import IngestOrchestrator, request_hash
 from finance_pi.ingest.models import IngestUnit, RawBatch, WriteResult
 from finance_pi.sources.kis.adapter import KisUniverseDailyAdapter
 from finance_pi.sources.naver.adapter import NaverDailyBackfillAdapter
 from finance_pi.sources.opendart.adapter import DartFilingsAdapter, DartFinancialsBulkAdapter
+from finance_pi.sources.opendart.client import OpenDartClient
 from finance_pi.storage import DataLakeLayout, ParquetDatasetWriter
 
 
@@ -684,3 +688,61 @@ def test_cli_ingest_wrapper_raises_after_isolating_failures() -> None:
             date(2026, 4, 28),
             date(2026, 4, 28),
         )
+
+
+class _StubBytesHttp:
+    def __init__(self, content: bytes) -> None:
+        self.content = content
+
+    def get_bytes(self, path: str, *, params=None, headers=None) -> bytes:
+        return self.content
+
+
+def test_fetch_corp_codes_reports_the_opendart_status_instead_of_a_zip_error() -> None:
+    # OpenDART answers HTTP 200 with an XML error body when the bulk corp-code
+    # download is suspended; the raw zipfile failure ("File is not a zip file")
+    # hid that from the daily job for six weeks.
+    body = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        "<result><status>800</status>"
+        "<message>시스템 점검으로 인한 서비스가 중지 중입니다.</message>"
+        "</result>"
+    ).encode()
+    client = OpenDartClient(api_key="key", http=_StubBytesHttp(body))
+
+    with pytest.raises(SourceApiError) as excinfo:
+        client.fetch_corp_codes(date(2026, 8, 29))
+
+    message = str(excinfo.value)
+    assert "status 800" in message
+    assert "시스템 점검" in message
+    assert "zip" not in message.lower()
+
+
+def test_fetch_corp_codes_reports_non_xml_garbage_clearly() -> None:
+    client = OpenDartClient(api_key="key", http=_StubBytesHttp(b"<html>nope</html>"))
+
+    with pytest.raises(SourceApiError) as excinfo:
+        client.fetch_corp_codes(date(2026, 8, 29))
+
+    message = str(excinfo.value)
+    assert "corpCode.xml returned no zip" in message
+    assert "<html>nope</html>" in message
+
+
+def test_fetch_corp_codes_parses_a_real_zip() -> None:
+    buffer = BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr(
+            "CORPCODE.xml",
+            '<?xml version="1.0" encoding="UTF-8"?><result>'
+            "<list><corp_code>00126380</corp_code><corp_name>Samsung</corp_name>"
+            "<stock_code>005930</stock_code><modify_date>20260101</modify_date></list>"
+            "</result>",
+        )
+    client = OpenDartClient(api_key="key", http=_StubBytesHttp(buffer.getvalue()))
+
+    rows = client.fetch_corp_codes(date(2026, 8, 29))
+
+    assert [row["corp_code"] for row in rows] == ["00126380"]
+    assert rows[0]["stock_code"] == "005930"
