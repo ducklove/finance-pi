@@ -131,8 +131,17 @@ python -m finance_pi.cli.app catchup --root . --since 2026-04-29 --until 2026-04
 Each daily run writes a completeness marker (`complete` /
 `complete_with_failures` / `failed`) under `data/_state/daily/`, including a
 gold price-quality gate that flags row-count collapses against the previous
-trading day. Catch-up resumes from the latest fully complete date and re-runs
-incomplete ones. When `FINANCE_PI_WEBHOOK_URL` is set, daily/catch-up runs POST
+trading day.
+
+Catch-up은 KRX 휴장일을 제외하고 누락 날짜와 실패 기록을 재시도합니다.
+한 날짜가 실패해도 이후 날짜를 계속 처리하며, 미완료 날짜가 있으면 종료 코드 1을
+반환합니다. 다른 소스의 장애가 있어도 수집된 가격은 빌드하며 실패 기록은 유지합니다.
+과거 가격은 Naver를 사용하고, KIS의 최근 가격 응답이 비거나 직전 거래일 대비
+95% 미만이면 Naver로 보완합니다. 기본 종료일은 한국 시간 16시 기준 마지막
+장 마감일입니다. 현재 Naver 요약 스냅샷을 과거 날짜로 소급 기록하지 않습니다.
+`/api/ready`는 최신 가격뿐 아니라 미완료 거래일의 개수와 날짜도 표시합니다.
+
+When `FINANCE_PI_WEBHOOK_URL` is set, daily/catch-up runs POST
 a Slack/Discord-compatible summary whenever a step fails or a dataset grades
 C/F on the reliability scorecard.
 

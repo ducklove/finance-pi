@@ -1290,6 +1290,24 @@ def _readiness_payload(state: AdminState) -> dict[str, Any]:
     # Degradations do not block readiness, but they must not stay invisible either:
     # a silently degraded source is what let the pipeline rot for six weeks.
     checks["daily_warnings"] = marker_warnings
+    # 최신 날짜가 복구되어도 과거의 미완료 작업을 정상으로 숨기지 않는다.
+    incomplete_dates: list[str] = []
+    for path in sorted((state.paths.data_root / "_state" / "daily").glob("*.json")):
+        try:
+            day = date.fromisoformat(path.stem)
+        except ValueError:
+            continue
+        if day > _kst_today() or not TradingCalendar.is_krx_trading_day(day):
+            continue
+        try:
+            status = json.loads(path.read_text(encoding="utf-8")).get("status")
+        except (OSError, ValueError, AttributeError):
+            status = "invalid"
+        if status != "complete":
+            incomplete_dates.append(day.isoformat())
+    checks["incomplete_daily_count"] = len(incomplete_dates)
+    checks["incomplete_daily_dates"] = incomplete_dates[:10]
+    checks["daily_backlog_ok"] = not incomplete_dates
 
     ready = all(
         checks[name]
@@ -1301,6 +1319,7 @@ def _readiness_payload(state: AdminState) -> dict[str, Any]:
             "latest_price_rows",
             "price_fresh",
             "daily_marker_ok",
+            "daily_backlog_ok",
         )
     )
     return {

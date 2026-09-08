@@ -1383,10 +1383,8 @@ def run_daily(
 ) -> None:
     """Run the daily local maintenance job.
 
-    KIS is the default daily price source. Naver summary snapshots enrich KIS
-    rows with market cap/share count. OpenDART filings are ingested when
-    configured, then Silver/Gold datasets, the DuckDB catalog, and reports are
-    rebuilt.
+    최근 가격은 KIS, 과거 복구와 KIS 실패 시에는 Naver를 사용한다.
+    수집 가능한 데이터는 게시하고 실패한 단계는 날짜별로 기록한다.
     """
 
     parsed_date = _parse_report_date(report_date)
@@ -1401,10 +1399,8 @@ def run_daily(
         failures, warnings = _run_daily_ingest(paths, settings, parsed_date)
         for message in (*failures, *warnings):
             typer.echo(message)
-        if strict and failures:
-            _record_daily_marker(paths.data_root, parsed_date, price_date, failures, warnings)
-            _notify_daily_webhook(settings, parsed_date, failures, build_failures, None)
-            raise typer.Exit(code=1)
+        # 일부 소스가 실패해도 이미 수집한 가격은 게시한다. 실패 상태는
+        # 마지막에 기록하고 strict 종료 코드로 남겨 다음 실행에서 재시도한다.
     try:
         summaries = _run_daily_builds(
             paths.data_root,
@@ -1418,12 +1414,14 @@ def run_daily(
     for failure in quality_failures:
         typer.echo(failure)
     build_failures.extend(quality_failures)
-    created = CatalogBuilder(paths.data_root, paths.catalog_path).build()
+    try:
+        created = CatalogBuilder(paths.data_root, paths.catalog_path).build()
+    except Exception as exc:  # noqa: BLE001
+        build_failures.append(f"Catalog build failed: {exc}")
+        created = []
 
     dq_path = paths.data_root / "reports" / "data_quality" / f"{parsed_date.isoformat()}.html"
-    fraud_path = (
-        paths.data_root / "reports" / "backtest_fraud" / f"{parsed_date.isoformat()}.html"
-    )
+    fraud_path = paths.data_root / "reports" / "backtest_fraud" / f"{parsed_date.isoformat()}.html"
     try:
         build_data_quality_report(paths.data_root, parsed_date).write(dq_path)
     except Exception as exc:  # noqa: BLE001
@@ -1449,7 +1447,7 @@ def run_daily(
 
     scorecard = _safe_build_scorecard(paths.data_root, parsed_date)
     _notify_daily_webhook(settings, parsed_date, failures, build_failures, scorecard)
-    if strict and quality_failures:
+    if strict and (failures or build_failures):
         raise typer.Exit(code=1)
 
 
@@ -1472,17 +1470,44 @@ def catchup_daily(
     """Run daily for each missing weekday in a date range."""
 
     paths = ProjectPaths(root=root)
-    end = _parse_report_date(until)
+    end = _parse_report_date(until) if until else _latest_closed_price_date()
     dates = _catchup_dates(paths.data_root, _parse_report_date(since) if since else None, end)
     if not dates:
         typer.echo("No catch-up dates to run.")
         return
+    incomplete: list[str] = []
     for report_day in dates:
         typer.echo(f"Catch-up daily: {report_day.isoformat()}")
-        run_daily(paths.root, report_day.isoformat(), ingest, strict, include_fundamentals_pit)
+        try:
+            run_daily(paths.root, report_day.isoformat(), ingest, strict, include_fundamentals_pit)
+        except typer.Exit as exc:
+            if exc.exit_code:
+                marker_status = _read_daily_marker_status(
+                    _daily_marker_path(paths.data_root, report_day)
+                )
+                if marker_status not in {
+                    "failed", "complete_with_failures",
+                }:
+                    _record_daily_marker(
+                        paths.data_root, report_day, _previous_weekday(report_day),
+                        [f"Daily run exited with code {exc.exit_code}"],
+                    )
+                incomplete.append(report_day.isoformat())
+        except Exception as exc:  # noqa: BLE001
+            # 예상하지 못한 오류도 날짜별로 남겨 이후 날짜의 수집을 진행한다.
+            _record_daily_marker(
+                paths.data_root,
+                report_day,
+                _previous_weekday(report_day),
+                [f"Daily run failed: {exc}"],
+            )
+            incomplete.append(report_day.isoformat())
         if not _daily_complete(paths.data_root, report_day):
-            typer.echo(f"Catch-up stopped: {report_day.isoformat()} did not complete")
-            return
+            incomplete.append(report_day.isoformat())
+            typer.echo(f"Catch-up deferred: {report_day.isoformat()} did not complete")
+    if incomplete:
+        typer.echo(f"Catch-up incomplete dates: {', '.join(sorted(set(incomplete)))}")
+        raise typer.Exit(code=1)
 
 
 def _safe_build_scorecard(data_root: Path, report_date: date) -> pl.DataFrame | None:
@@ -1537,9 +1562,7 @@ def _notify_daily_webhook(
         worst_grade = _worst_scorecard_grade(scorecard_grades)
         ok = not failed_steps and worst_grade in (None, "A")
 
-        should_send = (
-            worst_grade in ("C", "F") or bool(failed_steps) or settings.webhook_always
-        )
+        should_send = worst_grade in ("C", "F") or bool(failed_steps) or settings.webhook_always
         if not should_send:
             return
 
@@ -1585,6 +1608,12 @@ def _daily_webhook_payload(
 
 def _kst_today() -> date:
     return datetime.now(timezone(timedelta(hours=9))).date()
+
+
+def _latest_closed_price_date() -> date:
+    now = datetime.now(timezone(timedelta(hours=9)))
+    day = now.date() if now.hour >= 16 else now.date() - timedelta(days=1)
+    return _previous_weekday(day)
 
 
 def _parse_report_date(value: str | None) -> date:
@@ -1695,25 +1724,14 @@ def _run_daily_ingest(
         typer.echo("OpenDART company/filings ingest skipped: OPENDART_API_KEY missing")
 
     try:
-        ingest_naver_summary(price_date.isoformat(), paths.root, "KOSPI,KOSDAQ")
+        # 요약 페이지는 현재 스냅샷이므로 과거 날짜로 소급 기록하지 않는다.
+        ingest_naver_summary(_latest_closed_price_date().isoformat(), paths.root, "KOSPI,KOSDAQ")
     except Exception as exc:  # noqa: BLE001
         failures.append(f"Naver summary ingest failed: {exc}")
 
-    if settings.has_kis:
-        try:
-            ingest_kis_universe(
-                price_date.isoformat(),
-                price_date.isoformat(),
-                paths.root,
-                None,
-                1,
-                settings.kis_daily_sleep_seconds,
-                settings.kis_daily_ticker_batch_size,
-            )
-        except Exception as exc:  # noqa: BLE001
-            failures.append(f"KIS universe price ingest failed: {exc}")
-    else:
-        typer.echo("KIS price ingest skipped: KIS_APP_KEY/KIS_APP_SECRET missing")
+    price_failures, price_warnings = _ingest_daily_prices(paths, settings, price_date)
+    failures.extend(price_failures)
+    warnings.extend(price_warnings)
 
     if settings.has_opendart:
         try:
@@ -1776,6 +1794,57 @@ def _run_daily_ingest(
     for failure in macro_failures:
         typer.echo(failure)
     return failures, warnings
+
+
+def _ingest_daily_prices(
+    paths: ProjectPaths,
+    settings: RuntimeSettings,
+    price_date: date,
+) -> tuple[list[str], list[str]]:
+    warnings: list[str] = []
+    historical = price_date < _latest_closed_price_date()
+    if historical and not _daily_price_quality_failures(paths.data_root, price_date):
+        typer.echo(f"Price ingest skipped: validated gold prices for {price_date}")
+        return [], warnings
+
+    if settings.has_kis and not historical:
+        try:
+            ingest_kis_universe(
+                price_date.isoformat(),
+                price_date.isoformat(),
+                paths.root,
+                None,
+                1,
+                settings.kis_daily_sleep_seconds,
+                settings.kis_daily_ticker_batch_size,
+            )
+            path = DataLakeLayout(paths.data_root).partition_path(
+                "bronze.kis_daily_raw", price_date
+            )
+            rows = _count_parquet_rows([path]) if path.exists() else 0
+            previous = _previous_gold_price_row_count(paths.data_root, price_date)
+            minimum = max(1, int(previous[1] * 0.95)) if previous else 1
+            if rows >= minimum:
+                return [], warnings
+            warnings.append(
+                f"KIS price coverage low for {price_date}: {rows} < {minimum}; use Naver"
+            )
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(f"KIS price ingest degraded; use Naver: {exc}")
+    try:
+        ingest_naver_daily(
+            price_date.isoformat(),
+            price_date.isoformat(),
+            paths.root,
+            None,
+            3650,
+            50,
+            0.02,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return [f"Naver daily price ingest failed: {exc}"], warnings
+    # 빈 응답이나 부분 성공은 이어지는 Gold 품질 검사에서 최종 판정한다.
+    return [], warnings
 
 
 def _ingest_macro(
@@ -3766,27 +3835,20 @@ def _kis_error_message(exc: Exception) -> str:
     lowered = base.lower()
     hints: list[str] = []
     if (
-        ("egw00105" in lowered or "appsecret" in lowered)
-        and "kis_app_secret was rejected" not in lowered
-    ):
+        "egw00105" in lowered or "appsecret" in lowered
+    ) and "kis_app_secret was rejected" not in lowered:
         hints.append(
             "hint: KIS_APP_SECRET was rejected. Copy the AppSecret exactly as a single "
             "line in .env; remove any wrapped secret fragments on following lines."
         )
-    if (
-        ("egw00103" in lowered or "appkey" in lowered)
-        and "check kis_app_key" not in lowered
-    ):
+    if ("egw00103" in lowered or "appkey" in lowered) and "check kis_app_key" not in lowered:
         hints.append("hint: check KIS_APP_KEY and whether the app is approved in KIS Open API.")
     if "egw00133" in lowered and "token issuance" not in lowered:
         hints.append(
             "hint: KIS limits token issuance to about once per minute. Wait 60 seconds "
             "once; successful future runs reuse data/_cache/kis/token.json."
         )
-    if (
-        ("invalid token" in lowered or "기간이 만료" in base)
-        and "fresh token" not in lowered
-    ):
+    if ("invalid token" in lowered or "기간이 만료" in base) and "fresh token" not in lowered:
         hints.append("hint: remove KIS_ACCESS_TOKEN and let finance-pi issue a fresh token.")
     return "\n".join([base, *hints])
 

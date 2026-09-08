@@ -106,12 +106,19 @@ the already-missed 2026-04-29 and 2026-04-30 sessions:
 python -m finance_pi.cli.app catchup --root . --since 2026-04-29 --until 2026-04-30 --no-strict
 ```
 
-Without `--since`, catch-up starts from the day after the latest
-`gold.daily_prices_adj` partition. The scheduled systemd service uses catch-up
-instead of a single-day run so a missed timer can fill multiple weekdays on the
-next execution. Use `--no-strict` for the scheduled service because the current
-calendar only skips weekends; market holidays can legitimately produce no price
-rows.
+`--since`를 생략하면 최신 가격 이후의 거래일과 기존 실패 날짜를 처리합니다.
+KRX 휴장일을 제외하며, 한 날짜가 실패해도 나머지 날짜를 계속 처리합니다.
+미완료 날짜는 기록을 유지하고 종료 코드 1을 반환하므로 예약 서비스는 기본
+strict 설정을 사용합니다. `--no-strict`도 미완료 catch-up을 성공으로 바꾸지 않습니다.
+과거 가격은 Naver, 최근 가격은 KIS를 사용하며 KIS 오류나 수량 부족 시 Naver로
+보완합니다. 한국 시간 16시 이전에는 전 거래일까지 처리합니다.
+
+운영 확인 시 `/api/health` 외에 `/api/ready`의 `latest_price_date`,
+`price_fresh`, `incomplete_daily_count`, `incomplete_daily_dates`를 확인합니다.
+휴장일이 추가되면 `src/finance_pi/calendar/trading_calendar.py`를 KRX 공지에 맞춰
+갱신해야 합니다. 2026년 7월 17일 제헌절 휴장은
+[KRX 공지](https://kind.krx.co.kr/external/2026/05/20/000110/20260520000197/32154.htm)에
+따라 반영했습니다. 과거에 생성된 해당 휴장일의 실패 기록은 재시도에서 제외됩니다.
 
 Daily and catch-up runs skip the large `gold.fundamentals_pit` rebuild by
 default. Rebuild that derived cache manually when you need PIT fundamentals:

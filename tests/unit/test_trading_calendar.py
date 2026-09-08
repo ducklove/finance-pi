@@ -14,6 +14,14 @@ def test_is_krx_trading_day_holiday_2026() -> None:
     assert not TradingCalendar.is_krx_trading_day(date(2026, 1, 1))
 
 
+def test_constitution_day_2026_is_closed() -> None:
+    assert not TradingCalendar.is_krx_trading_day(date(2026, 7, 17))
+    assert TradingCalendar.krx_trading_days(date(2026, 7, 16), date(2026, 7, 20)).dates == (
+        date(2026, 7, 16),
+        date(2026, 7, 20),
+    )
+
+
 def test_is_krx_trading_day_weekday_2026() -> None:
     # 2026-01-02 is a Friday and not a KRX holiday.
     assert TradingCalendar.is_krx_trading_day(date(2026, 1, 2))

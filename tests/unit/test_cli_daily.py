@@ -220,6 +220,7 @@ def test_daily_ingest_treats_no_matching_dart_reports_as_skip(tmp_path, monkeypa
 
     monkeypatch.setattr(cli_app, "ingest_dart_company", noop)
     monkeypatch.setattr(cli_app, "ingest_naver_summary", noop)
+    monkeypatch.setattr(cli_app, "ingest_naver_daily", noop)
     monkeypatch.setattr(cli_app, "ingest_dart_filings", noop)
     monkeypatch.setattr(cli_app, "ingest_dart_financials_bulk", noop)
     monkeypatch.setattr(cli_app, "ingest_dart_dividends", raise_no_match)
@@ -244,6 +245,7 @@ def test_daily_ingest_keeps_other_dart_errors_as_failures(tmp_path, monkeypatch)
 
     monkeypatch.setattr(cli_app, "ingest_dart_company", noop)
     monkeypatch.setattr(cli_app, "ingest_naver_summary", noop)
+    monkeypatch.setattr(cli_app, "ingest_naver_daily", noop)
     monkeypatch.setattr(cli_app, "ingest_dart_filings", noop)
     monkeypatch.setattr(cli_app, "ingest_dart_financials_bulk", noop)
     monkeypatch.setattr(cli_app, "ingest_dart_dividends", raise_runtime)
@@ -264,6 +266,7 @@ def test_daily_ingest_includes_macro_failures(tmp_path, monkeypatch) -> None:
         return None
 
     monkeypatch.setattr(cli_app, "ingest_naver_summary", noop)
+    monkeypatch.setattr(cli_app, "ingest_naver_daily", noop)
     monkeypatch.setattr(
         cli_app,
         "_ingest_macro",
@@ -291,6 +294,8 @@ def test_daily_ingest_internal_calls_pass_concrete_defaults(tmp_path, monkeypatc
     monkeypatch.setattr(cli_app, "ingest_dart_company", record("dart_company"))
     monkeypatch.setattr(cli_app, "ingest_naver_summary", record("naver_summary"))
     monkeypatch.setattr(cli_app, "ingest_kis_universe", record("kis_universe"))
+    monkeypatch.setattr(cli_app, "ingest_naver_daily", record("naver_daily"))
+    monkeypatch.setattr(cli_app, "_latest_closed_price_date", lambda: date(2026, 4, 30))
     monkeypatch.setattr(cli_app, "ingest_dart_filings", record("dart_filings"))
     monkeypatch.setattr(cli_app, "ingest_dart_financials_bulk", record("dart_financials_bulk"))
     monkeypatch.setattr(cli_app, "ingest_dart_dividends", record("dart_dividends"))
@@ -1379,6 +1384,7 @@ def test_daily_ingest_degrades_instead_of_failing_when_corp_codes_are_unavailabl
 
     monkeypatch.setattr(cli_app, "ingest_dart_company", raise_suspended)
     monkeypatch.setattr(cli_app, "ingest_naver_summary", noop)
+    monkeypatch.setattr(cli_app, "ingest_naver_daily", noop)
     monkeypatch.setattr(cli_app, "ingest_dart_filings", noop)
     monkeypatch.setattr(cli_app, "ingest_dart_financials_bulk", noop)
     monkeypatch.setattr(cli_app, "ingest_dart_dividends", noop)
