@@ -24,6 +24,17 @@ def test_holiday_failure_marker_does_not_block_new_dates(tmp_path):
     )
 
 
+def test_quality_gate_detects_small_transform_loss(tmp_path):
+    day = date(2026, 9, 8)
+    for dataset, count in [("silver.prices", 100), ("gold.daily_prices_adj", 99)]:
+        path = cli.DataLakeLayout(tmp_path).partition_path(dataset, day)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pl.DataFrame({"security_id": [f"S{i:06}" for i in range(count)]}).write_parquet(path)
+    assert cli._daily_price_quality_failures(tmp_path, day) == [
+        "Gold prices missing 1 Silver securities for 2026-09-08"
+    ]
+
+
 @pytest.mark.parametrize("failure", [typer.Exit(1), RuntimeError("catalog unavailable")])
 def test_catchup_keeps_failed_date_and_publishes_later_dates(tmp_path, monkeypatch, failure):
     calls = []

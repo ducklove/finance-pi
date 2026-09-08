@@ -1151,7 +1151,8 @@ def build_daily_prices_adj(
                 sorted(stale_ids),
             )
             rebuilt_rows, rebuilt_files = _rebuild_adjusted_history(data_root, stale_ids, actions)
-            prices = prices.filter(~pl.col("security_id").is_in(sorted(stale_ids)))
+            # 선택 날짜는 전체 종목으로 덮어쓴다. 재보정 종목을 제외하면
+            # 방금 복구한 그 종목의 행이 다음 파티션 쓰기에서 사라진다.
         if not prices.is_empty():
             prices = _with_previous_gold_close(data_root, prices, selected_dates)
         if prices.is_empty():

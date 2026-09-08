@@ -3062,6 +3062,14 @@ def _daily_price_quality_failures(data_root: Path, logical_date: date) -> list[s
     current_rows = _gold_price_row_count(data_root, logical_date)
     if current_rows <= 0:
         return [f"Gold price partition missing or empty for {logical_date.isoformat()}"]
+    silver_path = DataLakeLayout(data_root).partition_path("silver.prices", logical_date)
+    if silver_path.exists():
+        gold_path = DataLakeLayout(data_root).partition_path("gold.daily_prices_adj", logical_date)
+        source_ids = pl.read_parquet(silver_path, columns=["security_id"]).unique()
+        gold_ids = pl.read_parquet(gold_path, columns=["security_id"]).unique()
+        missing = source_ids.join(gold_ids, on="security_id", how="anti").height
+        if missing:
+            return [f"Gold prices missing {missing} Silver securities for {logical_date}"]
     previous = _previous_gold_price_row_count(data_root, logical_date)
     if previous is None:
         return []

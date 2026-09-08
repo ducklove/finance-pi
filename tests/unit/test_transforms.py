@@ -673,9 +673,7 @@ def test_build_financials_accepts_mixed_bronze_date_schemas(tmp_path) -> None:
     assert first_row["sort_order"] == 1
     assert first_row["currency"] == "KRW"
     # Legacy bronze partitions without the column read as False.
-    backfilled = {
-        row["corp_code"]: row["is_backfilled"] for row in silver.iter_rows(named=True)
-    }
+    backfilled = {row["corp_code"]: row["is_backfilled"] for row in silver.iter_rows(named=True)}
     assert backfilled == {"00126380": False, "00258801": True}
 
 
@@ -768,9 +766,7 @@ def test_build_filings_silver_normalizes_dedups_and_flags(tmp_path) -> None:
     writer.write(
         pl.DataFrame(
             [
-                _bronze_filing_row(
-                    date(2024, 1, 5), "20240105000001", stock_code="005930"
-                ),
+                _bronze_filing_row(date(2024, 1, 5), "20240105000001", stock_code="005930"),
                 # Unlisted filer: no stock_code, so no security_id in silver.
                 _bronze_filing_row(
                     date(2024, 1, 5),
@@ -822,9 +818,7 @@ def test_build_filings_silver_normalizes_dedups_and_flags(tmp_path) -> None:
     assert correction["security_id"] == "S000660"
     assert correction["is_correction"] is True
     assert correction["available_date"] == date(2024, 1, 5)
-    deduped = pl.read_parquet(
-        tmp_path / "silver" / "filings" / "dt=2024-01-08" / "part.parquet"
-    )
+    deduped = pl.read_parquet(tmp_path / "silver" / "filings" / "dt=2024-01-08" / "part.parquet")
     assert deduped.height == 1
     row = deduped.row(0, named=True)
     assert row["rcept_no"] == "20240105000001"
@@ -910,9 +904,10 @@ def test_fundamentals_pit_keeps_latest_account_per_day(tmp_path) -> None:
 
     pit = pl.read_parquet(tmp_path / "gold" / "fundamentals_pit" / "dt=2024-01-03" / "part.parquet")
     assert summary.rows == 2
-    assert {
-        row["report_type"]: row["amount"] for row in pit.iter_rows(named=True)
-    } == {"11011": 2000.0, "11013": 500.0}
+    assert {row["report_type"]: row["amount"] for row in pit.iter_rows(named=True)} == {
+        "11011": 2000.0,
+        "11013": 500.0,
+    }
 
 
 def test_fundamentals_pit_prefers_consolidated_and_next_day_availability(tmp_path) -> None:
@@ -1267,15 +1262,20 @@ def test_build_corporate_actions_preserves_manual_rows_and_removes_stale(tmp_pat
     ).exists()
 
 
-def test_incremental_adj_rebuilds_history_when_new_action_appears(tmp_path) -> None:
+@pytest.mark.parametrize("include_unchanged_security", [False, True])
+def test_incremental_adj_rebuilds_history_when_new_action_appears(
+    tmp_path,
+    include_unchanged_security,
+) -> None:
     layout = DataLakeLayout(tmp_path)
     layout.ensure_base_dirs()
     writer = ParquetDatasetWriter()
     _write_silver_prices(
         tmp_path,
         [
-            _silver_price_row(date(2024, 1, day), "111111", close=100.0, volume=10)
+            _silver_price_row(date(2024, 1, day), ticker, close=100.0, volume=10)
             for day in (2, 3, 4)
+            for ticker in (["111111", "222222"] if include_unchanged_security else ["111111"])
         ],
     )
 
@@ -1286,7 +1286,12 @@ def test_incremental_adj_rebuilds_history_when_new_action_appears(tmp_path) -> N
 
     _write_silver_prices(
         tmp_path,
-        [_silver_price_row(date(2024, 1, 5), "111111", close=50.0, volume=10)],
+        [
+            _silver_price_row(
+                date(2024, 1, 5), ticker, close=50.0 if ticker == "111111" else 110.0, volume=10
+            )
+            for ticker in (["111111", "222222"] if include_unchanged_security else ["111111"])
+        ],
     )
     writer.write(
         pl.DataFrame(
@@ -1311,9 +1316,18 @@ def test_incremental_adj_rebuilds_history_when_new_action_appears(tmp_path) -> N
     latest = pl.read_parquet(
         tmp_path / "gold" / "daily_prices_adj" / "dt=2024-01-05" / "part.parquet"
     )
-    assert first.select("close_adj").item() == pytest.approx(50.0)
-    assert latest.select("close_adj").item() == pytest.approx(50.0)
-    assert latest.select("return_1d").item() == pytest.approx(0.0)
+    expected_ids = {"S111111", "S222222"} if include_unchanged_security else {"S111111"}
+    assert set(latest["security_id"]) == expected_ids
+    assert first.filter(pl.col("security_id") == "S111111")["close_adj"].item() == pytest.approx(
+        50.0
+    )
+    split = latest.filter(pl.col("security_id") == "S111111")
+    assert split["close_adj"].item() == pytest.approx(50.0)
+    assert split["return_1d"].item() == pytest.approx(0.0)
+    if include_unchanged_security:
+        assert latest.filter(pl.col("security_id") == "S222222")[
+            "return_1d"
+        ].item() == pytest.approx(0.1)
     state = json.loads(state_path.read_text(encoding="utf-8"))
     assert state["events"] == [
         {
@@ -1332,7 +1346,9 @@ def test_incremental_adj_rebuilds_history_when_new_action_appears(tmp_path) -> N
     first_again = pl.read_parquet(
         tmp_path / "gold" / "daily_prices_adj" / "dt=2024-01-02" / "part.parquet"
     )
-    assert first_again.select("close_adj").item() == pytest.approx(50.0)
+    assert first_again.filter(pl.col("security_id") == "S111111")[
+        "close_adj"
+    ].item() == pytest.approx(50.0)
 
 
 def test_adjustment_multiplies_only_raw_basis_rows(tmp_path) -> None:
@@ -1465,9 +1481,9 @@ def test_build_silver_prices_repairs_source_ohlc_bounds(tmp_path) -> None:
 
     build_silver_prices(tmp_path, dates=[date(2024, 1, 2)])
 
-    row = pl.read_parquet(
-        tmp_path / "silver" / "prices" / "dt=2024-01-02" / "part.parquet"
-    ).row(0, named=True)
+    row = pl.read_parquet(tmp_path / "silver" / "prices" / "dt=2024-01-02" / "part.parquet").row(
+        0, named=True
+    )
     assert row["high"] == 110.0
     assert row["low"] == 100.0
 
@@ -1531,9 +1547,7 @@ def test_security_master_sets_delisted_date_for_stale_securities(tmp_path) -> No
     universe = pl.read_parquet(
         tmp_path / "gold" / "universe_history" / "dt=2024-01-16" / "part.parquet"
     )
-    active = {
-        row["security_id"]: row["is_active"] for row in universe.iter_rows(named=True)
-    }
+    active = {row["security_id"]: row["is_active"] for row in universe.iter_rows(named=True)}
     assert active["S111111"] is True
     assert active["S222222"] is False
 
@@ -1712,9 +1726,7 @@ def _read_all_silver_prices(tmp_path) -> pl.DataFrame:
     ).sort(["date", "ticker"])
 
 
-def test_full_rebuild_chunked_matches_one_shot_at_chunk_boundaries(
-    tmp_path, monkeypatch
-) -> None:
+def test_full_rebuild_chunked_matches_one_shot_at_chunk_boundaries(tmp_path, monkeypatch) -> None:
     layout = DataLakeLayout(tmp_path)
     layout.ensure_base_dirs()
     writer = ParquetDatasetWriter()
@@ -1828,9 +1840,7 @@ def _silver_market_cap_row(logical_date: date, ticker: str, market_cap: int) -> 
     }
 
 
-def test_daily_market_caps_chunked_build_skips_existing_partitions(
-    tmp_path, monkeypatch
-) -> None:
+def test_daily_market_caps_chunked_build_skips_existing_partitions(tmp_path, monkeypatch) -> None:
     layout = DataLakeLayout(tmp_path)
     layout.ensure_base_dirs()
     writer = ParquetDatasetWriter()
@@ -2131,9 +2141,7 @@ def test_build_security_relations_maps_preferred_pairs(tmp_path) -> None:
             {**_silver_price_row(logical_date, "111115", close=50.0), "name": "Unrelated 우"}
         )
         rows.append({**_silver_price_row(logical_date, "123450", close=100.0), "name": "Test"})
-        rows.append(
-            {**_silver_price_row(logical_date, "12345K", close=50.0), "name": "Test 2우B"}
-        )
+        rows.append({**_silver_price_row(logical_date, "12345K", close=50.0), "name": "Test 2우B"})
         rows.append(
             {**_silver_price_row(logical_date, "222220", close=10.0), "name": "Lonely Corp"}
         )
