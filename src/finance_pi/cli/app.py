@@ -834,7 +834,7 @@ def ingest_macro(
 
 @build_app.command("all")
 def build_everything(root: Path = typer.Option(Path("."), help="Workspace root")) -> None:
-    for summary in build_all_iter(ProjectPaths(root=root).data_root):
+    for summary in build_all_iter(ProjectPaths(root=root).data_root, refresh_actions=True):
         _print_summary(summary)
 
 
@@ -978,7 +978,7 @@ def bootstrap(
     if strict and failures:
         raise typer.Exit(code=1)
 
-    _print_summaries(build_all(paths.data_root))
+    _print_summaries(build_all(paths.data_root, refresh_actions=True))
     created = CatalogBuilder(paths.data_root, paths.catalog_path).build()
     typer.echo(f"Catalog: {paths.catalog_path}")
     typer.echo(f"Views: {len(created)}")
@@ -2582,6 +2582,12 @@ def _last_day_of_month(year: int, month: int) -> int:
 
 
 def _run_daily_builds(data_root: Path, include_fundamentals_pit: bool, price_date: date) -> list:
+    from finance_pi.transforms.builders import (
+        _load_corporate_actions,
+        _stale_adjustment_security_ids,
+    )
+    from finance_pi.transforms.price_refresh import refresh_action_price_history
+
     summaries = []
     price_dates = (price_date,)
     for builder in [
@@ -2591,6 +2597,11 @@ def _run_daily_builds(data_root: Path, include_fundamentals_pit: bool, price_dat
         build_corporate_actions,
         build_daily_prices_adj,
     ]:
+        if builder is build_daily_prices_adj:
+            refresh_action_price_history(
+                data_root,
+                _stale_adjustment_security_ids(data_root, _load_corporate_actions(data_root)),
+            )
         summaries.extend(builder(data_root, price_dates))
     summaries.extend(build_daily_market_caps(data_root))
     summaries.extend(build_security_relations(data_root))
@@ -2604,6 +2615,12 @@ def _run_daily_builds(data_root: Path, include_fundamentals_pit: bool, price_dat
 
 
 def _run_full_builds(data_root: Path, include_fundamentals_pit: bool) -> list:
+    from finance_pi.transforms.builders import (
+        _load_corporate_actions,
+        _stale_adjustment_security_ids,
+    )
+    from finance_pi.transforms.price_refresh import refresh_action_price_history
+
     builders = [
         build_silver_prices,
         build_security_master,
@@ -2624,6 +2641,11 @@ def _run_full_builds(data_root: Path, include_fundamentals_pit: bool) -> list:
 
     summaries = []
     for builder in builders:
+        if builder is build_daily_prices_adj:
+            refresh_action_price_history(
+                data_root,
+                _stale_adjustment_security_ids(data_root, _load_corporate_actions(data_root)),
+            )
         summaries.extend(builder(data_root))
     return summaries
 

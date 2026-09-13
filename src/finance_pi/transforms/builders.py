@@ -15,6 +15,7 @@ import polars as pl
 from finance_pi.events.classify import classify_filing_events
 from finance_pi.storage.layout import DataLakeLayout
 from finance_pi.storage.parquet import ParquetDatasetWriter
+from finance_pi.transforms.price_refresh import apply_refreshed_price_history
 
 logger = logging.getLogger(__name__)
 
@@ -240,11 +241,11 @@ class BuildSummary:
     files: int
 
 
-def build_all(data_root: Path) -> list[BuildSummary]:
-    return list(build_all_iter(data_root))
+def build_all(data_root: Path, *, refresh_actions: bool = False) -> list[BuildSummary]:
+    return list(build_all_iter(data_root, refresh_actions=refresh_actions))
 
 
-def build_all_iter(data_root: Path) -> Iterable[BuildSummary]:
+def build_all_iter(data_root: Path, *, refresh_actions: bool = False) -> Iterable[BuildSummary]:
     yield from build_silver_market_caps(data_root)
     yield from build_silver_prices(data_root)
     # Each builder re-reads silver.prices itself (prices=None) with its own
@@ -256,6 +257,12 @@ def build_all_iter(data_root: Path) -> Iterable[BuildSummary]:
     yield from build_security_relations(data_root)
     yield from build_universe_history(data_root)
     yield from build_corporate_actions(data_root)
+    if refresh_actions:
+        from finance_pi.transforms.price_refresh import refresh_action_price_history
+
+        refresh_action_price_history(
+            data_root, _stale_adjustment_security_ids(data_root, _load_corporate_actions(data_root))
+        )
     yield from build_daily_prices_adj(data_root)
     yield from build_daily_market_caps(data_root)
     yield from build_preferred_discount(data_root)
@@ -1158,7 +1165,7 @@ def build_daily_prices_adj(
         if prices.is_empty():
             _write_corporate_actions_state(data_root, actions)
             return [BuildSummary("gold.daily_prices_adj", rebuilt_rows, rebuilt_files)]
-    adjusted = _adjusted_price_frame(prices, actions)
+    adjusted = _adjusted_price_frame(apply_refreshed_price_history(data_root, prices), actions)
     # The raw frame (15 columns over the full history on a rebuild) is no
     # longer needed; release it before the partitioned write allocates.
     del prices
@@ -2800,7 +2807,7 @@ def _rebuild_adjusted_history(
     prices = _read_silver_prices_for_securities(data_root, ids)
     if prices is None or prices.is_empty():
         return 0, 0
-    adjusted = _adjusted_price_frame(prices, actions)
+    adjusted = _adjusted_price_frame(apply_refreshed_price_history(data_root, prices), actions)
     layout = DataLakeLayout(data_root)
     writer = ParquetDatasetWriter()
     files = 0
