@@ -622,6 +622,7 @@ def ingest_naver_daily(
     chunk_days: int = typer.Option(3650, help="Date range days per Naver request round"),
     ticker_batch_size: int = typer.Option(50, help="Tickers per incremental Naver write"),
     sleep_seconds: float = typer.Option(0.02, help="Sleep between ticker calls"),
+    refresh_existing: bool = typer.Option(False, help="Re-fetch and replace existing price rows"),
 ) -> None:
     paths = ProjectPaths(root=root)
     settings = RuntimeSettings.load(paths.root)
@@ -634,6 +635,7 @@ def ingest_naver_daily(
         chunk_days=chunk_days,
         ticker_batch_size=ticker_batch_size,
         sleep_seconds=sleep_seconds,
+        refresh_existing=refresh_existing is True,
     )
     _run_and_print([adapter], _parse_report_date(since), _parse_report_date(until))
 
@@ -1849,6 +1851,10 @@ def _ingest_daily_prices(
             3650,
             50,
             0.02,
+            **(
+                {"refresh_existing": True}
+                if not historical and price_date >= date(2026, 9, 14) else {}
+            ),
         )
     except Exception as exc:  # noqa: BLE001
         return [f"Naver daily price ingest failed: {exc}"], warnings

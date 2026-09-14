@@ -65,6 +65,7 @@ class NaverDailyBackfillAdapter:
     chunk_days: int = 3650
     ticker_batch_size: int = 50
     sleep_seconds: float = 0.02
+    refresh_existing: bool = False
     name: str = "naver_daily"
 
     def list_pending(self, since: date, until: date) -> Iterable[IngestUnit]:
@@ -88,7 +89,7 @@ class NaverDailyBackfillAdapter:
                 )
                 path = self._path(unit)
                 sidecar = self._sidecar_path(path)
-                if not path.exists() and not sidecar.exists():
+                if self.refresh_existing or (not path.exists() and not sidecar.exists()):
                     yield unit
                 elif sidecar.exists():
                     failed_tickers = tuple(_read_failures_sidecar(sidecar))
@@ -135,7 +136,7 @@ class NaverDailyBackfillAdapter:
     def write_bronze(self, batch: RawBatch) -> WriteResult:
         is_retry = "retry_of" in batch.unit.params
         path = self._path(batch.unit)
-        if not is_retry and path.exists():
+        if not is_retry and path.exists() and not self.refresh_existing:
             return WriteResult(path=path, rows=0, skipped=True, reason="bronze chunk exists")
 
         failures = [row for row in batch.rows if "_failures" in row]
@@ -160,6 +161,10 @@ class NaverDailyBackfillAdapter:
                 return WriteResult(
                     path=write_path, rows=0, skipped=True, reason="all retries failed"
                 )
+            if write_path.exists():
+                return WriteResult(
+                    path=write_path, rows=0, skipped=True, reason="no new Naver daily rows"
+                )
             self.writer.write(
                 pl.DataFrame(schema=PRICE_SCHEMA),
                 write_path,
@@ -169,9 +174,19 @@ class NaverDailyBackfillAdapter:
             )
             return WriteResult(path=write_path, rows=0, skipped=True, reason="no Naver daily rows")
 
+        output = RawBatch(batch.unit, price_rows).to_frame(PRICE_SCHEMA)
+        overwrite = self.refresh_existing and write_path.exists()
+        if overwrite:
+            existing = pl.read_parquet(write_path, hive_partitioning=False)
+            existing = existing.drop([c for c in existing.columns if c.startswith("_")])
+            # 재조회 성공 행은 교체하고, 실패한 종목의 이전 행은 보존한다.
+            output = pl.concat([existing, output], how="diagonal_relaxed").unique(
+                subset=["date", "ticker"], keep="last", maintain_order=True,
+            )
         self.writer.write(
-            RawBatch(batch.unit, price_rows).to_frame(PRICE_SCHEMA),
+            output,
             write_path,
+            mode="overwrite" if overwrite else "fail",
             source="naver",
             request_hash=batch.unit.request_hash,
             include_ingest_metadata=True,

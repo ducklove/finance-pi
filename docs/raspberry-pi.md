@@ -112,8 +112,9 @@ KRX 휴장일을 제외하며, 한 날짜가 실패해도 나머지 날짜를 �
 strict 설정을 사용합니다. `--no-strict`도 미완료 catch-up을 성공으로 바꾸지 않습니다.
 과거 가격은 Naver, 최근 가격은 KIS를 사용하며 KIS 오류나 수량 부족 시 Naver로
 보완합니다. 2026-09-14부터 한국 시간 20:10 이전에는 전 거래일까지 처리합니다.
-당일 최종 수집에서는 기존 KIS 종목도 다시 조회하며, 명시적 복구에는
-`ingest kis-universe --refresh-existing`를 사용합니다.
+당일 최종 수집에서는 KIS와 대체 공급원 Naver 모두 기존 종목도 다시 조회합니다.
+명시적 복구에는 `ingest kis-universe --refresh-existing` 또는
+`ingest naver-daily --refresh-existing`를 사용합니다.
 
 운영 확인 시 `/api/health` 외에 `/api/ready`의 `latest_price_date`,
 `price_fresh`, `incomplete_daily_count`, `incomplete_daily_dates`를 확인합니다.

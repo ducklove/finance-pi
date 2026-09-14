@@ -73,3 +73,49 @@ def test_early_complete_marker_is_retried_after_close(tmp_path):
     }), encoding="utf-8")
     assert cli._read_daily_marker_status(marker) == "complete"
     assert cli._catchup_dates(tmp_path, None, day) == ()
+
+
+def test_naver_fallback_refreshes_existing_chunk_and_preserves_failed_rows(tmp_path):
+    from dataclasses import replace
+
+    import polars as pl
+
+    from finance_pi.ingest.models import RawBatch
+    from finance_pi.sources.naver.adapter import NaverDailyBackfillAdapter
+    from finance_pi.storage import DataLakeLayout, ParquetDatasetWriter
+
+    day = date(2026, 9, 14)
+    adapter = NaverDailyBackfillAdapter(
+        DataLakeLayout(tmp_path), ParquetDatasetWriter(), None, ("530060", "530061"),
+    )
+    unit = next(iter(adapter.list_pending(day, day)))
+    original = [{"date": day, "ticker": code, "close": value}
+                for code, value in (("530060", 6825), ("530061", 100))]
+    adapter.write_bronze(RawBatch(unit, original))
+    assert list(adapter.list_pending(day, day)) == []
+    refreshed = replace(adapter, refresh_existing=True)
+    assert list(refreshed.list_pending(day, day)) == [unit]
+    result = refreshed.write_bronze(RawBatch(unit, [
+        {"date": day, "ticker": "530060", "close": 6805},
+        {"_failures": ["530061:timeout"]},
+    ]))
+    rows = pl.read_parquet(result.path).sort("ticker")
+    assert rows["close"].to_list() == [6805, 100]
+    assert rows.height == 2
+    assert result.reason == "partial Naver failures: 1"
+    assert refreshed._sidecar_path(result.path).exists()
+
+
+def test_daily_fallback_requests_refresh_after_market_close(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from finance_pi.config import ProjectPaths
+
+    day = date(2026, 9, 14)
+    monkeypatch.setattr(cli, "_latest_closed_price_date", lambda: day)
+    ingest = Mock()
+    monkeypatch.setattr(cli, "ingest_naver_daily", ingest)
+    result = cli._ingest_daily_prices(ProjectPaths(tmp_path), SimpleNamespace(has_kis=False), day)
+    assert result == ([], [])
+    assert ingest.call_args.kwargs == {"refresh_existing": True}
