@@ -115,6 +115,7 @@ strict 설정을 사용합니다. `--no-strict`도 미완료 catch-up을 성공�
 당일 최종 수집에서는 KIS와 대체 공급원 Naver 모두 기존 종목도 다시 조회합니다.
 명시적 복구에는 `ingest kis-universe --refresh-existing` 또는
 `ingest naver-daily --refresh-existing`를 사용합니다.
+같은 거래일이 여러 Naver 파일에 남으면 시행일 이후 가격은 최신 수집 시각을 우선합니다.
 
 운영 확인 시 `/api/health` 외에 `/api/ready`의 `latest_price_date`,
 `price_fresh`, `incomplete_daily_count`, `incomplete_daily_dates`를 확인합니다.

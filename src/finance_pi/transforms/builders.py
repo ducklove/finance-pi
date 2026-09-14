@@ -112,6 +112,7 @@ _JOIN_ASOF_KWARGS: dict[str, bool] = (
 # gigabytes per builder. Extra columns in an explicitly shared frame are fine —
 # each builder still projects with these lists before computing.
 _BRONZE_PRICE_COLUMNS = [
+    "_ingested_at",
     "date",
     "ticker",
     "name",
@@ -1983,6 +1984,20 @@ def _normalize_nps_holdings(frame: pl.DataFrame) -> pl.DataFrame:
 
 def _normalize_price_frame(frame: pl.DataFrame, source: str) -> pl.DataFrame:
     frame = _cast_dates(frame, ["date"])
+    if source == "naver" and "_ingested_at" in frame.columns:
+        # 장후 재수집 묶음의 종목 구성이 바뀌면 같은 날짜가 여러 파일에
+        # 남는다. 시행일 이후 가격은 파일 순서 대신 최신 수집본을 택한다.
+        latest = (
+            frame.filter(
+                (pl.col("date") >= date(2026, 9, 14))
+                & pl.col("_ingested_at").is_not_null()
+            )
+            .sort(["date", "ticker", "_ingested_at"], descending=[False, False, True])
+            .unique(subset=["date", "ticker"], keep="first", maintain_order=True)
+        )
+        if not latest.is_empty():
+            earlier = frame.join(latest.select("date", "ticker"), on=["date", "ticker"], how="anti")
+            frame = pl.concat([earlier, latest], how="diagonal_relaxed")
     if "name" not in frame.columns:
         frame = frame.with_columns(pl.col("ticker").alias("name"))
     return frame.with_columns(

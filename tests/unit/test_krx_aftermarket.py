@@ -119,3 +119,27 @@ def test_daily_fallback_requests_refresh_after_market_close(tmp_path, monkeypatc
     result = cli._ingest_daily_prices(ProjectPaths(tmp_path), SimpleNamespace(has_kis=False), day)
     assert result == ([], [])
     assert ingest.call_args.kwargs == {"refresh_existing": True}
+
+
+def test_naver_latest_snapshot_wins_across_different_chunks(tmp_path):
+    import polars as pl
+
+    from finance_pi.sources.schemas import PRICE_SCHEMA
+    from finance_pi.transforms.builders import build_silver_prices
+
+    day = date(2026, 9, 14)
+    for chunk, close, hour in (("a-old", 6825.0, 8), ("z-new", 6805.0, 13)):
+        row = {column: None for column in PRICE_SCHEMA}
+        row.update(date=day, ticker="530060", name="ETN", market="KRX",
+                   open=close, high=close, low=close, close=close, volume=0)
+        frame = pl.DataFrame([row], schema=PRICE_SCHEMA).with_columns(
+            pl.lit(datetime(2026, 9, 14, hour, tzinfo=UTC)).alias("_ingested_at")
+        )
+        directory = tmp_path / "bronze/naver_daily/request_dt=2026-09-14" / f"chunk={chunk}"
+        path = directory / "part.parquet"
+        path.parent.mkdir(parents=True)
+        frame.write_parquet(path)
+    for dates in ((day,), None):
+        build_silver_prices(tmp_path, dates)
+        result = pl.read_parquet(tmp_path / "silver/prices/dt=2026-09-14/part.parquet")
+        assert result["close"].to_list() == [6805.0]
