@@ -8,7 +8,7 @@ from datetime import date
 from typing import Any
 
 from finance_pi.config import format_yyyymmdd, parse_yyyymmdd
-from finance_pi.http import HttpJsonClient
+from finance_pi.http import HttpJsonClient, SourceApiError
 from finance_pi.sources.parsing import parse_float, parse_int
 
 _ITEM_RE = re.compile(
@@ -27,6 +27,7 @@ _MARKETS = {"KOSPI": 0, "KOSDAQ": 1}
 class NaverFinanceClient:
     http: HttpJsonClient
     user_agent: str = "Mozilla/5.0 finance-pi/0.1"
+    summary_http: HttpJsonClient | None = None
 
     def fetch_market_summary(
         self,
@@ -42,6 +43,8 @@ class NaverFinanceClient:
     def _fetch_one_market(self, snapshot_date: date, market: str) -> list[dict[str, Any]]:
         if market not in _MARKETS:
             raise ValueError(f"unsupported Naver market: {market}")
+        if self.summary_http is not None:
+            return self._fetch_json_market(snapshot_date, market)
         first = self._fetch_page(market, 1)
         rows = parse_market_sum_page(first, snapshot_date, market)
         for page in range(2, _last_page(first) + 1):
@@ -49,6 +52,41 @@ class NaverFinanceClient:
                 parse_market_sum_page(self._fetch_page(market, page), snapshot_date, market)
             )
         return rows
+
+    def _fetch_json_market(self, snapshot_date: date, market: str) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        page = 1
+        while True:
+            payload = self.summary_http.get_json(
+                f"/api/stocks/marketValue/{market}",
+                params={"page": page, "pageSize": 100},
+                headers={"User-Agent": self.user_agent},
+            )
+            stocks = payload.get("stocks") or []
+            if not stocks:
+                raise SourceApiError("naver_summary", f"empty market page: {market}/{page}")
+            for stock in stocks:
+                cap = _parse_int(stock.get("marketValueRaw"))
+                if cap is None:
+                    cap_eok = _parse_int(stock.get("marketValue"))
+                    cap = cap_eok * 100_000_000 if cap_eok is not None else None
+                rows.append({
+                    "snapshot_dt": snapshot_date,
+                    "ticker": str(stock["itemCode"]),
+                    "name": str(stock["stockName"]),
+                    "market": market,
+                    "close": _parse_int(stock.get("closePriceRaw") or stock.get("closePrice")),
+                    "change_abs": _parse_int(stock.get("compareToPreviousClosePrice")),
+                    "change_rate_pct": _parse_percent(stock.get("fluctuationsRatio")),
+                    "market_cap": cap,
+                    "volume": _parse_int(stock.get("accumulatedTradingVolume")),
+                    # 목록 응답이 제공하지 않는 재무/보유 비율은 추정하지 않는다.
+                    "par_value": None, "listed_shares": None, "foreign_ownership_pct": None,
+                    "per": None, "roe": None,
+                })
+            if page * 100 >= int(payload["totalCount"]):
+                return rows
+            page += 1
 
     def _fetch_page(self, market: str, page: int) -> str:
         return self.http.get_text(
@@ -168,11 +206,11 @@ def _parse_float(value: str) -> float | None:
 
 
 def _parse_percent(value: str) -> float | None:
-    return _parse_float(value.replace("%", ""))
+    return _parse_float(str(value or "").replace("%", ""))
 
 
 def _normalize_number(value: str) -> str:
-    text = value.replace(",", "").replace("%", "").strip()
+    text = str(value or "").replace(",", "").replace("%", "").strip()
     if text in {"", "-", "N/A"}:
         return text
     sign = "-" if "하락" in text or text.startswith("-") else ""

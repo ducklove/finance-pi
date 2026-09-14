@@ -111,7 +111,9 @@ KRX 휴장일을 제외하며, 한 날짜가 실패해도 나머지 날짜를 �
 미완료 날짜는 기록을 유지하고 종료 코드 1을 반환하므로 예약 서비스는 기본
 strict 설정을 사용합니다. `--no-strict`도 미완료 catch-up을 성공으로 바꾸지 않습니다.
 과거 가격은 Naver, 최근 가격은 KIS를 사용하며 KIS 오류나 수량 부족 시 Naver로
-보완합니다. 한국 시간 16시 이전에는 전 거래일까지 처리합니다.
+보완합니다. 2026-09-14부터 한국 시간 20:10 이전에는 전 거래일까지 처리합니다.
+당일 최종 수집에서는 기존 KIS 종목도 다시 조회하며, 명시적 복구에는
+`ingest kis-universe --refresh-existing`를 사용합니다.
 
 운영 확인 시 `/api/health` 외에 `/api/ready`의 `latest_price_date`,
 `price_fresh`, `incomplete_daily_count`, `incomplete_daily_dates`를 확인합니다.
@@ -268,7 +270,7 @@ The production server runs all finance-pi units as **systemd user units**
 `finance-pi-admin-watchdog.timer` (per-minute HTTP health check that restarts
 the admin user unit — the watchdog calls `systemctl --user restart`, which is
 why the admin must stay a user unit). The daily timer fires twice per weekday
-(17:30 and 20:30 KST, plus up to 10 minutes of randomized delay); the second
+(20:30 and 21:30 KST, plus up to 10 minutes of randomized delay); the second
 run is a same-evening catch-up for sources that publish late. The templates in
 `ops/systemd/` install unchanged at the user level.
 

@@ -2,8 +2,9 @@
 Description=Run finance-pi daily after Korean market close
 
 [Timer]
-OnCalendar=Mon..Fri 17:30:00
+# KRX 애프터마켓(2026-09-14 시행)의 최종 종가 수집과 실패 재시도.
 OnCalendar=Mon..Fri 20:30:00
+OnCalendar=Mon..Fri 21:30:00
 Persistent=true
 RandomizedDelaySec=10m
 

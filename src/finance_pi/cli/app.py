@@ -593,6 +593,9 @@ def ingest_kis_universe(
     chunk_days: int = typer.Option(90, help="Date range days per KIS round"),
     sleep_seconds: float = typer.Option(0.05, help="Sleep between ticker calls"),
     ticker_batch_size: int = typer.Option(50, help="Tickers per incremental KIS write"),
+    refresh_existing: bool = typer.Option(
+        False, help="Re-fetch existing rows to finalize closing prices"
+    ),
 ) -> None:
     paths = ProjectPaths(root=root)
     settings = RuntimeSettings.load(paths.root)
@@ -605,6 +608,7 @@ def ingest_kis_universe(
         chunk_days=chunk_days,
         sleep_seconds=sleep_seconds,
         ticker_batch_size=ticker_batch_size,
+        refresh_existing=refresh_existing is True,
     )
     _run_and_print([adapter], _parse_report_date(since), _parse_report_date(until))
 
@@ -1392,6 +1396,8 @@ def run_daily(
     settings = RuntimeSettings.load(paths.root)
     DataLakeLayout(paths.data_root).ensure_base_dirs()
     price_date = _previous_weekday(parsed_date)
+    if price_date >= date(2026, 9, 14) and price_date > _latest_closed_price_date():
+        raise typer.BadParameter("KRX 애프터마켓 종료 후 20:10 KST부터 당일 종가를 확정합니다.")
     failures: list[str] = []
     warnings: list[str] = []
     build_failures: list[str] = []
@@ -1612,7 +1618,8 @@ def _kst_today() -> date:
 
 def _latest_closed_price_date() -> date:
     now = datetime.now(timezone(timedelta(hours=9)))
-    day = now.date() if now.hour >= 16 else now.date() - timedelta(days=1)
+    cutoff = (20, 10) if now.date() >= date(2026, 9, 14) else (16, 0)
+    day = now.date() if (now.hour, now.minute) >= cutoff else now.date() - timedelta(days=1)
     return _previous_weekday(day)
 
 
@@ -1670,6 +1677,7 @@ def _naver_client(settings: RuntimeSettings) -> NaverFinanceClient:
     return NaverFinanceClient(
         HttpJsonClient("naver", settings.naver_finance_base_url),
         settings.naver_finance_user_agent,
+        summary_http=HttpJsonClient("naver_summary", "https://m.stock.naver.com"),
     )
 
 
@@ -1817,6 +1825,7 @@ def _ingest_daily_prices(
                 1,
                 settings.kis_daily_sleep_seconds,
                 settings.kis_daily_ticker_batch_size,
+                **({"refresh_existing": True} if price_date >= date(2026, 9, 14) else {}),
             )
             path = DataLakeLayout(paths.data_root).partition_path(
                 "bronze.kis_daily_raw", price_date
@@ -2823,6 +2832,18 @@ def _read_daily_marker_status(marker: Path) -> str | None:
     except json.JSONDecodeError:
         return "marker_invalid"
     status = data.get("status")
+    if status == "complete" and str(data.get("price_date", "")) >= "2026-09-14":
+        try:
+            completed = datetime.fromisoformat(str(data["completed_at"]))
+            completed = completed.astimezone(timezone(timedelta(hours=9)))
+            closing_day = date.fromisoformat(str(data["price_date"]))
+            cutoff = datetime.combine(
+                closing_day, datetime.min.time(), tzinfo=completed.tzinfo
+            ) + timedelta(hours=20, minutes=10)
+        except (KeyError, TypeError, ValueError):
+            return "marker_invalid"
+        if completed < cutoff:
+            return "provisional"
     if status:
         return str(status)
     failures = data.get("failures") or []

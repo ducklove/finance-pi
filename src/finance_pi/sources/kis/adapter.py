@@ -49,6 +49,7 @@ class KisUniverseDailyAdapter:
     chunk_days: int = 90
     sleep_seconds: float = 0.05
     ticker_batch_size: int = 50
+    refresh_existing: bool = False
     name: str = "kis_universe_daily"
 
     def list_pending(self, since: date, until: date) -> Iterable[IngestUnit]:
@@ -56,7 +57,7 @@ class KisUniverseDailyAdapter:
         while current <= until:
             chunk_until = min(until, current + timedelta(days=max(1, self.chunk_days) - 1))
             tickers = self.tickers
-            if current == chunk_until:
+            if current == chunk_until and not self.refresh_existing:
                 existing = _existing_tickers_for_date(self.layout, current)
                 tickers = tuple(ticker for ticker in self.tickers if ticker not in existing)
             batch_size = max(1, self.ticker_batch_size)
