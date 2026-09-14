@@ -245,8 +245,10 @@ def test_screener_returns_empty_when_no_data(tmp_path) -> None:
     assert payload["rows"] == []
 
 
-def test_screener_defaults_as_of_to_today(tmp_path) -> None:
-    """as_of 생략 시 오늘 날짜로 동작(데이터 없어도 에러 아님)."""
+def test_screener_defaults_as_of_to_today(tmp_path, monkeypatch) -> None:
+    """as_of 생략 시 서버 시간대와 무관하게 한국 날짜를 사용한다."""
+    expected = date(2026, 9, 14)
+    monkeypatch.setattr("finance_pi.admin.server._kst_today", lambda: expected)
     payload = AdminState(tmp_path).screener({})
     assert payload["count"] == 0
-    assert payload["as_of"] == date.today().isoformat()
+    assert payload["as_of"] == expected.isoformat()
