@@ -1384,11 +1384,12 @@ def build_daily_market_caps(
     data_root: Path,
     *,
     prices: pl.DataFrame | None = None,
+    dates: Iterable[date] | None = None,
 ) -> list[BuildSummary]:
     """Merge silver.market_caps with price-derived caps into gold.daily_market_caps.
 
-    Existing gold partitions are never rewritten (append-only), so only dates
-    without a gold partition are considered at all. Those new dates are then
+    By default existing gold partitions are preserved; explicit dates refresh
+    final daily snapshots after a price re-fetch. Selected dates are then
     processed in ``DAILY_MARKET_CAPS_REBUILD_CHUNK_DAYS`` calendar chunks so a
     first-time full build stays memory-bounded; the per-(date, ticker) source
     preference is date-local, so chunking cannot change the output.
@@ -1408,7 +1409,9 @@ def build_daily_market_caps(
             _partition_date_from_path(Path(file), "dt")
             for file in glob((data_root / "silver/prices/dt=*/part.parquet").as_posix())
         )
-    new_dates = sorted(candidate_dates - existing_dates)
+    new_dates = sorted(
+        candidate_dates - existing_dates if dates is None else candidate_dates.intersection(dates)
+    )
     if not new_dates:
         return [BuildSummary("gold.daily_market_caps", 0, 0)]
     rows = 0
@@ -2921,7 +2924,7 @@ def _previous_gold_close_frame(data_root: Path, before: date) -> pl.DataFrame | 
 
 def _price_market_caps_frame(frame: pl.DataFrame) -> pl.DataFrame:
     return (
-        frame.filter(pl.col("market_cap").is_not_null() & pl.col("listed_shares").is_not_null())
+        frame.filter(pl.col("market_cap").is_not_null())
         .with_columns(
             pl.lit(None, dtype=pl.Int64).alias("rank"),
             pl.col("price_source").alias("market_cap_source"),

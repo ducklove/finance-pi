@@ -2618,7 +2618,7 @@ def _run_daily_builds(data_root: Path, include_fundamentals_pit: bool, price_dat
                 _stale_adjustment_security_ids(data_root, _load_corporate_actions(data_root)),
             )
         summaries.extend(builder(data_root, price_dates))
-    summaries.extend(build_daily_market_caps(data_root))
+    summaries.extend(build_daily_market_caps(data_root, dates=price_dates))
     summaries.extend(build_security_relations(data_root))
     summaries.extend(build_preferred_discount(data_root, dates=price_dates))
     summaries.extend(build_financials_silver(data_root))

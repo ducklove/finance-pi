@@ -143,3 +143,24 @@ def test_naver_latest_snapshot_wins_across_different_chunks(tmp_path):
         build_silver_prices(tmp_path, dates)
         result = pl.read_parquet(tmp_path / "silver/prices/dt=2026-09-14/part.parquet")
         assert result["close"].to_list() == [6805.0]
+
+
+def test_daily_market_caps_keeps_reported_cap_without_inventing_shares(tmp_path):
+    import polars as pl
+
+    from finance_pi.transforms import builders
+
+    day = date(2026, 9, 14)
+    row = {column: None for column in builders._MARKET_CAP_PRICE_COLUMNS}
+    row.update(date=day, ticker="000950", security_id="S000950", listing_id="L000950",
+               name="전방", market="KOSPI", close=28900.0, volume=1482,
+               market_cap=48552000000, price_source="kis")
+    before = pl.DataFrame([row])
+    builders.build_daily_market_caps(tmp_path, prices=before)
+    after = before.with_columns(pl.lit(30850.0).alias("close"),
+                                pl.lit(51828000000).alias("market_cap"))
+    builders.build_daily_market_caps(tmp_path, prices=after, dates=(day,))
+    stored = pl.read_parquet(tmp_path / "gold/daily_market_caps/dt=2026-09-14/part.parquet")
+    assert stored["market_cap"].to_list() == [51828000000]
+    assert stored["close"].to_list() == [30850.0]
+    assert stored["listed_shares"].to_list() == [None]
