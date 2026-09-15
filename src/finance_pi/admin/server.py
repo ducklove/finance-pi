@@ -1126,6 +1126,32 @@ def _handler_for(state: AdminState) -> type[BaseHTTPRequestHandler]:
 
         def do_POST(self) -> None:  # noqa: N802
             self._request_started_at = time.monotonic()
+            if self.path == "/api/research/basis-analysis":
+                if not self._csrf_safe():
+                    self._send_json({"error": "forbidden"}, status=HTTPStatus.FORBIDDEN)
+                    return
+                if not self._authorized():
+                    return
+                try:
+                    length = int(self.headers.get("Content-Length", "0"))
+                    if not 0 < length <= 500_000:
+                        raise ValueError("연구 입력 크기는 1~500000 바이트여야 합니다.")
+                    from finance_pi.research.basis import analyze_basis
+                    from finance_pi.research.catalogs import decode
+
+                    payload = decode(self.rfile.read(length))
+                    if not state._research_slot.acquire(blocking=False):
+                        raise ValueError("다른 연구 작업이 실행 중입니다. 잠시 후 다시 실행하세요.")
+                    try:
+                        result = analyze_basis(payload)
+                    finally:
+                        state._research_slot.release()
+                    self._send_json(result)
+                except (ValueError, TypeError, OverflowError) as exc:
+                    self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                except (BrokenPipeError, ConnectionResetError):
+                    self._log_client_disconnect()
+                return
             if self.path != "/api/jobs":
                 self._send_json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
                 return
