@@ -331,6 +331,21 @@ class AdminState:
         finally:
             self._research_slot.release()
 
+    def factor_inputs(self, params: dict[str, list[str]]) -> dict[str, Any]:
+        from finance_pi.research.factor_inputs import audit
+
+        if set(params) - {"as_of"} or any(len(v) != 1 for v in params.values()):
+            raise ValueError("재무 입력 검사 파라미터를 확인해 주세요.")
+        as_of = date.fromisoformat(params["as_of"][0]) if "as_of" in params else None
+        if as_of and as_of >= _kst_today():
+            raise ValueError("완료된 날짜의 재무 자료만 검사할 수 있습니다.")
+        if not self._research_slot.acquire(blocking=False):
+            raise AdminServiceBusy("연구 작업이 실행 중입니다. 잠시 후 재시도하세요.")
+        try:
+            return audit(self.paths.data_root, as_of)
+        finally:
+            self._research_slot.release()
+
     def overview(self) -> dict[str, Any]:
         now = time.monotonic()
         with self.lock:
@@ -972,6 +987,10 @@ def _handler_for(state: AdminState) -> type[BaseHTTPRequestHandler]:
                     from finance_pi.research.readiness import price_readiness
 
                     self._send_json(price_readiness(state.paths.data_root, _readiness_payload(state), _kst_today()))
+                elif parsed.path == "/api/research/factor-inputs":
+                    if not self._authorized():
+                        return
+                    self._send_json(state.factor_inputs(parse_qs(parsed.query)))
                 elif parsed.path in {"/api/research/pair-analysis", "/api/research/pair-forward"}:
                     if not self._authorized():
                         return
