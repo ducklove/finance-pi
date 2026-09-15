@@ -18,6 +18,8 @@ from typing import Literal
 import polars as pl
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from finance_pi.research.etfs import ETF_ENGINE_VERSION, etf_pairs
+
 ENGINE_VERSION = "preferred-switch-1"
 
 
@@ -25,7 +27,7 @@ class PairConfig(BaseModel):
     model_config = ConfigDict(
         extra="forbid", frozen=True, allow_inf_nan=False, validate_default=True
     )
-    strategy: Literal["preferred_switch"] = "preferred_switch"
+    strategy: Literal["preferred_switch", "etf_switch"] = "preferred_switch"
     common: str = Field(pattern=r"^[0-9]{6}$")
     preferred: str = Field(pattern=r"^[0-9A-Z]{6}$")
     start: date
@@ -76,9 +78,9 @@ def pair_list(data_root: Path) -> list[dict]:
 
 
 def load_snapshot(data_root: Path, config: PairConfig) -> dict:
-    pairs = pair_list(data_root)
+    pairs = etf_pairs() if config.strategy == "etf_switch" else pair_list(data_root)
     if not any(p["common"] == config.common and p["preferred"] == config.preferred for p in pairs):
-        raise ValueError("finance-pi에서 확인된 보통주·우선주 관계가 아닙니다.")
+        raise ValueError("해당 전략에서 확인된 연구 대상 쌍이 아닙니다.")
     since = config.start - timedelta(days=550)
     paths = []
     current = since
@@ -151,6 +153,10 @@ def load_snapshot(data_root: Path, config: PairConfig) -> dict:
         "preferred": config.preferred,
         "bars": bars,
     }
+    if config.strategy == "etf_switch":
+        snapshot["instrument_review"] = next(
+            p for p in pairs if p["common"] == config.common and p["preferred"] == config.preferred
+        )
     return {**snapshot, "snapshot_id": digest(snapshot)}
 
 
@@ -159,19 +165,30 @@ def signals(bars: list[dict], config: PairConfig) -> list[dict]:
     result = []
     preferred = False
     age = 0
+    is_etf = config.strategy == "etf_switch"
+    round_trip_bps = 4 * (config.commission_bps + config.slippage_bps) + 2 * config.sell_tax_bps
     for bar in bars:
         discount = 1 - bar["preferred"]["price"] / bar["common"]["price"]
+        spread = (
+            math.log(bar["common"]["price"] / bar["preferred"]["price"]) if is_etf else discount
+        )
         std = statistics.stdev(history) if len(history) == config.window else 0
-        z = (discount - statistics.mean(history)) / std if std > 1e-12 else None
-        reason = "보통주 유지"
+        mean = statistics.mean(history) if len(history) == config.window else None
+        z = (spread - mean) / std if std > 1e-12 else None
+        deviation_bps = math.expm1(spread - mean) * 10_000 if is_etf and mean is not None else None
+        reason = "ETF A 유지" if is_etf else "보통주 유지"
         if z is None:
             reason = "분포 추정 자료 부족 또는 변동 없음"
+        elif not preferred and z >= config.entry_z and is_etf and deviation_bps <= round_trip_bps:
+            reason = "상대가격 이탈이 왕복 교체 비용 이하라 유지"
         elif not preferred and z >= config.entry_z:
             preferred, age, reason = True, 0, "할인율 확대"
+            if is_etf:
+                reason = "ETF B 상대가격 하락·왕복 비용 기준 초과"
         elif preferred and (z <= config.exit_z or age >= config.max_holding):
             preferred, age, reason = False, 0, "분포 복귀 또는 최대 보유기간"
         elif preferred:
-            reason = "우선주 유지"
+            reason = "ETF B 유지" if is_etf else "우선주 유지"
         result.append(
             {
                 "date": bar["date"],
@@ -181,7 +198,11 @@ def signals(bars: list[dict], config: PairConfig) -> list[dict]:
                 "reason": reason,
             }
         )
-        history.append(discount)
+        if is_etf:
+            result[-1].update(
+                {"relative_deviation_bps": deviation_bps, "round_trip_cost_bps": round_trip_bps}
+            )
+        history.append(spread)
         age += int(preferred)
     return result
 
@@ -288,6 +309,8 @@ def simulate(
 
 
 def analyze(snapshot: dict, config: PairConfig) -> dict:
+    from finance_pi.research.validation import period_validation
+
     bars = snapshot["bars"]
     signal_rows = signals(bars, config)
     if not any(s["z"] is not None and s["date"] >= str(config.start) for s in signal_rows):
@@ -297,13 +320,19 @@ def analyze(snapshot: dict, config: PairConfig) -> dict:
         for mode in ("switch", "common", "preferred", "mixed")
     ]
     stress = simulate(bars, signal_rows, config, "switch", 2)
+    stress_benchmark = simulate(bars, signal_rows, config, "mixed", 2)
     return {
-        "engine_version": ENGINE_VERSION,
+        "engine_version": ETF_ENGINE_VERSION if config.strategy == "etf_switch" else ENGINE_VERSION,
         "config": config.model_dump(mode="json"),
         "config_hash": digest(config.model_dump(mode="json")),
         "snapshot": snapshot,
         "scenarios": scenarios,
-        "stress": {k: stress[k] for k in ("return_pct", "max_drawdown_pct", "cost")},
+        "stress": {
+            **{k: stress[k] for k in ("return_pct", "max_drawdown_pct", "cost")},
+            "benchmark_return_pct": stress_benchmark["return_pct"],
+            "excess_return_pct": stress["return_pct"] - stress_benchmark["return_pct"],
+        },
+        "validation": period_validation(snapshot, config, signal_rows),
         "signals": [s for s in signal_rows if s["date"] >= str(config.start)],
         "latest_signal": signal_rows[-1],
         "live_eligible": False,
@@ -313,5 +342,13 @@ def analyze(snapshot: dict, config: PairConfig) -> dict:
             "현재 확인된 종목 관계로 선정되어 생존편향 가능성이 있습니다.",
             "최종 보유분은 평가 종료이며 청산 비용은 포함하지 않습니다.",
             "외부평가·가상 체결·계좌 주문 검증 전에는 실거래로 전환할 수 없습니다.",
-        ],
+        ]
+        + (
+            [
+                "ETF 신호는 과거 로그 가격비의 이탈이며 iNAV 괴리율이나 확정 차익이 아닙니다.",
+                "분배금 시점·정책 차이가 미반영되어 등가 노출·총수익 비교가 아닙니다.",
+            ]
+            if config.strategy == "etf_switch"
+            else []
+        ),
     }

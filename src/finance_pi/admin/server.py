@@ -949,11 +949,20 @@ def _handler_for(state: AdminState) -> type[BaseHTTPRequestHandler]:
                 elif parsed.path == "/api/research/pairs":
                     if not self._authorized():
                         return
+                    from finance_pi.research.etfs import ETF_ENGINE_VERSION, etf_pairs
                     from finance_pi.research.pairs import ENGINE_VERSION, pair_list
 
                     self._send_json({"engine_version": ENGINE_VERSION,
                                      "pairs": pair_list(state.paths.data_root),
+                                     "etf_pairs": etf_pairs(),
+                                     "engines": {"preferred_switch": ENGINE_VERSION, "etf_switch": ETF_ENGINE_VERSION},
                                      "live_enabled": False})
+                elif parsed.path == "/api/research/readiness":
+                    if not self._authorized():
+                        return
+                    from finance_pi.research.readiness import price_readiness
+
+                    self._send_json(price_readiness(state.paths.data_root, _readiness_payload(state), _kst_today()))
                 elif parsed.path == "/api/research/pair-analysis":
                     if not self._authorized():
                         return

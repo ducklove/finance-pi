@@ -79,6 +79,51 @@ def test_reproducible_snapshot_and_cost_stress():
     assert result["stress"]["cost"] >= result["scenarios"][0]["cost"]
 
 
+def test_etf_log_ratio_is_invariant_to_unit_price_scale():
+    c = config(strategy="etf_switch", common="069500", preferred="102110", sell_tax_bps=0)
+    a = signals(fixture_bars(), c)
+    scaled = fixture_bars()
+    for bar in scaled:
+        bar["common"]["price"] *= 7
+    b = signals(scaled, c)
+    assert [s["target"] for s in a] == [s["target"] for s in b]
+    for x, y in zip(a[c.window :], b[c.window :], strict=True):
+        assert x["z"] == pytest.approx(y["z"])
+        assert x["relative_deviation_bps"] == pytest.approx(y["relative_deviation_bps"])
+
+
+def test_etf_cost_gate_blocks_small_excursion_and_preserves_next_day_rule():
+    bars = fixture_bars()
+    for i, bar in enumerate(bars):
+        bar["preferred"]["price"] = bar["common"]["price"] * (1 + (i % 7) * 0.00001)
+    c = config(strategy="etf_switch", common="069500", preferred="102110", entry_z=0.5, exit_z=0)
+    sig = signals(bars, c)
+    assert all(s["target"] == "common" for s in sig)
+    assert any("비용 이하" in s["reason"] for s in sig)
+    assert all(t["date"] > t["signal_date"] for t in simulate(bars, sig, c, "switch")["trades"])
+
+
+def test_unreviewed_etf_pair_is_rejected(tmp_path):
+    with pytest.raises(ValueError, match="연구 대상"):
+        load_snapshot(tmp_path, config(strategy="etf_switch"))
+
+
+def test_period_validation_has_no_future_leak_and_does_not_claim_oos():
+    bars = fixture_bars(300)
+    c = config(end=date(2024, 10, 26))
+    a = analyze({"bars": bars}, c)["validation"]
+    assert a["status"] == "available" and a["out_of_sample_claim"] is False
+    assert len(a["periods"]) == 3
+    assert sum(p["observations"] for p in a["periods"]) == 276
+    assert all(p["start"] < p["end"] for p in a["periods"])
+    bars[-1]["preferred"]["price"] *= 0.1
+    b = analyze({"bars": bars}, c)["validation"]
+    assert a["periods"][:2] == b["periods"][:2]
+    assert (
+        analyze({"bars": fixture_bars()}, config())["validation"]["status"] == "insufficient_data"
+    )
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [{"window": 0}, {"capital": float("nan")}, {"exit_z": 3}, {"strategy": "unknown"}, {"foo": 1}],
