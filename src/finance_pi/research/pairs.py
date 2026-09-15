@@ -347,6 +347,30 @@ def analyze(snapshot: dict, config: PairConfig) -> dict:
     ]
     stress = simulate(bars, signal_rows, config, "switch", 2)
     stress_benchmark = simulate(bars, signal_rows, config, "mixed", 2)
+    liquidity_stress = []
+    for fraction in (0.5, 0.1):
+        constrained = config.model_copy(update={"participation": config.participation * fraction})
+        tested = simulate(bars, signal_rows, constrained, "switch", 2)
+        benchmark = simulate(bars, signal_rows, constrained, "mixed", 2)
+        liquidity_stress.append(
+            {
+                "participation_multiplier": fraction,
+                "participation": constrained.participation,
+                "cost_multiplier": 2,
+                **{
+                    k: tested[k]
+                    for k in (
+                        "return_pct",
+                        "max_drawdown_pct",
+                        "cost",
+                        "trade_count",
+                        "ending_cash",
+                    )
+                },
+                "benchmark_return_pct": benchmark["return_pct"],
+                "excess_return_pct": tested["return_pct"] - benchmark["return_pct"],
+            }
+        )
     return {
         "engine_version": ETF_ENGINE_VERSION if config.strategy == "etf_switch" else ENGINE_VERSION,
         "config": config.model_dump(mode="json"),
@@ -359,6 +383,15 @@ def analyze(snapshot: dict, config: PairConfig) -> dict:
             "excess_return_pct": stress["return_pct"] - stress_benchmark["return_pct"],
         },
         "validation": period_validation(snapshot, config, signal_rows),
+        "liquidity_stress": {
+            "version": "fixed-signal-capacity-1",
+            "scenarios": liquidity_stress,
+            "note": (
+                "신호와 초기 자금은 고정하고 비용 2배·참여율 50%/10%를 "
+                "양쪽 전략에 적용한 체결 민감도입니다. "
+                "전략 재최적화나 실거래 합격 판정이 아닙니다."
+            ),
+        },
         "liquidity_coverage": {
             leg: {
                 basis: sum(

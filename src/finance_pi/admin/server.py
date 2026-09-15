@@ -307,18 +307,27 @@ class AdminState:
         self._price_query_slots = threading.BoundedSemaphore(_admin_max_price_queries())
         self._research_slot = threading.BoundedSemaphore(1)
 
-    def pair_research(self, params: dict[str, list[str]]) -> dict[str, Any]:
+    def pair_research(self, params: dict[str, list[str]], *, forward: bool = False) -> dict[str, Any]:
         from finance_pi.research.pairs import PairConfig, analyze, load_snapshot
 
         if any(len(values) != 1 for values in params.values()):
             raise ValueError("중복 연구 파라미터는 허용하지 않습니다.")
-        config = PairConfig.model_validate({k: v[0] for k, v in params.items()})
+        values = {k: v[0] for k, v in params.items()}
+        if forward and "forward_start" not in values:
+            raise ValueError("전진 평가 시작일이 필요합니다.")
+        forward_start = date.fromisoformat(values.pop("forward_start")) if forward else None
+        config = PairConfig.model_validate(values)
         if config.end >= (datetime.now(UTC) + timedelta(hours=9)).date():
             raise ValueError("완료된 거래일까지만 연구할 수 있습니다.")
         if not self._research_slot.acquire(blocking=False):
             raise AdminServiceBusy("연구 작업이 실행 중입니다. 잠시 후 재시도하세요.")
         try:
-            return analyze(load_snapshot(self.paths.data_root, config), config)
+            result = analyze(load_snapshot(self.paths.data_root, config), config)
+            if forward_start is not None:
+                from finance_pi.research.forward import forward_analysis
+
+                result["forward"] = forward_analysis(result["snapshot"], config, forward_start)
+            return result
         finally:
             self._research_slot.release()
 
@@ -963,10 +972,10 @@ def _handler_for(state: AdminState) -> type[BaseHTTPRequestHandler]:
                     from finance_pi.research.readiness import price_readiness
 
                     self._send_json(price_readiness(state.paths.data_root, _readiness_payload(state), _kst_today()))
-                elif parsed.path == "/api/research/pair-analysis":
+                elif parsed.path in {"/api/research/pair-analysis", "/api/research/pair-forward"}:
                     if not self._authorized():
                         return
-                    self._send_json(state.pair_research(parse_qs(parsed.query)))
+                    self._send_json(state.pair_research(parse_qs(parsed.query), forward=parsed.path.endswith("pair-forward")))
                 elif parsed.path in {"/doc", "/doc/"}:
                     self._redirect("/docs/")
                 elif parsed.path in {"/docs", "/docs/"}:
