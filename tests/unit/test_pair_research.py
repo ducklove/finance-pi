@@ -224,7 +224,7 @@ def test_snapshot_rejects_missing_leg_and_unknown_pair(tmp_path):
 def test_research_slot_and_config_rejection(tmp_path):
     state = AdminState(tmp_path)
     state._research_slot.acquire()
-    params = {k: [str(v)] for k, v in config().model_dump(mode="json").items()}
+    params = {k: [str(v)] for k, v in config().model_dump(mode="json", exclude_none=True).items()}
     with pytest.raises(AdminServiceBusy):
         state.pair_research(params)
     with pytest.raises(ValueError):

@@ -322,7 +322,11 @@ class AdminState:
         if not self._research_slot.acquire(blocking=False):
             raise AdminServiceBusy("연구 작업이 실행 중입니다. 잠시 후 재시도하세요.")
         try:
-            result = analyze(load_snapshot(self.paths.data_root, config), config)
+            from finance_pi.research.catalogs import selection
+            from finance_pi.research.pairs import pair_list
+
+            catalog = selection(self.paths.data_root, config, pair_list(self.paths.data_root))
+            result = analyze(load_snapshot(self.paths.data_root, config, catalog=catalog), config)
             if forward_start is not None:
                 from finance_pi.research.forward import forward_analysis
 
@@ -973,12 +977,17 @@ def _handler_for(state: AdminState) -> type[BaseHTTPRequestHandler]:
                 elif parsed.path == "/api/research/pairs":
                     if not self._authorized():
                         return
-                    from finance_pi.research.etfs import ETF_ENGINE_VERSION, etf_pairs
+                    from finance_pi.research.catalogs import candidates
+                    from finance_pi.research.etfs import ETF_ENGINE_VERSION
                     from finance_pi.research.pairs import ENGINE_VERSION, pair_list
 
+                    relations = pair_list(state.paths.data_root)
+                    preferred, preferred_source = candidates(state.paths.data_root, "preferred_switch", relations)
+                    etfs, etf_source = candidates(state.paths.data_root, "etf_switch", relations)
                     self._send_json({"engine_version": ENGINE_VERSION,
-                                     "pairs": pair_list(state.paths.data_root),
-                                     "etf_pairs": etf_pairs(),
+                                     "pairs": preferred,
+                                     "etf_pairs": etfs,
+                                     "catalogs": [preferred_source, etf_source],
                                      "engines": {"preferred_switch": ENGINE_VERSION, "etf_switch": ETF_ENGINE_VERSION},
                                      "live_enabled": False})
                 elif parsed.path == "/api/research/readiness":

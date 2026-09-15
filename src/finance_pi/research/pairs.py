@@ -18,9 +18,9 @@ from typing import Literal
 import polars as pl
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from finance_pi.research.etfs import ETF_ENGINE_VERSION, etf_pairs
+from finance_pi.research.etfs import ETF_ENGINE_VERSION
 
-ENGINE_VERSION = "preferred-switch-2"
+ENGINE_VERSION = "preferred-switch-3"
 
 
 class PairConfig(BaseModel):
@@ -28,6 +28,7 @@ class PairConfig(BaseModel):
         extra="forbid", frozen=True, allow_inf_nan=False, validate_default=True
     )
     strategy: Literal["preferred_switch", "etf_switch"] = "preferred_switch"
+    catalog_snapshot_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     common: str = Field(pattern=r"^[0-9]{6}$")
     preferred: str = Field(pattern=r"^[0-9A-Z]{6}$")
     start: date
@@ -77,8 +78,14 @@ def pair_list(data_root: Path) -> list[dict]:
     ]
 
 
-def load_snapshot(data_root: Path, config: PairConfig) -> dict:
-    pairs = etf_pairs() if config.strategy == "etf_switch" else pair_list(data_root)
+def load_snapshot(data_root: Path, config: PairConfig, *, catalog: dict | None = None) -> dict:
+    pairs = (
+        [catalog["pair"]]
+        if catalog
+        else []
+        if config.strategy == "etf_switch"
+        else pair_list(data_root)
+    )
     if not any(p["common"] == config.common and p["preferred"] == config.preferred for p in pairs):
         raise ValueError("해당 전략에서 확인된 연구 대상 쌍이 아닙니다.")
     since = config.start - timedelta(days=550)
@@ -168,6 +175,8 @@ def load_snapshot(data_root: Path, config: PairConfig) -> dict:
         "preferred": config.preferred,
         "bars": bars,
     }
+    if catalog:
+        snapshot["catalog"] = catalog
     if config.strategy == "etf_switch":
         snapshot["instrument_review"] = next(
             p for p in pairs if p["common"] == config.common and p["preferred"] == config.preferred
