@@ -1332,6 +1332,7 @@ def run_backtest(
             start=_parse_report_date(start),
             end=_parse_report_date(end),
             top_fraction=top_fraction,
+            share_classes=("preferred",) if factor_name == "preferred_discount_z" else ("common",),
         ),
     )
     output = paths.data_root / "backtests" / f"{factor_name}_{start}_{end}"

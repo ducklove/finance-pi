@@ -305,6 +305,22 @@ class AdminState:
         self._screener_cache: dict[date, tuple[float, dict[str, Any]]] = {}
         self._job_slots = threading.BoundedSemaphore(_admin_max_jobs())
         self._price_query_slots = threading.BoundedSemaphore(_admin_max_price_queries())
+        self._research_slot = threading.BoundedSemaphore(1)
+
+    def pair_research(self, params: dict[str, list[str]]) -> dict[str, Any]:
+        from finance_pi.research.pairs import PairConfig, analyze, load_snapshot
+
+        if any(len(values) != 1 for values in params.values()):
+            raise ValueError("중복 연구 파라미터는 허용하지 않습니다.")
+        config = PairConfig.model_validate({k: v[0] for k, v in params.items()})
+        if config.end >= (datetime.now(UTC) + timedelta(hours=9)).date():
+            raise ValueError("완료된 거래일까지만 연구할 수 있습니다.")
+        if not self._research_slot.acquire(blocking=False):
+            raise AdminServiceBusy("연구 작업이 실행 중입니다. 잠시 후 재시도하세요.")
+        try:
+            return analyze(load_snapshot(self.paths.data_root, config), config)
+        finally:
+            self._research_slot.release()
 
     def overview(self) -> dict[str, Any]:
         now = time.monotonic()
@@ -930,6 +946,18 @@ def _handler_for(state: AdminState) -> type[BaseHTTPRequestHandler]:
                     self._send_json(payload, status=status)
                 elif parsed.path == "/api/docs":
                     self._send_json(_api_docs_payload(state))
+                elif parsed.path == "/api/research/pairs":
+                    if not self._authorized():
+                        return
+                    from finance_pi.research.pairs import ENGINE_VERSION, pair_list
+
+                    self._send_json({"engine_version": ENGINE_VERSION,
+                                     "pairs": pair_list(state.paths.data_root),
+                                     "live_enabled": False})
+                elif parsed.path == "/api/research/pair-analysis":
+                    if not self._authorized():
+                        return
+                    self._send_json(state.pair_research(parse_qs(parsed.query)))
                 elif parsed.path in {"/doc", "/doc/"}:
                     self._redirect("/docs/")
                 elif parsed.path in {"/docs", "/docs/"}:
@@ -3907,11 +3935,11 @@ def _job_command(action: str, payload: dict[str, Any], root: Path) -> tuple[str,
             command.append("--dry-run")
         return f"Backfill {start_year}..{end_year}", command
     if action == "backtest":
-        factor = _safe_choice(
-            payload.get("factor"),
-            {"momentum_12_1", "value_earnings_yield", "quality_roa"},
-            "momentum_12_1",
-        )
+        from finance_pi.factors import factor_registry
+
+        factor = str(payload.get("factor", "momentum_12_1"))
+        if factor not in factor_registry.names():
+            raise ValueError("지원하지 않는 팩터입니다.")
         start = _safe_date(payload.get("start"), "2024-01-01")
         end = _safe_date(payload.get("end"), datetime.now(UTC).date().isoformat())
         top_fraction = _safe_float(payload.get("top_fraction"), "0.10")
