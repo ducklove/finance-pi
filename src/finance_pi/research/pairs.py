@@ -129,6 +129,9 @@ def load_snapshot(data_root: Path, config: PairConfig) -> dict:
             "tradable": all(v is False for v in flags),
         }
     bars = []
+    market_dates = {Path(p).parent.name.removeprefix("dt=") for p in paths}
+    if any(day >= str(config.start) and day not in by_date for day in market_dates):
+        raise ValueError("시장 가격이 존재하는 날짜에 양쪽 종목 가격이 모두 누락됐습니다.")
     for day, quotes in sorted(by_date.items()):
         if len(quotes) != 2:
             if day >= str(config.start):

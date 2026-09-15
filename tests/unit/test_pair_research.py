@@ -125,6 +125,9 @@ def test_snapshot_rejects_missing_leg_and_unknown_pair(tmp_path):
     ).write_parquet(p)
     with pytest.raises(ValueError, match="완전"):
         load_snapshot(tmp_path, config())
+    pl.read_parquet(p).with_columns(pl.lit("S000660").alias("security_id")).write_parquet(p)
+    with pytest.raises(ValueError, match="모두 누락"):
+        load_snapshot(tmp_path, config())
 
 
 def test_research_slot_and_config_rejection(tmp_path):
