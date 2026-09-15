@@ -69,6 +69,52 @@ def test_low_liquidity_partial_fills_and_halts():
     assert bars[30]["date"] not in [t["date"] for t in result["trades"]]
 
 
+def test_delayed_mixed_fills_reserve_cash_for_both_assets():
+    bars = fixture_bars()
+    for i, bar in enumerate(bars):
+        for leg in ("common", "preferred"):
+            bar[leg]["trading_value"] = 0 if i < 60 else 1e10
+            if i >= 60:
+                bar[leg]["price"] *= 10
+    c = config(commission_bps=0, sell_tax_bps=0, slippage_bps=0)
+    r = simulate(bars, signals(bars, c), c, "mixed")
+    assert {t["leg"] for t in r["trades"]} == {"common", "preferred"}
+    first = next(b for b in r["nav"] if b["common_quantity"] > 0)
+    assert first["preferred_quantity"] > 0
+    assert first["cash"] >= 0
+
+
+def test_missing_turnover_is_labelled_proxy_and_missing_volume_is_rejected(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "finance_pi.research.pairs.pair_list",
+        lambda root: [{"common": "005930", "preferred": "005935"}],
+    )
+    for day in (date(2024, 1, 25), date(2024, 1, 26)):
+        p = tmp_path / f"gold/daily_prices_adj/dt={day}/part.parquet"
+        p.parent.mkdir(parents=True)
+        pl.DataFrame(
+            [
+                {
+                    "date": day,
+                    "security_id": code,
+                    "close_adj": 100.0,
+                    "trading_value": None,
+                    "volume": 100,
+                    "is_halted": False,
+                    "is_designated": False,
+                    "is_liquidation_window": False,
+                }
+                for code in ("S005930", "S005935")
+            ]
+        ).write_parquet(p)
+    snap = load_snapshot(tmp_path, config())
+    assert snap["bars"][0]["common"]["liquidity_basis"] == "adjusted_close_times_volume_proxy"
+    assert snap["bars"][0]["common"]["trading_value"] == 10000
+    pl.read_parquet(p).with_columns(pl.lit(None).alias("volume")).write_parquet(p)
+    with pytest.raises(ValueError, match="모두 누락"):
+        load_snapshot(tmp_path, config())
+
+
 def test_reproducible_snapshot_and_cost_stress():
     bars = fixture_bars()
     snap = {"bars": bars, "snapshot_id": digest(bars)}

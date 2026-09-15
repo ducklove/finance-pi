@@ -20,7 +20,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from finance_pi.research.etfs import ETF_ENGINE_VERSION, etf_pairs
 
-ENGINE_VERSION = "preferred-switch-1"
+ENGINE_VERSION = "preferred-switch-2"
 
 
 class PairConfig(BaseModel):
@@ -106,7 +106,10 @@ def load_snapshot(data_root: Path, config: PairConfig) -> dict:
         raise ValueError("가격·거래상태 필드가 부족합니다. 데이터 재검증이 필요합니다.")
     rows = (
         frame.filter(pl.col("security_id").is_in(["S" + config.common, "S" + config.preferred]))
-        .select(sorted(required))
+        .select(
+            sorted(required)
+            + [(pl.col("volume") if "volume" in fields else pl.lit(None)).alias("volume")]
+        )
         .sort("date", "security_id")
         .collect()
         .to_dicts()
@@ -123,12 +126,24 @@ def load_snapshot(data_root: Path, config: PairConfig) -> dict:
         if price is None or not math.isfinite(price) or price <= 0:
             raise ValueError("누락되거나 유효하지 않은 가격이 있습니다.")
         flags = [row[f] for f in ("is_halted", "is_designated", "is_liquidation_window")]
+        volume = row["volume"]
+        basis = "observed_trading_value"
+        if value is None or not math.isfinite(value) or value <= 0:
+            if volume is not None and math.isfinite(volume) and volume > 0:
+                value, basis = float(price) * volume, "adjusted_close_times_volume_proxy"
+            elif value is None or not math.isfinite(value) or value < 0:
+                value, basis = 0.0, "missing"
+        if not math.isfinite(value):
+            raise ValueError("유동성 추정값이 유효하지 않습니다.")
+        if day >= str(config.start) and basis == "missing" and all(v is False for v in flags):
+            raise ValueError("거래 가능한 날의 거래대금·거래량이 모두 누락됐습니다.")
         bucket[code] = {
             "price": float(price),
             "trading_value": float(value)
             if value is not None and math.isfinite(value) and value >= 0
             else 0.0,
             "tradable": all(v is False for v in flags),
+            "liquidity_basis": basis,
         }
     bars = []
     market_dates = {Path(p).parent.name.removeprefix("dt=") for p in paths}
@@ -251,6 +266,14 @@ def simulate(
             target_signal_date = previous["date"]
         used = {k: 0 for k in qty}
         for side in ("sell", "buy"):
+            buy_budgets = {}
+            if side == "buy" and targets is not None:
+                needs = {
+                    k: max(0, targets[k] - qty[k]) * prices[k] * (1 + slip) * (1 + commission)
+                    for k in qty
+                }
+                total_need = sum(needs.values())
+                buy_budgets = {k: cash * needs[k] / total_need if total_need else 0 for k in qty}
             for leg in qty:
                 if targets is None or not bar[leg]["tradable"]:
                     continue
@@ -260,7 +283,10 @@ def simulate(
                 amount = min(wanted, max(0, limit - used[leg]))
                 price = prices[leg] * (1 + slip if side == "buy" else 1 - slip)
                 if side == "buy":
-                    amount = min(amount, int(max(0, cash) / (price * (1 + commission))))
+                    amount = min(
+                        amount,
+                        int(max(0, min(cash, buy_budgets[leg])) / (price * (1 + commission))),
+                    )
                 if not amount:
                     continue
                 fee = amount * price * (commission + (tax if side == "sell" else 0))
@@ -333,6 +359,21 @@ def analyze(snapshot: dict, config: PairConfig) -> dict:
             "excess_return_pct": stress["return_pct"] - stress_benchmark["return_pct"],
         },
         "validation": period_validation(snapshot, config, signal_rows),
+        "liquidity_coverage": {
+            leg: {
+                basis: sum(
+                    b[leg].get("liquidity_basis", "observed_trading_value") == basis
+                    for b in bars
+                    if b["date"] >= str(config.start)
+                )
+                for basis in (
+                    "observed_trading_value",
+                    "adjusted_close_times_volume_proxy",
+                    "missing",
+                )
+            }
+            for leg in ("common", "preferred")
+        },
         "signals": [s for s in signal_rows if s["date"] >= str(config.start)],
         "latest_signal": signal_rows[-1],
         "live_eligible": False,
@@ -341,6 +382,7 @@ def analyze(snapshot: dict, config: PairConfig) -> dict:
             "현금배당·권리·과거 호가·결제 및 체결순서는 재현하지 않습니다.",
             "현재 확인된 종목 관계로 선정되어 생존편향 가능성이 있습니다.",
             "최종 보유분은 평가 종료이며 청산 비용은 포함하지 않습니다.",
+            "거래대금 누락 시 수정종가×거래량을 추정치로 쓰며 실제 체결 한도가 아닙니다.",
             "외부평가·가상 체결·계좌 주문 검증 전에는 실거래로 전환할 수 없습니다.",
         ]
         + (

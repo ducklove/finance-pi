@@ -1,6 +1,6 @@
 """공식 자료로 기초지수를 확인한 연구 후보. 역사적 등가성이나 실행 승인은 아니다."""
 
-ETF_ENGINE_VERSION = "etf-switch-1"
+ETF_ENGINE_VERSION = "etf-switch-2"
 ETF_PAIRS = [
     {
         "common": "069500",
