@@ -10,11 +10,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from finance_pi.sources.gold.market_size import collect_market_size
 from finance_pi.sources.gold.prices import collect_history
 from finance_pi.sources.gold.trends import collect_trends
 
 
-def publish(data_root: Path, history: dict, trends: dict, research: dict) -> dict:
+def publish(
+    data_root: Path, history: dict, trends: dict, research: dict, market_size: dict | None = None
+) -> dict:
     """Publish one complete generation. Old current remains valid on any prior failure."""
     payload = {
         "schemaVersion": 1,
@@ -24,6 +27,8 @@ def publish(data_root: Path, history: dict, trends: dict, research: dict) -> dic
         "trends": trends,
         "research": research,
     }
+    if market_size is not None:
+        payload["marketSize"] = market_size
     directory = data_root / "research" / "gold"
     directory.mkdir(parents=True, exist_ok=True)
     content = json.dumps(payload, ensure_ascii=False, allow_nan=False).encode()
@@ -62,7 +67,8 @@ def refresh(data_root: Path) -> dict:
     history = collect_history()
     trends = collect_trends()
     research = json.loads(Path(prices.__file__).with_name("research.json").read_text())
-    return publish(data_root, history, trends, research)
+    market_size = collect_market_size(history, trends)
+    return publish(data_root, history, trends, research, market_size)
 
 
 def main() -> None:

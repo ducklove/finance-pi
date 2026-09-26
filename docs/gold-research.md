@@ -20,7 +20,8 @@ On a Pi serving the LAN, use the existing admin service and its configured port 
   "publishedAt": "2026-09-26T00:27:46.427826+00:00",
   "history": {"schemaVersion": 2, "assets": []},
   "trends": {"schemaVersion": 1, "mining": [], "reserves": []},
-  "research": {}
+  "research": {},
+  "marketSize": {"schemaVersion": 1}
 }
 ```
 
@@ -63,3 +64,11 @@ Source adapters live in `src/finance_pi/sources/gold/`. They use the existing re
 ```
 
 Tests cover price aggregation, partial/current months, missing values, IMF unit conversion, atomic refresh failure preservation, endpoint reads, missing snapshots and external authorization.
+
+## Annual market size projection
+
+`marketSize` contains stock, mining, marketCap, usDebt, goldDebtRatioPct, miningStockRatioPct and stockToFlowYears arrays, plus inputs, methodology and sources. Stock (1900–2025) is a reconstruction, not observed WGC history: anchor WGC/Metals Focus end-2025 at 219,891 tonnes, subtract subsequent annual USGS mining; assume no permanent losses and exclude recycled supply. The separate DS140 chart remains unchanged. This model extends DS140 with reviewed MCS 2025 output for 2023 and MCS 2026 output for 2024–2025.
+
+Market cap (1960–2025) is reconstructed end-year stock × 1,000,000 / 31.1034768 × World Bank December monthly-average USD price. It is not year-end closing market value. Debt (1993–2025) is Treasury Debt to the Penny Total Public Debt Outstanding at the final available December business date: nominal face amount including intragovernmental holdings. Gold/debt intersects available years; it compares global gold to US debt, not US gold collateral. Mining/stock divides calendar-year production by end-year stock; its reciprocal is not reserve depletion lifetime. Current incomplete calendar years are excluded.
+
+Review `market_size_inputs.json` annually against linked WGC and USGS publications; update anchor, extensions, review date and consumer methodology together. Treasury observations refresh automatically. Missing production years or failed Treasury retrieval abort the complete publication and preserve the previous snapshot. Tests in `test_gold_market_size.py` cover unit conversion, calendar alignment, reconstruction, pagination completeness and atomic failure preservation.
