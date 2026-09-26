@@ -309,6 +309,13 @@ Example prompts:
 - "2015년 이후 PBR 0.5 미만 종목의 1년 보유 수익률 분포를 보여줘"
 - "momentum_12_1 팩터를 2018-01-01부터 2020-12-31까지 백테스트하고 MDD와 비용 드래그를 알려줘"
 
+## Gold investment research
+
+The sibling All About Gold service reads versioned gold price, mining, reserve
+and ETF research snapshots through `GET /api/research/gold`. See
+[collection, API contract and setup](docs/gold-research.md). This projection has
+an explicit refresh command and is separate from the equity daily pipeline.
+
 ## Current Scope
 
 This repository includes:

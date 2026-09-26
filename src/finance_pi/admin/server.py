@@ -974,6 +974,12 @@ def _handler_for(state: AdminState) -> type[BaseHTTPRequestHandler]:
                     self._send_json(payload, status=status)
                 elif parsed.path == "/api/docs":
                     self._send_json(_api_docs_payload(state))
+                elif parsed.path == "/api/research/gold":
+                    if not self._authorized():
+                        return
+                    from finance_pi.research.gold import read_snapshot
+
+                    self._send_json(read_snapshot(state.paths.data_root))
                 elif parsed.path == "/api/research/pairs":
                     if not self._authorized():
                         return

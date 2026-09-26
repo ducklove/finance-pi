@@ -47,6 +47,11 @@ def build_api_docs_payload(
             "max_price_cells": max_price_cells,
         },
         "endpoints": {
+            "gold_research": {
+                "method": "GET",
+                "path": f"{base_url}/research/gold",
+                "description": "Versioned gold research snapshot: monthly spot/asset prices, annual mine output, official gold volumes, and curated source-attributed research. Read-only; collection is offline. Local/LAN or X-Admin-Token required. Missing snapshot returns 404.",
+            },
             "health": {
                 "method": "GET",
                 "path": f"{base_url}/health",
