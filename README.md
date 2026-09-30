@@ -316,6 +316,30 @@ and ETF research snapshots through `GET /api/research/gold`. See
 [collection, API contract and setup](docs/gold-research.md). This projection has
 an explicit refresh command and is separate from the equity daily pipeline.
 
+## Value Compass ecosystem
+
+finance-pi is internal infrastructure in the [Value Compass](https://ducklove.duckdns.org:3691)
+ecosystem.
+
+- **Registry id**: `finance-pi` (category `infra`, `visibility: internal`, `url: null`; canonical entry in
+  value-invest [`config/ecosystem.json`](https://github.com/ducklove/value-invest/blob/master/config/ecosystem.json)).
+  Internal entries stay server-side and are not part of the browser registry inside `vc-shell.js`.
+- **No shared UI assets**: the registry has `vendor: null`, so this repo vendors no `vc-shell.js`,
+  `vc-tokens.css` or theme-boot block and is not a `sync-ecosystem.mjs` target.
+- **Inbound deep links**: none. Consumers call the admin HTTP API (`:8400`) directly.
+- **Published data**: no Pages `summary.json`/`version.json`. The gold research `publishedAt` is reused
+  by all-about-gold as its summary `asOf`/`generatedAt`
+  ([data contract](https://github.com/ducklove/value-invest/blob/master/docs/ecosystem/data-contract.md) §4).
+- **Hub services used**: none. No held badges, `/api/internal/notify`, `/api/asset-quotes` or kis-proxy
+  (KIS is called directly with finance-pi's own credentials); alerts go to the optional
+  `FINANCE_PI_WEBHOOK_URL`.
+- **Consumers** (keep these response shapes stable; clients send `X-Admin-Token` when a token is set):
+  - hub (value-invest, `FINANCE_PI_BASE_URL`/`FINANCE_PI_API_TOKEN`): `/api/prices/close`,
+    `/api/prices/daily`, `/api/macro/indices`, `/api/macro/commodities`, `/api/fundamentals/basic`,
+    `/api/fundamentals/screener`, `/api/research/basis-analysis`
+  - all-about-gold: `GET /api/research/gold` (see [Gold investment research](#gold-investment-research))
+  - bond-mate: `/api/macro/{rates,fx}` as its first-priority source, falling back to public sources
+
 ## Current Scope
 
 This repository includes:
