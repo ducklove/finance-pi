@@ -61,3 +61,53 @@ def test_missing_snapshot_is_explicit(tmp_path):
     handler = _make_handler(AdminState(tmp_path), path="/api/research/gold", method="GET")
     handler.do_GET()
     assert _handler_response_status(handler) == 404
+
+
+def _releases(root):
+    return sorted((root / "research/gold/releases").glob("*.json"))
+
+
+def test_unchanged_content_adds_no_release_but_refreshes_current(tmp_path):
+    history = {"schemaVersion": 2, "generatedAt": "2026-09-29T00:00:00+00:00", "assets": [1]}
+    trends = {"schemaVersion": 1, "generatedAt": "2026-09-29T00:00:00+00:00", "mining": []}
+    first = gold.publish(tmp_path, history, trends, {"items": []})
+    [release] = _releases(tmp_path)
+    release_bytes = release.read_bytes()
+
+    # Next day: same data, only run timestamps differ.
+    history2 = {**history, "generatedAt": "2026-09-30T00:00:00+00:00"}
+    trends2 = {**trends, "generatedAt": "2026-09-30T00:00:00+00:00"}
+    second = gold.publish(tmp_path, history2, trends2, {"items": []})
+
+    assert _releases(tmp_path) == [release]
+    assert release.read_bytes() == release_bytes
+    assert gold.content_fingerprint(first) == gold.content_fingerprint(second)
+    current = gold.read_snapshot(tmp_path)
+    assert current["publishedAt"] == second["publishedAt"]
+    assert current["history"]["generatedAt"] == "2026-09-30T00:00:00+00:00"
+
+
+def test_changed_content_writes_a_new_release(tmp_path):
+    gold.publish(tmp_path, {"generatedAt": "a", "assets": [1]}, {}, {})
+    gold.publish(tmp_path, {"generatedAt": "b", "assets": [1, 2]}, {}, {})
+    assert len(_releases(tmp_path)) == 2
+    # Research metadata dates (e.g. a paper's publishedAt) are content, not run stamps.
+    gold.publish(tmp_path, {"generatedAt": "c", "assets": [1, 2]}, {}, {"publishedAt": "x"})
+    assert len(_releases(tmp_path)) == 3
+
+
+def test_corrupt_latest_release_is_superseded(tmp_path):
+    gold.publish(tmp_path, {"assets": [1]}, {}, {})
+    [release] = _releases(tmp_path)
+    release.write_bytes(b"{broken")
+    gold.publish(tmp_path, {"assets": [1]}, {}, {})
+    assert len(_releases(tmp_path)) == 2
+
+
+def test_unchanged_content_with_non_string_keys_is_deduplicated(tmp_path):
+    # JSON turns int keys into strings (and reorders them under sort_keys); the
+    # fingerprint must compare the serialized form with the release on disk.
+    trends = {"byYear": {2: "a", 10: "b"}, "points": (1, 2)}
+    gold.publish(tmp_path, {"generatedAt": "a"}, trends, {})
+    gold.publish(tmp_path, {"generatedAt": "b"}, trends, {})
+    assert len(_releases(tmp_path)) == 1

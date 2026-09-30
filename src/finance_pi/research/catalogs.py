@@ -5,6 +5,8 @@ import json
 import os
 import re
 import tempfile
+import threading
+import time
 from datetime import UTC, datetime, timedelta, timezone
 
 import httpx
@@ -15,6 +17,53 @@ BASES = {
     "eiayn": "https://ducklove.github.io/eiayn/data/research/v1/",
 }
 MAX_BYTES = 3_000_000
+# /api/research/pairs 요청마다 GitHub manifest를 다시 받지 않도록 짧게 캐시한다.
+# 스냅샷 본문은 sha256 주소라 로컬 보관본이 있으면 재다운로드하지 않는다.
+MANIFEST_TTL_SECONDS = 300.0
+
+_manifest_cache: dict[str, tuple[float, dict]] = {}
+_manifest_lock = threading.Lock()
+
+
+def clear_cache():
+    with _manifest_lock:
+        _manifest_cache.clear()
+
+
+def _forget_manifest(provider):
+    with _manifest_lock:
+        _manifest_cache.pop(provider, None)
+
+
+def _manifest(provider, base):
+    """계약 검증을 통과한 manifest만 TTL 동안 재사용한다(실패는 캐시하지 않는다)."""
+    now = time.monotonic()
+    with _manifest_lock:
+        cached = _manifest_cache.get(provider)
+        if cached and cached[0] > now:
+            return dict(cached[1])
+    manifest = decode(fetch_bytes(base + "manifest.json"))
+    sha = manifest.get("snapshot_id", "")
+    if (
+        manifest.get("schema_version") != 1
+        or manifest.get("provider") != provider
+        or not re.fullmatch(r"[a-f0-9]{64}", sha)
+        or manifest.get("path") != f"snapshots/{sha}.json"
+    ):
+        raise ValueError("전문 데이터 manifest 계약이 올바르지 않습니다.")
+    with _manifest_lock:
+        _manifest_cache[provider] = (now + MANIFEST_TTL_SECONDS, dict(manifest))
+    return manifest
+
+
+def _snapshot(path, url, sha):
+    """보관된 동일 sha 스냅샷이 있으면 로컬에서 읽고, 없을 때만 내려받는다."""
+    if path.is_file():
+        raw = path.read_bytes()
+        if hashlib.sha256(raw).hexdigest() != sha:
+            raise ValueError("보관된 연구 카탈로그가 변조됐습니다.")
+        return raw, True
+    return fetch_bytes(url), False
 
 
 def fetch_bytes(url):
@@ -101,31 +150,29 @@ def current(data_root, strategy):
     provider = PROVIDERS[strategy]
     base = BASES[provider]
     try:
-        manifest = decode(fetch_bytes(base + "manifest.json"))
-        sha = manifest.get("snapshot_id", "")
-        if (
-            manifest.get("schema_version") != 1
-            or manifest.get("provider") != provider
-            or not re.fullmatch(r"[a-f0-9]{64}", sha)
-            or manifest.get("path") != f"snapshots/{sha}.json"
-        ):
-            raise ValueError("전문 데이터 manifest 계약이 올바르지 않습니다.")
+        manifest = _manifest(provider, base)
+        sha = manifest["snapshot_id"]
         now = datetime.now(UTC)
         fresh(manifest["published_at"], now)
         fresh(manifest["data_as_of"], now)
-        raw = fetch_bytes(base + manifest["path"])
+        directory = data_root / "research/catalogs" / provider
+        raw, archived = _snapshot(directory / f"{sha}.json", base + manifest["path"], sha)
         data = validate(raw, provider, sha)
         if data.get("data_as_of") != manifest["data_as_of"]:
             raise ValueError("전문 데이터 기준일이 일치하지 않습니다.")
-        directory = data_root / "research/catalogs" / provider
-        archive(directory / f"{sha}.json", raw)
+        if not archived:
+            archive(directory / f"{sha}.json", raw)
         receipt = directory / f"{sha}.receipt.json"
         if not receipt.exists():
             archive(
                 receipt, json.dumps({"ingested_at": now.isoformat(), "manifest": manifest}).encode()
             )
         return data, sha
+    except ValueError:
+        _forget_manifest(provider)
+        raise
     except (httpx.HTTPError, OSError, KeyError, TypeError, AttributeError) as exc:
+        _forget_manifest(provider)
         raise ValueError(
             f"{provider} 연구 API를 검증하지 못했습니다. 기존 결과는 유지됩니다."
         ) from exc

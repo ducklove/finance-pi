@@ -41,6 +41,8 @@ def source(monkeypatch, *, change=None, manifest_change=None):
     }
     if manifest_change:
         manifest.update(manifest_change)
+    # 새 manifest 공개를 흉내 내므로 TTL 캐시를 비운다(운영에서는 최대 5분 뒤 반영).
+    catalogs.clear_cache()
     monkeypatch.setattr(
         catalogs,
         "fetch_bytes",
@@ -133,3 +135,56 @@ def test_duplicate_json_keys_and_nonfinite_values_rejected():
     for raw in (b'{"a":1,"a":2}', b'{"a":NaN}'):
         with pytest.raises(ValueError):
             catalogs.decode(raw)
+
+
+def counting_fetch(monkeypatch):
+    calls = []
+    inner = catalogs.fetch_bytes
+
+    def fetch(url):
+        calls.append(url.rsplit("/", 1)[-1])
+        return inner(url)
+
+    monkeypatch.setattr(catalogs, "fetch_bytes", fetch)
+    return calls
+
+
+def test_manifest_is_cached_and_archived_snapshot_is_read_locally(tmp_path, monkeypatch):
+    data, sha = source(monkeypatch)
+    calls = counting_fetch(monkeypatch)
+    first = catalogs.current(tmp_path, "preferred_switch")
+    assert calls == ["manifest.json", f"{sha}.json"]
+    for _ in range(3):
+        assert catalogs.current(tmp_path, "preferred_switch") == first
+    assert calls == ["manifest.json", f"{sha}.json"]  # 추가 네트워크 호출 없음
+
+    # 다른 data_root에는 보관본이 없으므로 캐시된 manifest로 스냅샷만 받는다.
+    other = tmp_path / "other"
+    assert catalogs.current(other, "preferred_switch") == first
+    assert calls == ["manifest.json", f"{sha}.json", f"{sha}.json"]
+
+
+def test_manifest_cache_expires_after_ttl(tmp_path, monkeypatch):
+    source(monkeypatch)
+    clock = [1000.0]
+    monkeypatch.setattr(catalogs.time, "monotonic", lambda: clock[0])
+    calls = counting_fetch(monkeypatch)
+    catalogs.current(tmp_path, "preferred_switch")
+    clock[0] += catalogs.MANIFEST_TTL_SECONDS - 1
+    catalogs.current(tmp_path, "preferred_switch")
+    assert calls.count("manifest.json") == 1
+    clock[0] += 2
+    catalogs.current(tmp_path, "preferred_switch")
+    # TTL 만료 후 manifest만 다시 받고, 같은 sha 스냅샷은 로컬 보관본을 쓴다.
+    assert calls.count("manifest.json") == 2
+    assert len(calls) == 3
+
+
+def test_failed_manifest_is_not_cached(tmp_path, monkeypatch):
+    source(monkeypatch, manifest_change={"provider": "other"})
+    with pytest.raises(ValueError):
+        catalogs.current(tmp_path, "preferred_switch")
+    assert catalogs._manifest_cache == {}
+    source(monkeypatch)
+    catalogs.current(tmp_path, "preferred_switch")
+    assert set(catalogs._manifest_cache) == {"common_preferred_spread"}

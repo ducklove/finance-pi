@@ -284,6 +284,7 @@ class AdminState:
     realtime_cache_seconds = 15.0
     quotes_cache_seconds = 15.0
     screener_cache_seconds = 300.0
+    readiness_cache_seconds = 45.0
     price_cache_max_entries = 512
 
     def __init__(self, root: Path, token: str | None = None) -> None:
@@ -303,6 +304,7 @@ class AdminState:
             tuple[float, dict[str, list[dict[str, Any]]]],
         ] = {}
         self._screener_cache: dict[date, tuple[float, dict[str, Any]]] = {}
+        self._readiness_cache: tuple[tuple[Any, ...], float, dict[str, Any]] | None = None
         self._job_slots = threading.BoundedSemaphore(_admin_max_jobs())
         self._price_query_slots = threading.BoundedSemaphore(_admin_max_price_queries())
         self._research_slot = threading.BoundedSemaphore(1)
@@ -1345,6 +1347,59 @@ def _health_payload(state: AdminState) -> dict[str, Any]:
 
 
 def _readiness_payload(state: AdminState) -> dict[str, Any]:
+    """Deep, path-redacted readiness check, reused for a short TTL.
+
+    /api/ready and /api/research/readiness are polled by the deploy gate, the hub
+    and dashboards; the deep check opens DuckDB and a Parquet partition each time.
+    The cache is keyed by the catalog/daily-marker fingerprint, so a finished daily
+    run or catalog rebuild is visible immediately, not after the TTL.
+    Only "ready" results are cached: a not_ready result (e.g. a transient DuckDB
+    lock) is recomputed on every call so the deploy gate's retries can recover.
+    """
+
+    key = _readiness_cache_key(state)
+    now = time.monotonic()
+    with state.lock:
+        cached = state._readiness_cache
+        if cached is not None and cached[0] == key and now - cached[1] < state.readiness_cache_seconds:
+            return deepcopy(cached[2])
+    payload = _compute_readiness_payload(state)
+    with state.lock:
+        state._readiness_cache = (
+            (key, now, deepcopy(payload)) if payload.get("status") == "ready" else None
+        )
+    return payload
+
+
+def _mtime_ns(path: Path) -> int | None:
+    try:
+        return path.stat().st_mtime_ns
+    except OSError:
+        return None
+
+
+def _readiness_cache_key(state: AdminState) -> tuple[Any, ...]:
+    marker_dir = state.paths.data_root / "_state" / "daily"
+    try:
+        markers = [entry for entry in os.scandir(marker_dir) if entry.name.endswith(".json")]
+    except OSError:
+        markers = []
+    latest_marker = 0
+    for entry in markers:
+        try:
+            latest_marker = max(latest_marker, entry.stat().st_mtime_ns)
+        except OSError:
+            continue
+    return (
+        _kst_today(),
+        _mtime_ns(state.paths.catalog_path),
+        _mtime_ns(state.paths.data_root / "gold" / "daily_prices_adj"),
+        len(markers),
+        latest_marker,
+    )
+
+
+def _compute_readiness_payload(state: AdminState) -> dict[str, Any]:
     """Deep, path-redacted readiness check for the catalog and latest prices."""
 
     checks: dict[str, Any] = {
@@ -1447,7 +1502,12 @@ def _readiness_catalog_snapshot(
         if latest_path is not None
         else None
     )
-    latest_rows = pl.read_parquet(latest_path).height if latest_path is not None else 0
+    # Row count from Parquet metadata only; no need to materialize the partition.
+    latest_rows = (
+        int(pl.scan_parquet(latest_path).select(pl.len()).collect().item())
+        if latest_path is not None
+        else 0
+    )
     with duckdb.connect(str(catalog_path), read_only=True) as conn:
         conn.execute("SELECT 1 FROM gold.daily_prices_adj LIMIT 1").fetchone()
         dataset_count = conn.execute("SELECT count(*) FROM metadata.datasets").fetchone()[0]

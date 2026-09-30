@@ -1722,6 +1722,74 @@ def test_admin_readiness_accepts_fresh_complete_catalog(tmp_path, monkeypatch) -
     assert payload["checks"]["price_age_trading_days"] == 0
 
 
+def test_admin_readiness_is_cached_until_ttl_or_marker_change(tmp_path, monkeypatch) -> None:
+    state = AdminState(tmp_path)
+    state.paths.data_root.mkdir(parents=True)
+    state.paths.catalog_path.parent.mkdir(parents=True)
+    state.paths.catalog_path.touch()
+    calls = 0
+
+    def snapshot(catalog_path, data_root):
+        nonlocal calls
+        calls += 1
+        return date(2026, 7, 10), 3_900, len(admin_server.dataset_registry)
+
+    monkeypatch.setattr(admin_server, "_kst_today", lambda: date(2026, 7, 11))
+    monkeypatch.setattr(admin_server, "_readiness_catalog_snapshot", snapshot)
+
+    first = _readiness_payload(state)
+    first["checks"]["latest_price_rows"] = "mutated by caller"
+    second = _readiness_payload(state)
+    assert calls == 1
+    assert second["status"] == "ready"
+    assert second["checks"]["latest_price_rows"] is True  # cached copy is not shared
+
+    # A finished daily run (new marker) invalidates the cache immediately.
+    marker_dir = state.paths.data_root / "_state" / "daily"
+    marker_dir.mkdir(parents=True)
+    (marker_dir / "2026-07-10.json").write_text(
+        json.dumps({"status": "failed", "failures": ["x"]}), encoding="utf-8"
+    )
+    third = _readiness_payload(state)
+    assert calls == 2
+    assert third["status"] == "not_ready"
+    assert third["checks"]["daily_marker_ok"] is False
+
+    # not_ready is never cached, so deploy-gate retries see a recovery at once.
+    _readiness_payload(state)
+    assert calls == 3
+    (marker_dir / "2026-07-10.json").write_text(
+        json.dumps({"status": "complete", "run_id": "retry"}), encoding="utf-8"
+    )
+    assert _readiness_payload(state)["status"] == "ready"
+    assert calls == 4
+    _readiness_payload(state)
+    assert calls == 4
+    state.readiness_cache_seconds = 0.0
+    _readiness_payload(state)
+    assert calls == 5
+
+
+def test_admin_readiness_snapshot_counts_rows_from_parquet_metadata(tmp_path) -> None:
+    import duckdb
+
+    data_root = tmp_path / "data"
+    for day, rows in (("2026-07-09", 3), ("2026-07-10", 5)):
+        part = data_root / "gold" / "daily_prices_adj" / f"dt={day}" / "part.parquet"
+        part.parent.mkdir(parents=True)
+        pl.DataFrame({"security_id": [f"S{i}" for i in range(rows)]}).write_parquet(part)
+    catalog = tmp_path / "catalog.duckdb"
+    with duckdb.connect(str(catalog)) as conn:
+        conn.execute("CREATE SCHEMA gold")
+        conn.execute("CREATE TABLE gold.daily_prices_adj AS SELECT 1 AS x")
+        conn.execute("CREATE SCHEMA metadata")
+        conn.execute("CREATE TABLE metadata.datasets AS SELECT * FROM range(7) t(n)")
+
+    latest, rows, datasets = admin_server._readiness_catalog_snapshot(catalog, data_root)
+
+    assert (latest, rows, datasets) == (date(2026, 7, 10), 5, 7)
+
+
 def test_admin_readiness_endpoint_returns_503_when_not_ready(tmp_path) -> None:
     handler = _make_handler(
         AdminState(tmp_path),
