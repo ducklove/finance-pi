@@ -53,6 +53,39 @@ KRX_HOLIDAYS_BY_YEAR: dict[int, frozenset[date]] = {
             date(2026, 12, 31),
         }
     ),
+    # value-invest domain/market_calendar.py (krx-2026-2027-reviewed-20260916)와 동일.
+    # 근거: 우주항공청 2026-06-29 월력요항 + KRX 휴장 규칙(근로자의 날·연말 휴장).
+    # 주말에 걸친 공휴일도 원본 목록 그대로 둔다(주말은 어차피 비거래일).
+    # 임시 휴장·수능일 개장시간 변경은 KRX 공지 확인 후 반영한다.
+    2027: frozenset(
+        {
+            date(2027, 1, 1),
+            date(2027, 2, 6),
+            date(2027, 2, 7),
+            date(2027, 2, 8),
+            date(2027, 2, 9),
+            date(2027, 3, 1),
+            date(2027, 5, 1),
+            date(2027, 5, 3),
+            date(2027, 5, 5),
+            date(2027, 5, 13),
+            date(2027, 6, 6),
+            date(2027, 7, 17),
+            date(2027, 7, 19),
+            date(2027, 8, 15),
+            date(2027, 8, 16),
+            date(2027, 9, 14),
+            date(2027, 9, 15),
+            date(2027, 9, 16),
+            date(2027, 10, 3),
+            date(2027, 10, 4),
+            date(2027, 10, 9),
+            date(2027, 10, 11),
+            date(2027, 12, 25),
+            date(2027, 12, 27),
+            date(2027, 12, 31),
+        }
+    ),
 }
 
 # Backward-compatible flat alias (2026 only) for existing importers.

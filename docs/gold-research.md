@@ -27,7 +27,7 @@ On a Pi serving the LAN, use the existing admin service and its configured port 
 
 The example omits observations. All dates inside price points use `YYYY-MM`; annual observations use `YYYY-12`. Mining describes calendar-year output; reserves describe year-end volume. Prices, tonnes and ratios are distinct measures and must retain their labels.
 
-A successful full refresh atomically replaces `data/research/gold/current.json` and saves a timestamped generation in `data/research/gold/releases/`. Failed collection leaves current unchanged. Consumers should display the publication and source dates; serving a prior successful generation does not make it live market data. Immutable releases retain the published normalized observations and source hashes, not every raw HTTP response.
+A successful full refresh atomically replaces `data/research/gold/current.json` and saves a timestamped generation in `data/research/gold/releases/`. When the content hash (canonical JSON without the top-level `publishedAt` and the per-section `generatedAt` run stamps) equals the latest release, no new release is written; `current.json` is still refreshed so `publishedAt` reflects the latest successful collection. Failed collection leaves current unchanged. Consumers should display the publication and source dates; serving a prior successful generation does not make it live market data. Immutable releases retain the published normalized observations and source hashes, not every raw HTTP response.
 
 ## Sources and definitions
 

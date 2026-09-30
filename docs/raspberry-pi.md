@@ -125,6 +125,10 @@ strict 설정을 사용합니다. `--no-strict`도 미완료 catch-up을 성공�
 갱신해야 합니다. 2026년 7월 17일 제헌절 휴장은
 [KRX 공지](https://kind.krx.co.kr/external/2026/05/20/000110/20260520000197/32154.htm)에
 따라 반영했습니다. 과거에 생성된 해당 휴장일의 실패 기록은 재시도에서 제외됩니다.
+2027년 휴장일은 value-invest `domain/market_calendar.py`의 검토본
+(`krx-2026-2027-reviewed-20260916`)과 같습니다. 오늘+60일이 휴장일 데이터가 없는 연도에
+들어가면 `tests/unit/test_trading_calendar.py`가 실패해 배포 게이트에서 미리 알립니다.
+`/api/ready` 결과는 최대 45초 캐시되며, daily marker·catalog·가격 파티션이 바뀌면 즉시 다시 계산합니다.
 
 Daily and catch-up runs skip the large `gold.fundamentals_pit` rebuild by
 default. Rebuild that derived cache manually when you need PIT fundamentals:
