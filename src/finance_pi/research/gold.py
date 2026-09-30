@@ -77,7 +77,9 @@ def publish(
         releases = directory / "releases"
         releases.mkdir(exist_ok=True)
         latest = _latest_release(releases)
-        if latest is not None and latest[1] == content_fingerprint(payload):
+        # Fingerprint the serialized form so it compares like-for-like with the
+        # release read back from disk (JSON round-trip normalizes keys/tuples).
+        if latest is not None and latest[1] == content_fingerprint(json.loads(content)):
             print(
                 f"gold research content unchanged; keeping release {latest[0].name}",
                 file=sys.stderr,

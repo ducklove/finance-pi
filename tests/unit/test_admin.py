@@ -1755,11 +1755,19 @@ def test_admin_readiness_is_cached_until_ttl_or_marker_change(tmp_path, monkeypa
     assert third["status"] == "not_ready"
     assert third["checks"]["daily_marker_ok"] is False
 
-    _readiness_payload(state)
-    assert calls == 2
-    state.readiness_cache_seconds = 0.0
+    # not_ready is never cached, so deploy-gate retries see a recovery at once.
     _readiness_payload(state)
     assert calls == 3
+    (marker_dir / "2026-07-10.json").write_text(
+        json.dumps({"status": "complete", "run_id": "retry"}), encoding="utf-8"
+    )
+    assert _readiness_payload(state)["status"] == "ready"
+    assert calls == 4
+    _readiness_payload(state)
+    assert calls == 4
+    state.readiness_cache_seconds = 0.0
+    _readiness_payload(state)
+    assert calls == 5
 
 
 def test_admin_readiness_snapshot_counts_rows_from_parquet_metadata(tmp_path) -> None:

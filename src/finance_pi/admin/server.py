@@ -1353,6 +1353,8 @@ def _readiness_payload(state: AdminState) -> dict[str, Any]:
     and dashboards; the deep check opens DuckDB and a Parquet partition each time.
     The cache is keyed by the catalog/daily-marker fingerprint, so a finished daily
     run or catalog rebuild is visible immediately, not after the TTL.
+    Only "ready" results are cached: a not_ready result (e.g. a transient DuckDB
+    lock) is recomputed on every call so the deploy gate's retries can recover.
     """
 
     key = _readiness_cache_key(state)
@@ -1363,7 +1365,9 @@ def _readiness_payload(state: AdminState) -> dict[str, Any]:
             return deepcopy(cached[2])
     payload = _compute_readiness_payload(state)
     with state.lock:
-        state._readiness_cache = (key, now, deepcopy(payload))
+        state._readiness_cache = (
+            (key, now, deepcopy(payload)) if payload.get("status") == "ready" else None
+        )
     return payload
 
 

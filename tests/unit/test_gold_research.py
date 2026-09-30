@@ -102,3 +102,12 @@ def test_corrupt_latest_release_is_superseded(tmp_path):
     release.write_bytes(b"{broken")
     gold.publish(tmp_path, {"assets": [1]}, {}, {})
     assert len(_releases(tmp_path)) == 2
+
+
+def test_unchanged_content_with_non_string_keys_is_deduplicated(tmp_path):
+    # JSON turns int keys into strings (and reorders them under sort_keys); the
+    # fingerprint must compare the serialized form with the release on disk.
+    trends = {"byYear": {2: "a", 10: "b"}, "points": (1, 2)}
+    gold.publish(tmp_path, {"generatedAt": "a"}, trends, {})
+    gold.publish(tmp_path, {"generatedAt": "b"}, trends, {})
+    assert len(_releases(tmp_path)) == 1
