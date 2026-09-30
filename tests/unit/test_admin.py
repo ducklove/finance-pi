@@ -1281,7 +1281,9 @@ def test_admin_daily_prices_rejects_large_requests(tmp_path, monkeypatch) -> Non
     try:
         AdminState(tmp_path).daily_prices(
             {
-                "ticker": ["005930"],
+                # The general day limit applies to multi-ticker requests; a single
+                # ticker has its own full-history limit (see the test below).
+                "tickers": ["005930,000660"],
                 "since": ["2026-04-29"],
                 "until": ["2026-04-30"],
             }
@@ -2168,3 +2170,28 @@ def test_admin_readiness_surfaces_daily_warnings_without_blocking(tmp_path, monk
     assert payload["checks"]["daily_warnings"] == [
         "OpenDART company ingest degraded: status 800"
     ]
+
+
+def test_admin_single_ticker_full_history_uses_its_own_day_limit(tmp_path, monkeypatch) -> None:
+    # value-invest requests one ticker since 1985-01-01 for stock analysis. That used to
+    # hit the 3700-day limit (HTTP 400) for every stock; a single ticker now has a
+    # separate, larger limit while multi-ticker requests keep the general one.
+    from finance_pi.admin.server import _validate_price_request
+
+    monkeypatch.delenv("FINANCE_PI_ADMIN_MAX_PRICE_DAYS", raising=False)
+    monkeypatch.delenv("FINANCE_PI_ADMIN_MAX_SINGLE_TICKER_PRICE_DAYS", raising=False)
+    _validate_price_request(["0165X0"], date(1985, 1, 1), date(2026, 12, 31))
+    try:
+        _validate_price_request(["005930", "000660"], date(1985, 1, 1), date(2026, 12, 31))
+    except ValueError as exc:
+        assert "max days is 3700" in str(exc)
+    else:
+        raise AssertionError("multi-ticker requests keep the general day limit")
+
+    monkeypatch.setenv("FINANCE_PI_ADMIN_MAX_SINGLE_TICKER_PRICE_DAYS", "10")
+    try:
+        _validate_price_request(["005930"], date(2026, 1, 1), date(2026, 1, 31))
+    except ValueError as exc:
+        assert "max days is 10" in str(exc)
+    else:
+        raise AssertionError("expected the single-ticker limit to be configurable")

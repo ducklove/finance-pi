@@ -91,6 +91,9 @@ DEFAULT_MAX_ADMIN_JOBS = 1
 DEFAULT_MAX_PRICE_QUERIES = 4
 DEFAULT_MAX_PRICE_TICKERS = 500
 DEFAULT_MAX_PRICE_DAYS = 3700
+# A single ticker's full history (e.g. value-invest asks since=1985-01-01) is cheap:
+# rows exist only for trading days since listing, and MAX_PRICE_CELLS still applies.
+DEFAULT_MAX_SINGLE_TICKER_PRICE_DAYS = 366 * 60
 DEFAULT_PRICE_QUERY_WAIT_SECONDS = 15.0
 MAX_PRICE_CELLS = 200_000
 MAX_JOBS_RETAINED = 50
@@ -1568,6 +1571,12 @@ def _admin_max_price_days() -> int:
     return _positive_int_env("FINANCE_PI_ADMIN_MAX_PRICE_DAYS", DEFAULT_MAX_PRICE_DAYS)
 
 
+def _admin_max_single_ticker_price_days() -> int:
+    return _positive_int_env(
+        "FINANCE_PI_ADMIN_MAX_SINGLE_TICKER_PRICE_DAYS", DEFAULT_MAX_SINGLE_TICKER_PRICE_DAYS
+    )
+
+
 def _positive_int_env(name: str, default: int) -> int:
     value = os.environ.get(name, "")
     if not value:
@@ -1717,8 +1726,11 @@ def _validate_price_request(tickers: list[str], since: date, until: date) -> Non
     if len(tickers) > _admin_max_price_tickers():
         raise ValueError(f"too many tickers; max is {_admin_max_price_tickers()}")
     days = (until - since).days + 1
-    if days > _admin_max_price_days():
-        raise ValueError(f"date range is too large; max days is {_admin_max_price_days()}")
+    max_days = (
+        _admin_max_single_ticker_price_days() if len(tickers) == 1 else _admin_max_price_days()
+    )
+    if days > max_days:
+        raise ValueError(f"date range is too large; max days is {max_days}")
     if len(tickers) * days > MAX_PRICE_CELLS:
         raise ValueError(
             f"tickers x days is too large; max is {MAX_PRICE_CELLS} "
